@@ -32,14 +32,18 @@ def _images_root(version: Path) -> Path:
     return ops / "Images"
 
 
-def _row(conn: sqlite3.Connection, printing_id: str, face_index: int):
-    return conn.execute("""SELECT p.printing_id,p.collector_number,e.code,e.name,
+_READY_ROW_SQL = """SELECT p.printing_id,p.collector_number,e.code,e.name,
         s.face_index,a.asset_id,a.relative_path,
         COALESCE((SELECT COALESCE(NULLIF(sr.printed_name,''),sr.name) FROM source_records sr
                   WHERE sr.printing_id=p.printing_id ORDER BY CASE sr.lang WHEN 'fr' THEN 0 ELSE 1 END LIMIT 1),'Carte') AS card_name
         FROM printings p JOIN editions e USING(set_id)
         JOIN image_slots s USING(printing_id) JOIN image_assets a USING(asset_id)
-        WHERE p.printing_id=? AND s.face_index=? AND s.status='ready'""", (printing_id, face_index)).fetchone()
+        WHERE s.status='ready'"""
+
+
+def _row(conn: sqlite3.Connection, printing_id: str, face_index: int):
+    return conn.execute(_READY_ROW_SQL + " AND p.printing_id=? AND s.face_index=?",
+                        (printing_id, face_index)).fetchone()
 
 
 def _mirror_row(version: Path, row: sqlite3.Row) -> Path:
@@ -94,9 +98,9 @@ def synchronize_organized_images(catalogue_root: Path) -> dict[str, int]:
     db, version = current["database"], current["database"].parent
     with sqlite3.connect(db) as conn:
         conn.row_factory = sqlite3.Row
-        keys = conn.execute("SELECT printing_id,face_index FROM image_slots WHERE status='ready' ORDER BY printing_id,face_index").fetchall()
-        rows = [_row(conn, key["printing_id"], key["face_index"]) for key in keys]
-    counts = {"ready": len(rows), "organized": 0, "missing": 0}
+        ready_count = conn.execute("SELECT COUNT(*) FROM image_slots WHERE status='ready'").fetchone()[0]
+        rows = conn.execute(_READY_ROW_SQL + " ORDER BY p.printing_id,s.face_index").fetchall()
+    counts = {"ready": ready_count, "organized": 0, "missing": ready_count - len(rows)}
     for row in rows:
         if row is None:
             counts["missing"] += 1

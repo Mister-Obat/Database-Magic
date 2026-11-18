@@ -27,9 +27,9 @@ d'une variante sélectionnée publie un nouvel asset.
 2. `local_app.py` vérifie taille du corps, origine, champs et ID, puis appelle
    `image_download.download_printing` ; un autre POST peut demander l’annulation
    de la tâche.
-3. Le module résout l’impression et lit uniquement les lignes source FR/EN qui lui
+3. Le module résout l’impression et lit uniquement les lignes source FR/EN/JA/PH qui lui
    appartiennent. Un slot déjà prêt est vérifié localement avant tout GET.
-4. Les URL `image_uris` de la face sont tentées en FR puis en EN, au plus trois
+4. Les URL `image_uris` de la face sont tentées en FR puis EN, JA et PH, au plus trois
    GET par langue et face ; les URL Scryfall sont limitées à l'hôte HTTPS
    `cards.scryfall.io`. La relance approfondie peut
    aussi utiliser l’entrée exacte de `image_sources_manual.json`; son hôte HTTPS
@@ -40,7 +40,7 @@ d'une variante sélectionnée publie un nouvel asset.
    Une simple correspondance de titre d'article reste une candidate de la loupe
    et n'est jamais publiée automatiquement.
 5. La réponse doit être une image de taille bornée, décodable et de dimensions
-   valides. La première bonne résolution FR ou EN arrête la recherche ; sinon le
+   valides. La première bonne résolution disponible arrête la recherche ; sinon le
    meilleur candidat examiné est retenu.
 6. Le fichier est converti en WebP, nommé par son SHA-256 et écrit dans la version
    active. `images.json`, `image_assets` et `image_slots` reçoivent le chemin, la

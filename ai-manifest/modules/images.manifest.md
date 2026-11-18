@@ -3,7 +3,7 @@
 ## Responsabilité
 
 Pour une impression et une face existantes, chercher une image française puis
-anglaise puis japonaise dans les URL Scryfall de ses enregistrements source, valider le fichier,
+anglaise puis japonaise puis phyrexiane dans les URL Scryfall de ses enregistrements source, valider le fichier,
 le convertir en WebP et publier son état local. Aucune image blanche n’est créée
 pour un échec.
 Si la ligne française Scryfall manque, le téléchargement normal peut utiliser
@@ -26,11 +26,20 @@ reste réservée à la prévisualisation avec choix humain.
 - Les mêmes images prêtes sont présentées de façon permanente sous
   `_bibliotheque_mtg/Images/<édition>/`, par impression et face, avec un lien
   physique lorsque le volume le permet. Ce miroir est aussi reconstruit au
-  démarrage depuis la base active pour récupérer une interruption. Les noms
+  démarrage depuis la base active pour récupérer une interruption. La lecture
+  des slots prêts et de leurs métadonnées est groupée en une requête avant
+  vérification des fichiers. Les noms
   comprennent le code et le nom d'édition, le numéro de collection, le nom de la
   carte, la face et un suffixe dérivé de l'identité d'impression.
 - `tests_v2/test_download_v2.py` couvre langues, faces, budget, erreurs réseau,
   reprise et réparation.
+- Le téléchargement groupé peut chevaucher au plus quatre GET d'images. Les
+  départs vers `cards.scryfall.io` sont espacés d'au moins 250 ms, et un 429
+  reporte globalement les suivants selon `Retry-After`. Le journal et la
+  publication restent sérialisés ; les appels de téléchargement individuels
+  conservent leur comportement ordinaire. Un import manuel reste autorisé
+  pendant ce lot ; avant de publier une image récupérée, le lot revérifie le
+  slot pour conserver une image publiée entre-temps.
 
 Les anciens algorithmes de `images.py` servent au
 [parcours historique](historique.manifest.md) ; le bouton de l’application V2
@@ -40,12 +49,12 @@ appelle `image_download.py`.
 
 1. `download_printing(provider_id, catalogue_root, ledger_path, face_indexes, repair, ...)`
    résout l’ID fournisseur en `printing_id` et exige une édition éligible.
-2. Le module charge les lignes source FR, EN et JA de la même impression, puis les
+2. Le module charge les lignes source FR, EN, JA et PH de la même impression, puis les
    `image_uris` de la face demandée.
 3. Il tente FR avant EN puis JA, avec au plus trois GET par langue et par face. Les deux
    dimensions source doivent dépasser 400 px et l’image ne doit pas être presque
    unicolore. Le premier candidat français conforme est préféré ; sinon le premier
-   candidat anglais conforme est retenu, puis japonais si nécessaire.
+   candidat anglais conforme est retenu, puis japonais ou phyrexian si nécessaire.
 4. `_fetch` autorise en production seulement `https://cards.scryfall.io`, interdit
    les redirections, exige un type image et borne la réponse à 20 MiB.
 5. Pillow vérifie le décodage et les dimensions, applique l’orientation EXIF,

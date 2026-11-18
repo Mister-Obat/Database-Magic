@@ -23,7 +23,7 @@ PRECON_CONFIG = "precons"
 PRECON_SPLIT = "train"
 DEFAULT_DB = Path(__file__).resolve().parents[3] / "state" / "preconstructed-decks.sqlite"
 SECTIONS = ("mainboard", "sideboard", "commander", "display_commander", "planar_deck", "scheme_deck", "tokens")
-MAX_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 200
 SUPPORTED_DECK_TYPES = (
     "Advanced Deck", "Archenemy Deck", "Arena Promotional Deck", "Arena Starter Deck", "Arena Starter Kit",
     "Brawl Deck", "Challenge Deck", "Challenger Deck", "Clash Pack", "Dandan Deck",
@@ -265,6 +265,8 @@ def _insert_cards(conn: sqlite3.Connection, deck_id: str, deck: dict[str, Any], 
         return
     color_identity = set()
     for row in rows:
+        if row[1] in {"tokens", "planar_deck", "scheme_deck"}:
+            continue
         card = json.loads(row[-1])
         values = card.get("colorIdentity") or card.get("color_identity") or []
         color_identity.update(str(value).upper() for value in values if str(value).upper() in "WUBRG")
@@ -342,7 +344,13 @@ def ensure_deck_index(db_path: str | Path = DEFAULT_DB, *, refresh: bool = False
                 count = 0
         if count:
             _apply_doctor_who_planechase(target)
-            _reindex_loaded_colors(target)
+            with _connect(target) as conn:
+                migrated = conn.execute("SELECT 1 FROM deck_meta WHERE key='playable_colors_v1'").fetchone()
+            if not migrated:
+                _reindex_loaded_colors(target)
+                with _connect(target) as conn:
+                    conn.execute("INSERT OR REPLACE INTO deck_meta(key,value) VALUES('playable_colors_v1','1')")
+                    conn.commit()
             if progress:
                 progress(1.0, "Index des decks déjà disponible")
             return {"decks": count, "loaded": 0, "refreshed": 0}
@@ -375,6 +383,9 @@ def ensure_deck_index(db_path: str | Path = DEFAULT_DB, *, refresh: bool = False
         progress(0.96, "Application des compléments…")
     _apply_doctor_who_planechase(target)
     _reindex_loaded_colors(target)
+    with _connect(target) as conn:
+        conn.execute("INSERT OR REPLACE INTO deck_meta(key,value) VALUES('playable_colors_v1','1')")
+        conn.commit()
     result["refreshed"] = 1
     if progress:
         progress(1.0, f"{result['decks']} decks disponibles")
@@ -506,7 +517,7 @@ def _fetch_deck_color(file_name: str, oracle_colors: dict[str, set[str]], timeou
     identities: set[str] = set()
     unresolved = False
     for section, cards in _section_values(deck).items():
-        if section in {"planar_deck", "scheme_deck"}:
+        if section in {"tokens", "planar_deck", "scheme_deck"}:
             continue
         if not isinstance(cards, list):
             raise ValueError(f"Section MTGJSON invalide pour {file_name}: {section}")
@@ -905,7 +916,7 @@ def _reindex_loaded_colors(db_path: str | Path) -> None:
         with conn:
             for row in conn.execute("SELECT id FROM decks WHERE loaded=1"):
                 identities = set()
-                for card_row in conn.execute("SELECT raw_json FROM deck_cards WHERE deck_id=?", (row["id"],)):
+                for card_row in conn.execute("SELECT raw_json FROM deck_cards WHERE deck_id=? AND section NOT IN ('tokens','planar_deck','scheme_deck')", (row["id"],)):
                     card = json.loads(card_row[0])
                     values = card.get("colorIdentity") or card.get("color_identity") or []
                     identities.update(str(value).upper() for value in values if str(value).upper() in "WUBRG")

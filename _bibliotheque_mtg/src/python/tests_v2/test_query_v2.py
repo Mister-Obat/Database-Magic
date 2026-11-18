@@ -44,6 +44,32 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual(1,result['total'])
         self.assertEqual('fr-1',result['items'][0]['provider_card_id'])
 
+    def test_phyrexian_printed_name_uses_readable_canonical_name(self):
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute("DELETE FROM source_records WHERE provider_card_id='fr-1'")
+            conn.execute("DELETE FROM source_search WHERE provider_card_id='fr-1'")
+            conn.execute("DELETE FROM printing_languages WHERE provider_card_id='fr-1'")
+            conn.execute("UPDATE source_records SET lang='ph', printed_name='|Ducg,norn', "
+                         "printed_type_line='|MewkfuDs', printed_text='|gOcdrd' WHERE provider_card_id='en-1'")
+            conn.execute("UPDATE source_search SET lang='ph', printed_name='|Ducg,norn', "
+                         "printed_type_line='|MewkfuDs', printed_text='|gOcdrd' WHERE provider_card_id='en-1'")
+            conn.commit()
+        finally:
+            conn.close()
+        card = card_detail(self.db, 'en-1')['card']
+        self.assertIsNone(card['printed_name'])
+        self.assertIsNone(card['printed_type_line'])
+        self.assertIsNone(card['printed_text'])
+        self.assertEqual(card['oracle_text'], card['display_text']['value'])
+        self.assertIsNone(next(t['printed_name'] for t in card['translations'] if t['lang'] == 'ph'))
+        self.assertIsNone(search_cards(self.db, 'Forest', language='ph')['items'][0]['printed_name'])
+        conn = sqlite3.connect(self.db)
+        try:
+            self.assertEqual('|Ducg,norn', conn.execute("SELECT printed_name FROM source_records WHERE provider_card_id='en-1'").fetchone()[0])
+        finally:
+            conn.close()
+
     def test_partial_french_and_english_text_match_with_edition_and_display_language(self):
         for term in ('Forê', 'Fores', 'Rule'):
             result=search_cards(self.db,term,set_code='s1',language='fr')
@@ -132,7 +158,7 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual(2, search_cards(self.db, set_code='s1,s2')['total'])
         self.assertEqual(1, search_cards(self.db, 'Set One')['total'])
 
-    def test_edition_cards_show_one_french_record_per_oracle_before_pagination(self):
+    def test_edition_cards_show_one_language_per_printing_before_pagination(self):
         result = edition_cards(self.db, 's1', limit=1)
         self.assertEqual(1, result['total'])
         self.assertEqual(['fr-1'], [item['provider_card_id'] for item in result['items']])
@@ -152,8 +178,9 @@ class QueryV2Tests(unittest.TestCase):
         finally:
             conn.close()
         result = edition_cards(self.db, 's1')
-        self.assertEqual(1, result['total'])
+        self.assertEqual(2, result['total'])
         self.assertEqual('fr-1', result['items'][0]['provider_card_id'])
+        self.assertEqual('en-variant', result['items'][1]['provider_card_id'])
 
         conn = sqlite3.connect(self.db)
         try:
@@ -162,13 +189,32 @@ class QueryV2Tests(unittest.TestCase):
         finally:
             conn.close()
         result = edition_cards(self.db, 's1')
-        self.assertEqual(1, result['total'])
+        self.assertEqual(2, result['total'])
         self.assertEqual('en', result['items'][0]['lang'])
 
     def test_edition_and_search_pages_allow_300(self):
         self.assertEqual(300, edition_cards(self.db, 's1', limit=300)['limit'])
         self.assertEqual(300, edition_cards(self.db, 's1', limit=1000)['limit'])
         self.assertEqual(300, search_cards(self.db, limit=300)['limit'])
+
+    def test_edition_keeps_phyrexian_number_sharing_an_oracle_with_english(self):
+        conn = sqlite3.connect(self.db)
+        try:
+            original = list(conn.execute("SELECT * FROM source_records WHERE provider_card_id='en-1'").fetchone())
+            conn.execute("INSERT INTO printings SELECT ?,set_id,?,oracle_id,layout,illustration_id,"
+                         "identity_status,identity_evidence,variant_attributes_json FROM printings LIMIT 1",
+                         ('phyrexian-printing', '213'))
+            original[0], original[1], original[2] = 'ph-213', 'phyrexian-printing', 'ph'
+            original[5] = None
+            conn.execute("INSERT INTO source_records VALUES (" + ",".join("?" for _ in original) + ")", original)
+            conn.commit()
+        finally:
+            conn.close()
+        result = edition_cards(self.db, 's1')
+        self.assertEqual(2, result['total'])
+        self.assertEqual({'1', '213'}, {item['collector_number'] for item in result['items']})
+        self.assertEqual('ph-213', next(item['provider_card_id'] for item in result['items']
+                                        if item['collector_number'] == '213'))
 
     def test_image_filter_and_added_order_use_local_webp_dates(self):
         conn = sqlite3.connect(self.db)
@@ -180,6 +226,7 @@ class QueryV2Tests(unittest.TestCase):
             record = list(conn.execute("SELECT * FROM source_records WHERE provider_card_id='en-1'").fetchone())
             record[0], record[1] = 'other-card', 'other-printing'
             conn.execute("INSERT INTO source_records VALUES(" + ",".join("?" for _ in record) + ")", record)
+            conn.execute("INSERT INTO source_search SELECT 'other-card',set_code,lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text FROM source_search WHERE provider_card_id='en-1'")
             conn.execute("INSERT INTO card_faces SELECT 'other-printing',face_index,physical_image FROM card_faces WHERE printing_id=?", (first,))
             conn.execute("INSERT INTO image_slots SELECT printing_id,face_index,'fr',NULL,'missing',NULL,'{}' FROM card_faces WHERE printing_id=?", (first,))
             conn.execute("INSERT INTO image_slots SELECT printing_id,face_index,'fr',NULL,'missing',NULL,'{}' FROM card_faces WHERE printing_id='other-printing'")
@@ -198,6 +245,17 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual(['other-printing', first], [item['printing_id'] for item in search_cards(self.db, image_filter='with', result_sort='added_desc')['items']])
         self.assertEqual([first, 'other-printing'], [item['printing_id'] for item in search_cards(self.db, image_filter='with', result_sort='added_asc')['items']])
         self.assertEqual(['other-printing', first], [item['printing_id'] for item in search_cards(self.db, result_sort='added_desc')['items']])
+        # The pre-tracking catalogue has a shared addition timestamp.
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute("UPDATE printing_added SET added_at='2026-11-18T00:00:00Z'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(['other-printing', first], [item['printing_id'] for item in search_cards(self.db, result_sort='added_desc')['items']])
+        self.assertEqual([first, 'other-printing'], [item['printing_id'] for item in search_cards(self.db, result_sort='added_asc')['items']])
+        self.assertEqual(['other-printing', first], [item['printing_id'] for item in search_cards(self.db, 'Forest', result_sort='added_desc')['items']])
+        self.assertEqual([first, 'other-printing'], [item['printing_id'] for item in search_cards(self.db, 'Forest', result_sort='added_asc')['items']])
         with self.assertRaises(ValueError):
             search_cards(self.db, image_filter='invalid')
 

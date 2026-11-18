@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,6 +72,24 @@ class AtomicBuildV23Tests(unittest.TestCase):
             self.assertEqual('confirmed',row[0])
             self.assertTrue(row[1].startswith('v2prn_'))
         finally: c.close()
+
+    def test_phyrexian_source_keeps_raw_text_but_indexes_readable_name(self):
+        record=dict(self.record,lang='ph',name='Vorinclex, Voice of Hunger',
+                    printed_name='|lornScs',printed_type_line='|MewkfuDs',
+                    printed_text='|gOcdrd')
+        with gzip.open(self.archive,'wt',encoding='utf-8') as archive:
+            archive.write(json.dumps(record)+'\n')
+        target=self.root/'phyrexian.sqlite'
+        self._build(target)
+        with closing(sqlite3.connect(target)) as conn:
+            row=conn.execute("SELECT name,printed_name,type_line,printed_type_line,printed_text,raw_json FROM source_records").fetchone()
+            self.assertEqual(('Vorinclex, Voice of Hunger',None,'Creature',None,None),row[:5])
+            self.assertEqual('|lornScs',json.loads(row[5])['printed_name'])
+            self.assertEqual(('', '', ''),conn.execute("SELECT printed_name,printed_type_line,printed_text FROM source_search").fetchone())
+        exported=json.loads((self.root/'exports'/'tst-fixture-set'/'index.json').read_text(encoding='utf-8'))['cards'][0]
+        self.assertIsNone(exported['printed_name'])
+        self.assertIsNone(exported['printed_type_line'])
+        self.assertIsNone(exported['printed_text'])
 
     def test_interruption_before_replace_preserves_active_catalogue(self):
         target=self._old_target(); before=hashlib.sha256(target.read_bytes()).hexdigest()

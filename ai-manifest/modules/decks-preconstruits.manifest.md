@@ -124,7 +124,9 @@ cartes V2 et de son cycle de publication.
   est incomplète ; l'indexation ne remplace pas les métadonnées locales. Le fetch
   de composition reste limité au deck explicitement sélectionné.
 - Les couleurs sont null tant que la composition n'est pas chargée ; après
-  chargement, elles sont calculées depuis les identités de couleur des cartes.
+  chargement, elles sont calculées depuis les identités de couleur des cartes
+  jouables, hors jetons, cartes de plan et machinations. Un jeton dérivé ne
+  modifie jamais l'identité de couleur indexée du deck.
   Un filtre couleur ne renvoie que les decks indexés couleur.
 - Le filtre accepte W/U/B/R/G et C ; `C` sélectionne uniquement les decks
   indexés incolores (`colors=''`) et ne peut pas être combiné avec W/U/B/R/G.

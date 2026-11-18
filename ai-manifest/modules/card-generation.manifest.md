@@ -3,10 +3,10 @@
 ## Responsabilité
 
 Régénérer une carte Magic complète en français à partir d'une image visuelle et
-soit d'une image française, soit de métadonnées françaises vérifiées, avec l’outil
-image natif du Codex CLI connecté localement. L’image visuelle guide l’art, la
-composition et le cadre; l’image de carte française, lorsqu'elle existe, est
-l’autorité de tout le texte imprimé. Une image IA précédente peut être
+soit du texte transcrit d'une image française, soit de métadonnées françaises
+vérifiées, avec l’outil image natif du Codex CLI connecté localement. L’image
+visuelle guide l’art, la composition et le cadre; l'image de référence textuelle
+n'est jamais jointe à l'appel imagegen. Une image IA précédente peut être
 jointe pour une tentative de correction. Le module produit une candidate PNG
 pour revue explicite; il ne modifie pas le catalogue ou ses slots.
 
@@ -19,6 +19,11 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   et retourne un identifiant opaque, le chemin de candidate, son SHA-256, les
   dimensions et la provenance fournisseur. L’interface pilote la boucle de
   correction et peut transmettre la candidate précédente.
+- `extract_card_text_reference(image_path, translate_to_french=False, ...)`
+  utilise un tour Codex textuel isolé pour transcrire les champs visibles de
+  l'image de référence textuelle, puis valide sa réponse JSON. En cas de texte
+  illisible ou de sortie invalide, la tâche échoue sans lancer imagegen. Une
+  correction réutilise la transcription attachée à la candidate précédente.
 - Le mode texte accepte une seule image visuelle, quelle que soit sa langue.
   L'application lit le nom, les capacités, les coûts, les types et autres champs
   de règles depuis les enregistrements locaux associés à l'impression ou au même
@@ -34,7 +39,9 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   texte Oracle anglais peut identifier la carte, mais ne doit jamais être
   traduit ou présenté comme texte français officiel. Une ligne FR
   d'une autre impression du même oracle peut être utilisée seulement si les
-  champs pertinents et la structure des faces concordent sans ambiguïté ; sa
+  champs pertinents et la structure des faces concordent. Si plusieurs textes
+  compatibles diffèrent, l'impression exacte prime, puis la première variante
+  dans l'ordre stable de la base est choisie sans bloquer la génération. Sa
   provenance de traduction inter-impressions est affichée. Dans le sélecteur
   d'images, une image française d'une autre impression au nom FR identique et à
   la même structure de faces peut aussi être choisie explicitement comme référence
@@ -54,7 +61,7 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   textuelle ; elle reste `visual_only` pour le choix de publication.
 - Quand l'utilisateur choisit les informations de la base locale, l'interface
   précontrôle le texte français avant de démarrer imagegen. Si aucun texte officiel
-  unique et compatible n'existe, elle affiche l'avertissement « pas de traduction
+  compatible n'existe, elle affiche l'avertissement « pas de traduction
   française officielle dans votre database », un prompt utilisateur facultatif,
   ainsi que les actions retour/annuler ou envoyer quand même. Le mode explicite
   d'envoi sans traduction demande alors au modèle de traduire lui-même le texte
@@ -86,11 +93,15 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   privé pour isoler la sortie. Les variables `OPENAI_API_KEY`, `CODEX_API_KEY` et
   `HF_API_KEY` ne sont pas transmises. Le CLI est lancé avec `--ephemeral`,
   `--sandbox read-only`, `--json` et l’outil `image_generation` activé.
-- Les deux références obligatoires et la candidate précédente facultative sont
-  normalisées en PNG et attachées explicitement au tour CLI. Le prompt demande
-  une carte complète : référence anglaise pour la composition, française pour la
-  reproduction exacte de chaque texte visible, et candidate précédente comme
-  base d’une éventuelle correction.
+- La référence textuelle, lorsqu'elle est une image, est envoyée uniquement au
+  tour Codex de transcription structurée. Le tour imagegen reçoit la première
+  image visuelle, les champs textuels validés et la candidate précédente
+  facultative, jamais la seconde image. Le prompt demande
+  une édition localisée de la première carte : illustration, cadre, composition,
+  mise en page et symbole d'édition strictement identiques ; seuls les mots
+  imprimés nécessaires au français changent. La transcription française sert à
+  la reproduction exacte du texte, et la candidate précédente sert de base à une
+  éventuelle correction sans relâcher les invariants visuels.
 - La consigne utilisateur est transmise par stdin; les messages d’erreur affichés
   sont assainis et ne reproduisent ni le prompt, ni les chemins locaux, ni la
   sortie brute du CLI.

@@ -29,6 +29,10 @@ _WAL_READY: set[Path] = set()
 _SCRYFALL_API_LOCK = threading.Lock()
 _SCRYFALL_API_LAST_REQUEST = 0.0
 _SCRYFALL_API_MIN_INTERVAL = 0.6
+_BATCH_IMAGE_RATE_LOCK = threading.Lock()
+_BATCH_IMAGE_NEXT_REQUEST = 0.0
+_BATCH_IMAGE_BLOCKED_UNTIL = 0.0
+_BATCH_IMAGE_MIN_INTERVAL = 0.25
 _MAX_BYTES = 20 * 1024 * 1024
 _MAX_API_BYTES = 2 * 1024 * 1024
 _MAX_GETS = 3
@@ -615,11 +619,22 @@ def _set_manifest_slot(version: Path, set_id: str, printing_id: str, face_index:
 
 def _fetch(url: str, session, test_hosts: set[str] | None = None,
            allowed_hosts: set[str] | None = None,
-           timeout: tuple[float, float] = (8, 20), cancel_event=None) -> tuple[bytes | None, str | None, float | None]:
+           timeout: tuple[float, float] = (8, 20), cancel_event=None,
+           batch_rate_limit: bool = False) -> tuple[bytes | None, str | None, float | None]:
+    global _BATCH_IMAGE_NEXT_REQUEST, _BATCH_IMAGE_BLOCKED_UNTIL
     if cancel_event is not None and cancel_event.is_set():
         return None, "annule", None
     if not _allowed_url(url, test_hosts, allowed_hosts):
         return None, "url_non_autorisee", None
+    if batch_rate_limit and urlsplit(url).hostname == "cards.scryfall.io":
+        with _BATCH_IMAGE_RATE_LOCK:
+            scheduled = max(time.monotonic(), _BATCH_IMAGE_NEXT_REQUEST, _BATCH_IMAGE_BLOCKED_UNTIL)
+            _BATCH_IMAGE_NEXT_REQUEST = scheduled + _BATCH_IMAGE_MIN_INTERVAL
+        if cancel_event is not None:
+            if cancel_event.wait(max(0.0, scheduled - time.monotonic())):
+                return None, "annule", None
+        else:
+            time.sleep(max(0.0, scheduled - time.monotonic()))
     try:
         response = session.get(url, timeout=timeout, allow_redirects=False, stream=True,
                                headers={"User-Agent": "BibliothequeMagicLocal/2.0", "Accept": "image/*"})
@@ -636,6 +651,10 @@ def _fetch(url: str, session, test_hosts: set[str] | None = None,
                     if retry_time.tzinfo is None: retry_time = retry_time.replace(tzinfo=timezone.utc)
                     retry_value = max(0.0, (retry_time - datetime.now(timezone.utc)).total_seconds())
                 except (TypeError, ValueError, OverflowError): retry_value = 60.0
+            if batch_rate_limit and urlsplit(url).hostname == "cards.scryfall.io":
+                with _BATCH_IMAGE_RATE_LOCK:
+                    _BATCH_IMAGE_BLOCKED_UNTIL = max(_BATCH_IMAGE_BLOCKED_UNTIL,
+                                                      time.monotonic() + retry_value)
             return None, "limite_debit_429", retry_value
         if response.status_code == 403:
             return None, "acces_refuse_403", None
@@ -738,7 +757,7 @@ def _publish_face(db: Path, version: Path, printing: dict, face_index: int, lang
 def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Path, session=None,
                       test_hosts: set[str] | None = None, face_indexes: list[int] | None = None,
                       cancel_event=None, repair: bool = False, _deep_refresh: bool = False,
-                      _preview_only: bool = False) -> dict:
+                      _preview_only: bool = False, parallel_fetch: bool = False) -> dict:
     current = resolve_current(catalogue_root)
     db, version = current["database"], current["database"].parent
     ensure_catalogue_wal(db)
@@ -752,7 +771,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
         slots = [dict(r) for r in conn.execute("SELECT s.face_index,s.status,s.selected_language,s.asset_id,a.relative_path "
                                                "FROM image_slots s LEFT JOIN image_assets a USING(asset_id) "
                                                "WHERE s.printing_id=? ORDER BY s.face_index", (printing["printing_id"],))]
-        sources = [dict(r) for r in conn.execute("SELECT lang,raw_json FROM source_records WHERE printing_id=? AND lang IN ('fr','en','ja') ORDER BY lang", (printing["printing_id"],))]
+        sources = [dict(r) for r in conn.execute("SELECT lang,raw_json FROM source_records WHERE printing_id=? AND lang IN ('fr','en','ja','ph') ORDER BY lang", (printing["printing_id"],))]
     raws = {s["lang"]: json.loads(s["raw_json"]) for s in sources}
     french_name = raws.get("fr", {}).get("printed_name") or ""
     if not french_name and printing["oracle_id"]:
@@ -789,7 +808,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
             elif api_entry.get("blocked"):
                 lookup_status = "blocked_cached"
             else:
-                expected_raw = raws.get("en") or raws.get("fr")
+                expected_raw = raws.get("en") or raws.get("fr") or raws.get("ph")
                 if expected_raw is None:
                     lookup_status = "identity_source_unavailable"
                 else:
@@ -911,10 +930,10 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                                                 "allow_host": "www.lotusnoir.info",
                                                 "evidence": f"{printing['code']}:{printing['collector_number']}:{french_name}"}
                     pools.setdefault("fr", []).append(lotus_url)
-            got: dict[str, list[tuple[bytes,int,int,str]]] = {"fr": [], "en": [], "ja": []}
+            got: dict[str, list[tuple[bytes,int,int,str]]] = {"fr": [], "en": [], "ja": [], "ph": []}
             chosen = None; deferred = None
             deep_run_id = uuid.uuid4().hex if _deep_refresh else None
-            for language in ("fr", "en", "ja"):
+            for language in ("fr", "en", "ja", "ph"):
                 key = (f"deep:{deep_run_id}:{printing['printing_id']}:{face_index}:{language}"
                        if _deep_refresh else f"{printing['printing_id']}:{face_index}:{language}")
                 ledger_entry = ledger["faces"].get(key, {})
@@ -933,8 +952,23 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                     allowed_hosts = {str(manual_source["allow_host"])} if manual_source else None
                     if not _allowed_url(url, test_hosts, allowed_hosts):
                         attempts.append({"face": face_index, "language": language, "url_rejected": True}); continue
-                    data, error, retry = _fetch(url, s, test_hosts, allowed_hosts=allowed_hosts,
-                                                cancel_event=cancel_event); used += 1
+                    if parallel_fetch:
+                        # Reserve this attempt before releasing the ledger lock.
+                        entry = ledger["faces"].setdefault(key, {"gets": 0, "errors": []})
+                        entry["gets"] = used + 1
+                        _save_ledger(ledger_path, ledger)
+                        _LOCK.release()
+                        try:
+                            data, error, retry = _fetch(url, s, test_hosts, allowed_hosts=allowed_hosts,
+                                                        cancel_event=cancel_event, batch_rate_limit=True)
+                        finally:
+                            _LOCK.acquire()
+                        ledger = _load_ledger(ledger_path)
+                        used = int(ledger["faces"].get(key, {}).get("gets", used + 1))
+                    else:
+                        data, error, retry = _fetch(url, s, test_hosts, allowed_hosts=allowed_hosts,
+                                                    cancel_event=cancel_event)
+                        used += 1
                     entry = ledger["faces"].setdefault(key, {"gets": 0, "errors": []}); entry["gets"] = used
                     _save_ledger(ledger_path, ledger)
                     if error:
@@ -974,7 +1008,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                     old_source = json.loads(previous[0] or "{}") if previous else {}
                 except (TypeError, json.JSONDecodeError):
                     old_source = {}
-                for lang in ("fr", "en"):
+                for lang in ("fr", "en", "ja", "ph"):
                     for data, width, height, url in got[lang]:
                         digest = hashlib.sha256(data).hexdigest()
                         if digest in seen or digest == old_source.get("source_sha256") or url == old_source.get("source_url"):
@@ -1000,10 +1034,20 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                                 "candidates": candidates})
                 continue
             if chosen is None:
-                fallback_lang = next((lang for lang in ("fr", "en", "ja") if got[lang]), None)
+                fallback_lang = next((lang for lang in ("fr", "en", "ja", "ph") if got[lang]), None)
                 if fallback_lang:
                     data, width, height, url = max(got[fallback_lang], key=lambda x: x[1]*x[2])
                     chosen = (fallback_lang, data, width, height, url)
+            if chosen and parallel_fetch and not _deep_refresh:
+                # An explicit import can publish while this batch is fetching.
+                # Keep the image selected by the user if it won that race.
+                with connect(db) as conn:
+                    latest_status = conn.execute(
+                        "SELECT status FROM image_slots WHERE printing_id=? AND face_index=?",
+                        (printing["printing_id"], face_index)).fetchone()
+                if latest_status and latest_status["status"] == "ready":
+                    results.append({"face_index": face_index, "status": "already_ready"})
+                    continue
             if chosen:
                 lang, data, width, height, url = chosen
                 manual_source = manual_by_url.get(url)
@@ -1138,7 +1182,7 @@ def publish_preview_candidate(candidate: dict, *, catalogue_root: Path,
                 or _image_mime_type(source_data) != candidate.get("mime_type")):
             raise ValueError("candidate invalide : métadonnées de l’image incohérentes")
         language = candidate.get("language")
-        if language not in {"fr", "en"}:
+        if language not in {"fr", "en", "ja", "ph"}:
             raise ValueError("candidate invalide : langue de source inconnue")
         latest = resolve_current(catalogue_root)
         if latest["version_id"] != current["version_id"]:

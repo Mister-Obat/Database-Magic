@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import lru_cache
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,7 +37,8 @@ from .deck_media import enrich_deck_media, export_deck_to_desktop
 from .list_import import resolve_list, parse_list
 from .list_export import export_card_to_desktop, export_list_to_desktop
 from . import personal_decks
-from .v2.card_generation import generate_card_candidate, CardGenerationError
+from .v2.card_generation import (generate_card_candidate, extract_card_text_reference,
+                                 CardGenerationError)
 import tempfile
 from .archive_identification import (ArchiveConflictError, _edition_icon_urls, archive_auto_name,
                                      auto_import_archive_ocr,
@@ -57,7 +59,7 @@ PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                         ("create", "save", "add", "import", "export", "delete")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 25
+APP_API_REVISION = 29
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -100,7 +102,7 @@ _LENS_TICKETS_LOCK = threading.Lock()
 
 
 class FrenchTextUnavailable(ValueError):
-    """No single compatible official French text is available locally."""
+    """No compatible official French text is available locally."""
 
 
 def _prune_image_candidates(now: float) -> None:
@@ -323,9 +325,7 @@ def _lookup_local_card_text(db: Path, provider_card_id: str, face_index: int,
         bucket.setdefault(json.dumps(fields, ensure_ascii=False, sort_keys=True),
                           {"fields": fields, "sources": []})["sources"].append(source)
     matches = exact_matches or oracle_matches
-    if len(matches) != 1:
-        if len(matches) > 1:
-            raise ValueError("Plusieurs textes français officiels distincts sont disponibles pour cette carte.")
+    if not matches:
         card_name = str(expected_raw.get("name") or "Cette carte")
         raise FrenchTextUnavailable(
             f"{card_name} ({printing['code'].upper()} nº {printing['collector_number']}) : "
@@ -338,6 +338,7 @@ def _lookup_local_card_text(db: Path, provider_card_id: str, face_index: int,
     exact_match = bool(exact_matches)
     return {"fields": match["fields"],
             "source": "catalogue_local" if exact_match else "catalogue_oracle_fr",
+            "available_text_variants": len(matches),
             "source_url": None, "printing_id": printing["printing_id"],
             "source_card_ids": source_ids, "matched_set_collectors": matched_sets,
             "face_index": face_index, "provider_card_id": source_ids[0],
@@ -1060,27 +1061,51 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
     try:
         selected, unavailable = _batch_printings(mode, filters, catalog_db, _BATCH_CANCEL)
         with _BATCH_LOCK:
-            _BATCH_TASK.update(total=len(selected), unavailable=unavailable)
-        for provider_id, name in selected:
-            if _BATCH_CANCEL.is_set(): break
+            _BATCH_TASK.update(total=len(selected), unavailable=unavailable,
+                               processing_started_at=time.time())
+        def download_one(provider_id: str) -> tuple[bool, str]:
+            if _BATCH_CANCEL.is_set():
+                return False, "annulé"
             if resolve_current(CATALOGUE_ROOT)["database"] != catalog_db:
                 raise RuntimeError("La version du catalogue a changé pendant le téléchargement")
-            with _BATCH_LOCK:
-                _BATCH_TASK["current"] = name
             try:
                 report = download_printing(provider_id, catalogue_root=CATALOGUE_ROOT,
                     ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.json",
-                    cancel_event=_BATCH_CANCEL)
+                    cancel_event=_BATCH_CANCEL, parallel_fetch=True)
                 statuses = [item.get("status") for item in report.get("results", [])]
                 success = bool(statuses) and all(status in {"ready", "already_ready"} for status in statuses)
                 detail = ", ".join(statuses) if statuses else "aucun emplacement image"
             except Exception as exc:
                 success, detail = False, str(exc)
-            with _BATCH_LOCK:
-                _BATCH_TASK["completed"] += 1
-                _BATCH_TASK["ready" if success else "failed"] += 1
-                if not success and len(_BATCH_TASK["errors"]) < 30:
-                    _BATCH_TASK["errors"].append(f"{name} : {detail}")
+            return success, detail
+
+        remaining = iter(selected)
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="magic-image-batch") as executor:
+            pending = {}
+            def enqueue() -> None:
+                if _BATCH_CANCEL.is_set():
+                    return
+                try:
+                    provider_id, name = next(remaining)
+                except StopIteration:
+                    return
+                pending[executor.submit(download_one, provider_id)] = name
+
+            for _ in range(4):
+                enqueue()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    name = pending.pop(future)
+                    success, detail = future.result()
+                    with _BATCH_LOCK:
+                        _BATCH_TASK["completed"] += 1
+                        _BATCH_TASK["last_progress_at"] = time.time()
+                        _BATCH_TASK["ready" if success else "failed"] += 1
+                        _BATCH_TASK["current"] = name
+                        if not success and len(_BATCH_TASK["errors"]) < 30:
+                            _BATCH_TASK["errors"].append(f"{name} : {detail}")
+                    enqueue()
         with _BATCH_LOCK:
             _BATCH_TASK.update(status="cancelled" if _BATCH_CANCEL.is_set() else "complete", current="")
     except Exception as exc:
@@ -1372,6 +1397,97 @@ def _prepare_image_preview(provider_id: str, face_index: int, catalog_db: Path, 
                 "old_image_path": old_path}
 
 
+def _card_usage(catalog_db: Path, provider_id: str) -> dict:
+    """Find confirmed local uses at printing and oracle levels, without network access."""
+    def blank():
+        return {"editions": [], "decks": [], "personal_decks": []}
+
+    exact, global_usage = blank(), blank()
+    result = {"found": False, "exact": exact, "global": global_usage,
+              **global_usage, "unloaded_decks": 0}
+    with connect(catalog_db) as conn:
+        card = conn.execute("SELECT p.printing_id,p.oracle_id FROM source_records sr JOIN printings p USING(printing_id) WHERE sr.provider_card_id=?", (str(provider_id),)).fetchone()
+        if not card:
+            return result
+        oracle, printing = card["oracle_id"], card["printing_id"]
+        rows = conn.execute("""SELECT p.printing_id,e.code,e.name,e.released_at,p.collector_number
+            FROM printings p JOIN editions e USING(set_id)
+            WHERE e.eligibility='eligible' AND (p.oracle_id=? OR p.printing_id=?)""", (oracle, printing)).fetchall()
+        printings = {row["printing_id"] for row in rows} | {printing}
+        id_to_printing = {r[0]: r[1] for r in conn.execute(
+            "SELECT sr.provider_card_id,p.printing_id FROM source_records sr JOIN printings p USING(printing_id) WHERE p.oracle_id=? OR p.printing_id=?", (oracle, printing))}
+        set_numbers = {}
+        for row in rows:
+            code, number = row["code"], row["collector_number"]
+            count = conn.execute("SELECT count(*) FROM printings p JOIN editions e USING(set_id) WHERE upper(e.code)=upper(?) AND p.collector_number=? AND e.eligibility='eligible'", (code, number)).fetchone()[0]
+            if count == 1 and code and number:
+                set_numbers[(code.upper(), number)] = row["printing_id"]
+        for usage, selected in ((exact, [r for r in rows if r["printing_id"] == printing]), (global_usage, rows)):
+            editions = {}
+            for row in selected:
+                code = row["code"]
+                editions.setdefault(code, {"code": code, "name": row["name"], "name_fr": _SET_NAMES_FR.get(code.upper()), "released_at": row["released_at"]})
+            usage["editions"] = sorted(editions.values(), key=lambda x: (x["released_at"] or "", x["code"]), reverse=True)
+
+        matches = {"exact": {}, "global": {}}
+        if DECK_DB.exists():
+            with sqlite3.connect(f"{DECK_DB.resolve().as_uri()}?mode=ro", uri=True) as deck_conn:
+                deck_conn.row_factory = sqlite3.Row
+                result["unloaded_decks"] = deck_conn.execute("SELECT count(*) FROM decks WHERE loaded=0").fetchone()[0]
+                for row in deck_conn.execute("""SELECT d.id,d.name,d.name_fr,d.set_code,d.set_name,d.set_name_fr,
+                        c.set_code AS card_set,c.collector_number,c.raw_json
+                        FROM decks d JOIN deck_cards c ON c.deck_id=d.id WHERE d.loaded=1"""):
+                    try:
+                        raw = json.loads(row["raw_json"])
+                        ids = raw.get("identifiers") or {}
+                        source_id = raw.get("scryfall_id") or ids.get("scryfallId")
+                        explicit_oracle = raw.get("oracle_id") or ids.get("scryfallOracleId") or ids.get("oracleId")
+                        resolved = id_to_printing.get(source_id)
+                        set_match = set_numbers.get((str(row["card_set"] or "").upper(), row["collector_number"]))
+                        if not resolved and not set_match and not (oracle and explicit_oracle == oracle):
+                            continue
+                        if source_id and not resolved:
+                            known = conn.execute("SELECT printing_id FROM source_records WHERE provider_card_id=?", (source_id,)).fetchone()
+                            if known:
+                                continue
+                        if resolved and row["card_set"]:
+                            valid_set = conn.execute("SELECT 1 FROM printings p JOIN editions e USING(set_id) WHERE p.printing_id=? AND upper(e.code)=upper(?) AND e.eligibility='eligible'", (resolved, row["card_set"])).fetchone()
+                            if not valid_set:
+                                continue
+                        if not resolved:
+                            resolved = set_match
+                        if resolved and explicit_oracle and oracle and explicit_oracle != oracle:
+                            continue
+                        is_exact = resolved == printing
+                        is_global = resolved in printings or (bool(oracle) and explicit_oracle == oracle)
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+                    item = {key: row[key] for key in ("id", "name", "name_fr", "set_code", "set_name", "set_name_fr")}
+                    if is_exact:
+                        matches["exact"][row["id"]] = item
+                    if is_global:
+                        matches["global"][row["id"]] = item
+        for key, usage in (("exact", exact), ("global", global_usage)):
+            usage["decks"] = sorted(matches[key].values(), key=lambda d: (d["name_fr"] or d["name"]).casefold())
+        if PERSONAL_DECK_DB.exists():
+            with sqlite3.connect(f"{PERSONAL_DECK_DB.resolve().as_uri()}?mode=ro", uri=True) as personal_conn:
+                for (document,) in personal_conn.execute("SELECT document FROM personal_decks"):
+                    deck = json.loads(document)
+                    if deck.get("deleted_at"):
+                        continue
+                    cards = [c for section in deck.get("sections", []) for c in section.get("cards", [])]
+                    resolved = {c.get("printing_id") or id_to_printing.get(c.get("provider_card_id")) for c in cards}
+                    item = {"id": deck["id"], "name": deck["name"]}
+                    if printing in resolved:
+                        exact["personal_decks"].append(item)
+                    if resolved & printings:
+                        global_usage["personal_decks"].append(item)
+        for usage in (exact, global_usage):
+            usage["personal_decks"].sort(key=lambda d: d["name"].casefold())
+    result.update(found=True, **global_usage)
+    return result
+
+
 class LibraryHandler(BaseHTTPRequestHandler):
     server_version = "MagicLibrary/2"
     sys_version = ""
@@ -1406,6 +1522,9 @@ class LibraryHandler(BaseHTTPRequestHandler):
         params = _params(parsed.query)
         route = parsed.path
         try:
+            if route == "/api/v2/card/usage":
+                self._json(_card_usage(self.db, params.get("id", "")))
+                return
             if route == "/api/v2/personal-decks":
                 items = personal_decks.list_decks(PERSONAL_DECK_DB, params.get("q", ""),
                                                   list(params.get("colors", "")))
@@ -1526,7 +1645,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 self._json({"items": _deferred(self.db)})
             elif route == "/api/v2/decks":
                 ensure_deck_index(DECK_DB)
-                limit = max(1, min(100, int(params.get("limit", 50))))
+                limit = max(1, min(200, int(params.get("limit", 50))))
                 offset = max(0, int(params.get("offset", 0)))
                 image_filter = params.get("image_filter") or "all"
                 if image_filter not in {"all", "with", "without"}:
@@ -1564,7 +1683,11 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 icons = _edition_icon_urls(set(edition_codes), OPS_ROOT / "catalogue.sqlite")
                 for item, code in zip(items, edition_codes):
                     item["edition_icon_url"] = icons.get(code)
-                    item.update(_deck_list_media(item["id"], self.db))
+                if items:
+                    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="magic-deck-list") as executor:
+                        media = executor.map(lambda item: _deck_list_media(item["id"], self.db), items)
+                        for item, details in zip(items, media):
+                            item.update(details)
                 self._json(result)
             elif route == "/api/v2/decks/filters":
                 ensure_deck_index(DECK_DB)
@@ -1751,7 +1874,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     return
                 image_bytes = self.rfile.read(length)
                 with _MAINTENANCE_LOCK:
-                    if _maintenance_is_active() or _batch_is_active():
+                    if _maintenance_is_active():
                         self._json({"error": "maintenance_in_progress"}, 409)
                         return
                     result = import_local_image(provider_id, int(face_index), image_bytes,
@@ -1881,28 +2004,38 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     if not same_printing and not same_name_reference:
                         self._json({"error": "reference_mismatch"}, 400)
                         return
-                    if (french["language"] != "fr" and not local_original
-                            or visual["language"] not in {"en", "fr"}):
+                    if french["language"] != "fr" and not local_original:
                         self._json({"error": "reference_language_mismatch"}, 400)
                         return
                 prior_path = Path(previous["path"]) if previous else None
                 def generate(cancel_event):
+                    reuse_text = (previous and previous.get("text_mode") == text_mode
+                                  and previous.get("visual_index") == visual_index
+                                  and previous.get("text_index") == text_index)
                     current_text_reference = (previous.get("french_text_reference")
-                                              if online_text and previous else text_reference)
+                                              if reuse_text else text_reference)
                     with tempfile.TemporaryDirectory(prefix="magic-ai-input-") as temp:
                         visual_path = Path(temp) / "visual.png"
                         visual_path.write_bytes(visual["source_data"])
-                        text_path = None
-                        if french is not None:
-                            text_path = Path(temp) / "french.png"
+                        if french is not None and current_text_reference is None:
+                            text_path = Path(temp) / "text-reference.png"
                             text_path.write_bytes(french["source_data"])
-                        result = generate_card_candidate(visual_path, text_path,
+                            fields = extract_card_text_reference(
+                                text_path, translate_to_french=french["language"] != "fr",
+                                cancel_event=cancel_event)
+                            current_text_reference = {
+                                "fields": fields, "source": "codex_text_reference",
+                                "verified": False, "language": "fr",
+                                "provider_card_id": french["provider_card_id"],
+                                "source_card_ids": [french["provider_card_id"]],
+                                "printing_id": french["printing_id"],
+                                "face_index": french["face_index"],
+                            }
+                        result = generate_card_candidate(visual_path, None,
                             card_candidate_root(OPS_ROOT), correction,
                             previous_path=prior_path,
                             french_text=current_text_reference["fields"] if current_text_reference else None,
-                            translate_text=(text_mode == "translate" or bool(
-                                french is not None and french.get("local_original_reference")
-                                and french["language"] != "fr")),
+                            translate_text=text_mode == "translate",
                             cancel_event=cancel_event)
                     if cancel_event.is_set():
                         Path(result["path"]).unlink(missing_ok=True)
@@ -1912,6 +2045,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
                         _AI_CANDIDATES[ai_id] = {**result, "source_id": source_id,
                             "provider_card_id": visual["provider_card_id"], "face_index": visual["face_index"],
                             "printing_id": visual["printing_id"], "french_text_reference": current_text_reference,
+                            "visual_index": visual_index, "text_index": text_index,
                             "text_mode": text_mode, "correction_prompt": correction}
                     return {"id": ai_id, "preview_url": f"/api/v2/image/ai/candidate?id={ai_id}",
                             "source_candidate_id": source_id, "visual_index": visual_index,
@@ -2083,7 +2217,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     with _BATCH_LOCK:
                         task_id = uuid.uuid4().hex
                         _BATCH_CANCEL.clear()
-                        _BATCH_TASK = {"task_id": task_id, "mode": mode, "status": "queued", "total": 0,
+                        _BATCH_TASK = {"task_id": task_id, "mode": mode, "filters": filters,
+                                       "status": "queued", "total": 0,
                                        "completed": 0, "ready": 0, "failed": 0, "unavailable": 0,
                                        "current": "", "errors": []}
                         catalog_db = resolve_current(CATALOGUE_ROOT)["database"]

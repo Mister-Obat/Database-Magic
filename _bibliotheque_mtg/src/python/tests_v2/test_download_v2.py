@@ -120,6 +120,36 @@ def test_provider_responses_block_or_reject_without_following_redirects(image_se
     assert _fetch(image_server + "/timeout", session, host, timeout=(.05, .05))[1].startswith("erreur_reseau:")
 
 
+def test_phyrexian_only_printing_downloads_its_exact_image(tmp_path, image_server):
+    ops, version, db, manifest = make_catalogue(tmp_path, image_server, en_path='/high')
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM source_records WHERE provider_card_id='provider-fr'")
+        conn.execute("DELETE FROM source_search WHERE provider_card_id='provider-fr'")
+        conn.execute("DELETE FROM printing_languages WHERE provider_card_id='provider-fr'")
+        conn.execute("UPDATE source_records SET provider_card_id='provider-ph', lang='ph', "
+                     "name='Vorinclex, Voice of Hunger', printed_name=NULL, "
+                     "raw_json=json_set(raw_json,'$.id','provider-ph','$.lang','ph',"
+                     "'$.name','Vorinclex, Voice of Hunger','$.printed_name','|lornScs') "
+                     "WHERE provider_card_id='provider-en'")
+        conn.execute("UPDATE source_search SET provider_card_id='provider-ph', lang='ph', "
+                     "name='Vorinclex, Voice of Hunger', printed_name='' "
+                     "WHERE provider_card_id='provider-en'")
+        conn.execute("UPDATE printing_languages SET provider_card_id='provider-ph', lang='ph' "
+                     "WHERE provider_card_id='provider-en'")
+    preview = preview_printing_candidate('provider-ph', catalogue_root=ops,
+                                         ledger_path=ops / 'ledger.json', face_index=0,
+                                         test_hosts={'127.0.0.1'})
+    assert preview['status'] == 'candidate'
+    assert preview['candidates'][0]['language'] == 'ph'
+    report = download_printing('provider-ph', catalogue_root=ops,
+                               ledger_path=ops / 'ledger.json', test_hosts={'127.0.0.1'})
+    assert report['results'][0]['status'] == 'ready'
+    assert report['results'][0]['language'] == 'ph'
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT status,selected_language FROM image_slots").fetchone() == ('ready', 'ph')
+        assert conn.execute("SELECT name,printed_name FROM source_records WHERE lang='ph'").fetchone() == ('Vorinclex, Voice of Hunger', None)
+
+
 def test_download_prefers_hd_french_then_publishes_one_face_only(tmp_path, image_server):
     ops, version, db, manifest = make_catalogue(tmp_path, image_server, fr_path="/corrupt", en_path="/image", face_count=2)
     before_index = hashlib.sha256((version / "editions" / "index.json").read_bytes()).hexdigest()
@@ -592,6 +622,29 @@ def test_interrupted_attempt_resumes_and_double_click_deduplicates(tmp_path, ima
         reports = list(pool.map(lambda _: go(), range(2)))
     assert sorted(r["results"][0]["status"] for r in reports) == ["already_ready", "ready"]
     assert ImageFixtureHandler.counts.get("/image", 0) - before == 1
+
+
+def test_manual_import_wins_over_batch_fetch_in_progress(tmp_path, image_server, monkeypatch):
+    ops, _, db, _ = make_catalogue(tmp_path, image_server)
+    original_fetch = image_download._fetch
+    manual = io.BytesIO()
+    patterned_image((700, 900)).save(manual, "PNG")
+    imported = False
+
+    def fetch_after_import(*args, **kwargs):
+        nonlocal imported
+        if not imported:
+            imported = True
+            image_download.import_local_image("provider-fr", 0, manual.getvalue(), catalogue_root=ops)
+        return original_fetch(*args, **kwargs)
+
+    monkeypatch.setattr(image_download, "_fetch", fetch_after_import)
+    report = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.json",
+                               test_hosts={"127.0.0.1"}, parallel_fetch=True)
+    assert report["results"][0]["status"] == "already_ready"
+    with sqlite3.connect(db) as conn:
+        provenance = json.loads(conn.execute("SELECT provenance_json FROM image_slots").fetchone()[0])
+    assert provenance["provider"] == "manual_import"
 
 
 def test_active_download_can_be_cancelled_without_publishing(tmp_path, image_server):

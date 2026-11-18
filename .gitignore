@@ -27,6 +27,8 @@
 **/*.tif
 **/*.tiff
 !/Logo.png
+!/docs/screenshots/
+!/docs/screenshots/*.jpg
 
 # Local configuration and generated collection data
 /_bibliotheque_mtg/config.json

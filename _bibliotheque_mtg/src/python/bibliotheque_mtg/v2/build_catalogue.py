@@ -128,12 +128,15 @@ def build_catalogue(source_db, archive, target_db, *, archive_sha256, archive_as
                     colors=obj.get('colors') or []; colorid=obj.get('color_identity') or []
                     artist=obj.get('artist_ids') or obj.get('artist') or []
                     mana=obj.get('cmc',obj.get('mana_value'))
-                    vals=(pid,printing_id,lang,obj.get('uri'),obj.get('name') or '',obj.get('printed_name'),obj.get('type_line'),obj.get('printed_type_line'),obj.get('mana_cost'),mana,_canonical(colors),_canonical(colorid),''.join(sorted(colors)),''.join(sorted(colorid)),obj.get('rarity'),_canonical(artist),obj.get('oracle_text'),obj.get('printed_text'),_canonical(obj))
+                    readable_printed_name = None if lang == 'ph' else obj.get('printed_name')
+                    readable_printed_type = None if lang == 'ph' else obj.get('printed_type_line')
+                    readable_printed_text = None if lang == 'ph' else obj.get('printed_text')
+                    vals=(pid,printing_id,lang,obj.get('uri'),obj.get('name') or '',readable_printed_name,obj.get('type_line'),readable_printed_type,obj.get('mana_cost'),mana,_canonical(colors),_canonical(colorid),''.join(sorted(colors)),''.join(sorted(colorid)),obj.get('rarity'),_canonical(artist),obj.get('oracle_text'),readable_printed_text,_canonical(obj))
                     out.execute('INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',vals)
                     out.execute('INSERT INTO printing_languages VALUES(?,?,?)',(printing_id,lang,pid))
                     if exception:
                         out.execute('INSERT INTO identity_exceptions VALUES(?,?,?,?)',(pid,exception,evidence,_canonical({'archive_sha256':archive_sha256,'as_of':archive_as_of,'set_id':first[1],'lang':lang}))); exceptions_n+=1
-                    out.execute('INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?)',(pid,str(obj.get('set') or ''),lang,_search_field(obj,'name'),_search_field(obj,'printed_name'),_search_field(obj,'type_line'),_search_field(obj,'printed_type_line'),_search_field(obj,'oracle_text'),_search_field(obj,'printed_text')))
+                    out.execute('INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?)',(pid,str(obj.get('set') or ''),lang,_search_field(obj,'name'),readable_printed_name or '',_search_field(obj,'type_line'),readable_printed_type or '',_search_field(obj,'oracle_text'),readable_printed_text or ''))
                     records_n+=1
                 printing_n+=1
             processed+=len(rows)
@@ -164,7 +167,7 @@ def build_catalogue(source_db, archive, target_db, *, archive_sha256, archive_as
                 first_card=True
                 for pid,lang,raw_json,printing_id,number,layout in card_cur:
                     obj=json.loads(raw_json); colors=obj.get('colors') or []; colorid=obj.get('color_identity') or []
-                    card={'printing_id':printing_id,'provider_card_id':pid,'language':lang,'name':obj.get('name'),'printed_name':obj.get('printed_name'),'type_line':obj.get('type_line'),'printed_type_line':obj.get('printed_type_line'),'mana_cost':obj.get('mana_cost'),'mana_value':obj.get('cmc',obj.get('mana_value')),'colors':colors,'color_identity':colorid,'rarity':obj.get('rarity'),'collector_number':number,'layout':layout,'oracle_text':obj.get('oracle_text'),'printed_text':obj.get('printed_text'),'faces':obj.get('card_faces') or [],'image_status':'missing'}
+                    card={'printing_id':printing_id,'provider_card_id':pid,'language':lang,'name':obj.get('name'),'printed_name':None if lang == 'ph' else obj.get('printed_name'),'type_line':obj.get('type_line'),'printed_type_line':None if lang == 'ph' else obj.get('printed_type_line'),'mana_cost':obj.get('mana_cost'),'mana_value':obj.get('cmc',obj.get('mana_value')),'colors':colors,'color_identity':colorid,'rarity':obj.get('rarity'),'collector_number':number,'layout':layout,'oracle_text':obj.get('oracle_text'),'printed_text':None if lang == 'ph' else obj.get('printed_text'),'faces':obj.get('card_faces') or [],'image_status':'missing'}
                     if not first_card: handle.write(',')
                     handle.write(_canonical(card)); first_card=False
                 handle.write(']}\n')

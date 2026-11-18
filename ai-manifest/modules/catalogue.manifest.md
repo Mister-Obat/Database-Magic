@@ -63,6 +63,11 @@ version précédente reçoivent la date de construction.
   représenter le même ensemble.
 - Une paire FR/EN n’est fusionnée que lorsque l’identité est démontrée. Les lignes
   sans preuve restent séparées et traçables par `provider_card_id`.
+- Pour une ligne `lang='ph'`, `name` conserve le nom de carte lisible. Le
+  texte imprimé transcrit en glyphes phyrexians reste dans `raw_json`, mais les
+  champs de consultation `printed_name`, `printed_type_line`, `printed_text` et
+  leurs index de recherche sont vides. Cette normalisation est appliquée à la construction et au
+  catalogue publié sans changer l'identité ni la provenance Scryfall.
 - `card_faces` suit la disposition physique : les layouts `transform`,
   `modal_dfc`, `double_faced_token` et `reversible_card` peuvent avoir plusieurs
   images ; d’autres cartes à textes multiples ne créent qu’un slot.

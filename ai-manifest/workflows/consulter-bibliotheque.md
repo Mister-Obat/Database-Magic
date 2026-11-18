@@ -13,14 +13,17 @@ de recherche avec fiche, traductions et état de chaque image.
 - `_bibliotheque_mtg/v3-staging/current.json` pointe vers une base et des
   exports existants.
 - `MAGIC_LIBRARY_PORT` permet de choisir un autre port. Le lanceur ferme une
-  ancienne instance locale de la bibliothèque sur ce port ; il refuse d'arrêter
-  tout autre programme.
+  instance locale compatible sur ce port ; il arrête une instance incompatible
+  reconnue et refuse d'arrêter tout autre programme.
 
 ## Étapes
 
-1. Le `.bat` délègue au script PowerShell local : il arrête l'ancienne instance
-   identifiée, lance `python -m bibliotheque_mtg.local_app` de façon masquée, puis
-   attend que `/api/v2/health` réponde. La fenêtre de commande se ferme ensuite.
+1. Le `.bat` délègue au script PowerShell local : il réutilise une instance
+   compatible ou remplace une ancienne instance identifiée. Sinon il lance
+   `python -m bibliotheque_mtg.local_app` de façon masquée, puis attend jusqu'à
+   cinq minutes que `/api/v2/health` réponde. Un processus du même exécutable
+   déjà en cours de démarrage est attendu plutôt que lancé une seconde fois.
+   La fenêtre de commande se ferme ensuite.
 2. Au démarrage, l'application synchronise `_bibliotheque_mtg/Images/` avec les
    slots prêts du catalogue actif avant de lier un `ThreadingHTTPServer` à
    `127.0.0.1`.

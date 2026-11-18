@@ -142,7 +142,8 @@ body > .custom-select-menu {
   background-color: #65479a;
   border-color: #a287c4;
 }
-#search-form .primary-button { justify-content: center; }
+#search-form .primary-button,
+#deck-search-form .primary-button { justify-content: center; }
 .topbar :is(a, button):focus-visible { outline-color: #bfabff; }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -204,7 +205,8 @@ body > .custom-select-menu {
 .catalogue-view :is(#edition-count, #deck-color-coverage):empty { display: none; }
 #edition-count:not(:empty) { margin-bottom: .8rem; }
 .search-field-label,
-#search-form .primary-button {
+#search-form .primary-button,
+#deck-search-form .primary-button {
   display: inline-flex;
   align-items: center;
   gap: .45rem;
@@ -220,12 +222,15 @@ body > .custom-select-menu {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-#search-form .primary-button .search-icon { color: inherit; }
+#search-form .primary-button .search-icon,
+#deck-search-form .primary-button .search-icon { color: inherit; }
 #search-form .search-main label { margin-bottom: .45rem; font-weight: inherit; }
 #search-form .search-main { font-weight: 400; }
 .catalogue-view .search-form :is(input, select):focus { outline-offset: -2px; }
-#search-form .form-actions { justify-content: flex-start; flex-wrap: wrap; }
-#search-form .search-footer {
+#search-form .form-actions,
+#deck-search-form .form-actions { justify-content: flex-start; flex-wrap: wrap; }
+#search-form .search-footer,
+#deck-search-form .search-footer {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -234,6 +239,9 @@ body > .custom-select-menu {
 }
 #search-status { flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
 #search-status:empty { position: absolute; }
+#deck-batch-status { flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
+#deck-batch-status.batch-status:not(:empty) { margin: 0; padding: 0; background: none; border: 0; }
+#deck-batch-status:empty { display: none; }
 
 .catalogue-refine { padding-top: .9rem; border-top: 1px solid var(--line); }
 .catalogue-refine-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -268,6 +276,21 @@ body > .custom-select-menu {
 .heading-action h1{min-width:0}
 .batch-status:not(:empty){padding:.7rem .85rem;background:var(--panel);border:1px solid var(--line);border-radius:9px;margin-top:.65rem;color:var(--muted)}
 .batch-status button{margin-left:.8rem;padding:.35rem .6rem}
+.batch-status .batch-preparation-spinner{display:inline-block;width:1rem;height:1rem;margin-right:.55rem;border-width:2px;vertical-align:-.15rem}
+.search-loading-spinner{display:inline-block;width:1rem;height:1rem;border-width:2px;vertical-align:-.15rem;margin-right:.45rem}
+.search-loading-state{display:flex;align-items:center;gap:.3rem}
+.card-usages-dialog{width:min(40rem,calc(100vw - 2rem));max-height:80vh;overflow:auto;background:#211b2e;color:var(--ink);border:1px solid var(--line);border-radius:14px;padding:1.25rem}
+.card-usages-dialog::backdrop{background:#080611b8}
+.card-usages-dialog h2{margin:0 0 1rem;font-family:Georgia,serif}
+.card-usages-content{display:grid;gap:1rem;margin-bottom:1.2rem}
+.card-usages-loading{display:flex;align-items:center;gap:.35rem;margin:.5rem 0}
+.card-usages-tabs{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem}
+.card-usages-tabs [aria-selected="true"]{background:#3e3255!important;border-color:#a287c4!important;color:#fffaff!important}
+.card-usages-group{display:grid;gap:.45rem}
+.card-usages-group h3{margin:0;font-size:1rem}
+.card-usages-group a{display:block;text-decoration:none;padding:.55rem .75rem}
+.card-usages-dialog>.secondary-button{display:block;margin-left:auto}
+@media (prefers-reduced-motion:reduce){.search-loading-spinner{animation:none}}
 @media(max-width:760px){.heading-action{align-items:flex-start;flex-direction:column}}
 #edition-cards .edition-card-tile{height:100%}
 #edition-cards .deck-card-name{overflow-wrap:anywhere}
@@ -582,6 +605,8 @@ body > .custom-select-menu {
 .image-choice-dialog .image-comparison[data-step='compare'] .comparison-current-panel .comparison-column-stage{width:100%;height:100%;min-width:0;min-height:0;aspect-ratio:auto;overflow:hidden}
 .image-choice-dialog .image-comparison[data-step='compare'] .comparison-current-panel .comparison-preview{display:block;width:100%;height:100%;max-width:100%;max-height:100%;object-fit:contain}
 .topbar-actions{display:flex;align-items:center;gap:.75rem;margin-left:auto}.topbar-actions>button{white-space:nowrap}.notification-center{position:relative;z-index:30}.notification-center button{white-space:nowrap}.notification-panel{position:absolute;right:0;top:calc(100% + .4rem);width:min(24rem,90vw);max-height:70vh;overflow:auto;padding:.8rem;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:0 12px 30px #0009}.notification-panel[hidden]{display:none}.notification-panel h2{margin:.1rem 0 .7rem;font-size:1rem}.notification-item{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:.35rem;padding:.6rem;border-top:1px solid var(--line)}.notification-item:first-child{border-top:0}.notification-item p{margin:0;color:var(--muted);font-size:.8rem}.notification-item>button{justify-self:start}.notification-open{display:grid;gap:.18rem;width:100%;padding:.45rem;border:0;border-radius:6px;background:transparent;color:var(--ink);text-align:left;white-space:normal;cursor:pointer}.notification-open:hover,.notification-open:focus-visible{background:var(--panel2);outline:1px solid var(--green)}.notification-status{color:var(--green2);font-size:.8rem}.notification-detail{color:var(--muted);font-size:.76rem;overflow-wrap:anywhere}
+.notification-center #notification-button{position:relative}
+.notification-center #notification-button.has-review::after{content:"";position:absolute;right:-.4375rem;bottom:-.4375rem;width:.875rem;height:.875rem;border:2px solid #13121d;border-radius:50%;background:#e54858;box-shadow:0 2px 4px #0008;pointer-events:none}
 @media(max-width:760px){.topbar-actions{margin-left:auto}.topbar-actions>button{padding:.55rem .65rem;font-size:.8rem}}
 
 .topbar {
@@ -883,6 +908,10 @@ body > .custom-select-menu {
   .image-choice-dialog .image-comparison[data-step='review'] .comparison-column-stage{width:100%;height:100%}
 }
 .image-choice-dialog .image-comparison[data-step='review'] .comparison-columns.ai-online-review{grid-template-columns:repeat(2,minmax(0,1fr))}
+.image-choice-dialog .resumed-ai-review>.comparison-preview-pane{display:grid;grid-template-rows:minmax(0,1fr) auto;gap:.5rem;min-height:0}
+.image-choice-dialog .resumed-ai-review>.comparison-preview-pane .comparison-columns{min-height:0}
+.image-choice-dialog .resumed-ai-review>.comparison-preview-pane .ai-french-text-panel{max-height:min(20dvh,10rem)}
+.image-choice-dialog .resumed-ai-review .review-correction[hidden]{display:none}
 
 /* The missing-translation choice is a separate, centered step. */
 .ai-translation-dialog{width:min(92vw,36rem);max-width:92vw;max-height:90dvh;margin:auto;padding:0;overflow:auto;border:1px solid var(--line);border-radius:16px;background:#161d17;color:var(--ink);box-shadow:0 20px 70px #000b}
@@ -913,7 +942,7 @@ body > .custom-select-menu {
    actual viewport height, including the title and action rows. */
 .image-choice-dialog .image-comparison[data-step='review']{
   grid-template-columns:minmax(0,1fr);
-  grid-template-rows:auto minmax(0,1fr) auto auto auto auto;
+  grid-template-rows:auto minmax(0,1fr) auto;
   overflow:hidden;
 }
 .image-choice-dialog .image-comparison[data-step='review']>.comparison-title{grid-column:1;grid-row:1}
@@ -921,7 +950,7 @@ body > .custom-select-menu {
 .image-choice-dialog .image-comparison[data-step='review']>.comparison-columns.ai-online-review{grid-template-columns:repeat(2,minmax(0,1fr))}
 .image-choice-dialog .image-comparison[data-step='review'] .comparison-column{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);height:100%;min-width:0;min-height:0;overflow:hidden}
 .image-choice-dialog .image-comparison[data-step='review'] .comparison-column-stage{position:relative;display:grid;place-items:center;width:100%;height:100%;min-width:0;min-height:0;aspect-ratio:auto;overflow:hidden}
-.image-choice-dialog .image-comparison[data-step='review'] .comparison-column-stage .comparison-preview{display:block;width:auto!important;height:auto!important;max-width:100%!important;max-height:calc(96dvh - 250px)!important;aspect-ratio:auto;object-fit:contain}
+.image-choice-dialog .image-comparison[data-step='review'] .comparison-column-stage .comparison-preview{display:block;width:100%!important;height:100%!important;max-width:100%!important;max-height:100%!important;aspect-ratio:auto;object-fit:contain}
 .image-choice-dialog .image-comparison[data-step='review']>.ai-french-text-panel{grid-column:1;grid-row:3;max-height:12dvh;overflow:auto}
 .image-choice-dialog .image-comparison[data-step='review']>.comparison-choices{grid-column:1;grid-row:4}
 .image-choice-dialog .image-comparison[data-step='review']>.review-correction{grid-column:1;grid-row:5}
@@ -939,7 +968,7 @@ body > .custom-select-menu {
   background:#262237;
   box-shadow:0 14px 40px #080611c9;
 }
-:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog){
+:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog){
   --ink:#f2effb;
   --muted:#bdb8cf;
   --panel:#211c30;
@@ -952,29 +981,29 @@ body > .custom-select-menu {
   border-color:var(--line);
   background:linear-gradient(145deg,#282139,#191725 72%);
 }
-:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog)::backdrop{background:#070610cc}
+:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog)::backdrop{background:#070610cc}
 :is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) :is(input,textarea,select,.custom-select-button){
   background:#14121e;
   border-color:var(--line);
   color:var(--ink);
 }
-:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) .primary-button:not(:disabled){
+:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog) .primary-button:not(:disabled){
   border-color:#775b9f;
   border-radius:var(--action-radius);
   background:linear-gradient(155deg,#ffffff12,transparent 75%),#533785;
   color:#fffaff;
   box-shadow:var(--action-shadow);
 }
-:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) .primary-button:not(:disabled):hover{background-color:#65479a;border-color:#a287c4}
-:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) .secondary-button:not(:disabled){
+:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog) .primary-button:not(:disabled):hover{background-color:#65479a;border-color:#a287c4}
+:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog) .secondary-button:not(:disabled){
   border-color:var(--line);
   border-radius:var(--action-radius);
   background:linear-gradient(155deg,#e2d4ff19,transparent 75%),#282337;
   color:var(--ink);
   box-shadow:inset 0 1px #ede1ff23,var(--action-shadow);
 }
-:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) .secondary-button:not(:disabled):is(:hover,:focus-visible){background-color:#413653;border-color:#86739f;color:#faf5ff;box-shadow:var(--action-shadow)}
-:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) :is(button,input,textarea,select):focus-visible{outline-color:#bfabff}
+:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog) .secondary-button:not(:disabled):is(:hover,:focus-visible){background-color:#413653;border-color:#86739f;color:#faf5ff;box-shadow:var(--action-shadow)}
+:is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog) :is(button,input,textarea,select,a):focus-visible{outline-color:#bfabff}
 :is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) :is(.comparison-option,.comparison-column,.comparison-preview-pane,.comparison-column-stage,.comparison-thumb,.card-viewer-art,.card-viewer-missing){background-color:#262237;border-color:var(--line)}
 .image-choice-dialog :is(.comparison-option.selected,.comparison-option:focus-visible){border-color:#b9a2ff;box-shadow:0 0 0 2px #b9a2ff}
 .image-choice-dialog .comparison-dialog-close:hover{background-color:#413653;border-color:#86739f;color:#faf5ff}
@@ -1083,6 +1112,36 @@ body > .custom-select-menu {
 .ai-translation-actions{justify-content:center}
 .image-choice-dialog .image-comparison[data-step='review']>.review-footer,
 .image-choice-dialog .image-comparison[data-step='review'] .review-footer .ai-actions{justify-content:center}
+.image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review>.review-footer{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  align-items:center;
+  gap:.55rem;
+}
+.image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review .review-correction{
+  grid-column:1;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  align-items:center;
+  min-width:0;
+  gap:.5rem;
+  padding:.35rem;
+}
+.image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review .review-correction textarea{
+  min-width:0;
+  min-height:2.75rem;
+  height:2.75rem;
+}
+.image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review .review-footer .ai-actions{
+  grid-column:2;
+  flex-wrap:nowrap;
+}
+.image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review .review-status{grid-column:1/-1;margin:0}
+.image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review .review-status:empty{display:none}
+@media(max-width:1100px){
+  .image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review>.review-footer{grid-template-columns:minmax(0,1fr)}
+  .image-choice-dialog .image-comparison[data-step='review'].resumed-ai-review .review-footer .ai-actions{grid-column:1;flex-wrap:wrap}
+}
 @media(max-width:760px){
   .image-choice-dialog .image-comparison[data-step='visual']>.ai-step-description,
   .image-choice-dialog .image-comparison[data-step='text']>.ai-step-description{
@@ -1301,6 +1360,7 @@ body > .custom-select-menu {
 .personal-add-button {
   top:8.5rem;
 }
+.card-usages-button{top:auto;bottom:.25rem}
 .card-face-flip {
   top:11.25rem;
 }

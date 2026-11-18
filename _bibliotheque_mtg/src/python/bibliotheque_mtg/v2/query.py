@@ -1,6 +1,8 @@
 from __future__ import annotations
 import sqlite3
 import os
+import hashlib
+import tempfile
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -24,6 +26,83 @@ _FRENCH_TOKEN_ALIASES = {
 }
 _TYPE_ALIAS_CACHE = OrderedDict()
 _TYPE_ALIAS_LOCK = threading.Lock()
+_EXTRA_SEARCH_LOCK = threading.Lock()
+_EXTRA_SEARCH_KEY = None
+_EXTRA_SEARCH_DB = None
+
+
+def _readable_record(row):
+    record = dict(row)
+    if record.get('lang') == 'ph':
+        record['printed_name'] = None
+        if 'printed_type_line' in record:
+            record['printed_type_line'] = None
+        if 'printed_text' in record:
+            record['printed_text'] = None
+    return record
+
+
+def _extra_matches(db, match, name_match):
+    """Index alternate names without modifying the published catalogue."""
+    global _EXTRA_SEARCH_KEY, _EXTRA_SEARCH_DB
+    # Published snapshot paths are unique per version; image-slot writes do not
+    # change source text and must not rebuild this index.
+    key = str(Path(db).resolve())
+    with _EXTRA_SEARCH_LOCK:
+        if key != _EXTRA_SEARCH_KEY:
+            library = next((parent for parent in Path(db).resolve().parents
+                            if parent.name == "_bibliotheque_mtg" and (parent / "state").is_dir()), None)
+            index_path = (library / "state" / ("search-names-v1-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:20] + ".sqlite")) if library else None
+            exists = bool(index_path and index_path.is_file())
+            if exists:
+                index = sqlite3.connect(f"file:{index_path.as_posix()}?mode=ro", uri=True, check_same_thread=False)
+            else:
+                index = sqlite3.connect(":memory:", check_same_thread=False)
+            try:
+                if not exists:
+                    _build_extra_index(index, db)
+                    if index_path:
+                        fd, temp_path = tempfile.mkstemp(prefix="search-names-", suffix=".tmp", dir=index_path.parent)
+                        os.close(fd)
+                        try:
+                            disk = sqlite3.connect(temp_path)
+                            try:
+                                index.backup(disk)
+                            finally:
+                                disk.close()
+                            try:
+                                os.replace(temp_path, index_path)
+                            except PermissionError:
+                                # Another process may already have published and opened it.
+                                if not index_path.is_file():
+                                    raise
+                        finally:
+                            Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                index.close()
+                raise
+            if _EXTRA_SEARCH_DB is not None:
+                _EXTRA_SEARCH_DB.close()
+            _EXTRA_SEARCH_DB, _EXTRA_SEARCH_KEY = index, key
+        ids = [row[0] for row in _EXTRA_SEARCH_DB.execute("SELECT provider_card_id FROM extra WHERE extra MATCH ?", (match,))]
+        name_ids = [row[0] for row in _EXTRA_SEARCH_DB.execute("SELECT provider_card_id FROM extra WHERE extra MATCH ?", (name_match,))]
+        return ids, name_ids
+
+
+def _build_extra_index(index, db):
+    index.execute("CREATE VIRTUAL TABLE extra USING fts5(provider_card_id UNINDEXED, set_code, lang, name, printed_name, type_line, printed_type_line, oracle_text, printed_text, tokenize='unicode61 remove_diacritics 2')")
+    with _connection(db) as source:
+        rows = source.execute("""SELECT sr.provider_card_id, e.code, sr.lang, '',
+            COALESCE(json_extract(sr.raw_json,'$.flavor_name'),'') || ' ' ||
+            COALESCE(json_extract(sr.raw_json,'$.card_faces[0].flavor_name'),'') || ' ' ||
+            COALESCE(json_extract(sr.raw_json,'$.card_faces[1].flavor_name'),''),
+            sr.type_line, '', '', ''
+            FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id)
+            WHERE json_valid(sr.raw_json) AND (json_type(sr.raw_json,'$.flavor_name') IS NOT NULL
+              OR json_type(sr.raw_json,'$.card_faces[0].flavor_name') IS NOT NULL
+              OR json_type(sr.raw_json,'$.card_faces[1].flavor_name') IS NOT NULL)""")
+        index.executemany("INSERT INTO extra VALUES(?,?,?,?,?,?,?,?,?)", rows)
+    index.commit()
 
 
 def _fold(value):
@@ -251,6 +330,8 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
     if match is not None and not edition_codes:
         matches_sql = f"SELECT DISTINCT p.printing_id FROM {from_sql} WHERE {clause}"
         matches_args = list(args)
+        matches_sql += f" UNION SELECT DISTINCT p.printing_id FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id) JOIN search_extra x ON x.provider_card_id=sr.provider_card_id WHERE {base_clause}"
+        matches_args.extend(args[:-1])
         if name_expansion:
             expanded_from = "editions e CROSS JOIN printings p ON p.set_id=e.set_id CROSS JOIN source_records sr ON sr.printing_id=p.printing_id"
             matches_sql += f" UNION SELECT DISTINCT p.printing_id FROM {expanded_from} WHERE {base_clause} AND p.oracle_id IN (SELECT oracle_id FROM search_oracles)"
@@ -282,6 +363,11 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
                 _SEARCH_CANDIDATE_CACHE.move_to_end(cache_key)
         if cached_ids is None:
             if name_expansion:
+                extra_ids, extra_name_ids = _extra_matches(db, match, name_match)
+                c.execute("CREATE TEMP TABLE search_extra (provider_card_id TEXT PRIMARY KEY) WITHOUT ROWID")
+                c.executemany("INSERT OR IGNORE INTO search_extra VALUES(?)", ((value,) for value in extra_ids))
+                c.execute("CREATE TEMP TABLE search_extra_names (provider_card_id TEXT PRIMARY KEY) WITHOUT ROWID")
+                c.executemany("INSERT OR IGNORE INTO search_extra_names VALUES(?)", ((value,) for value in extra_name_ids))
                 c.execute("CREATE TEMP TABLE search_oracles (oracle_id TEXT PRIMARY KEY) WITHOUT ROWID")
                 oracle_ids = c.execute("""SELECT DISTINCT p.oracle_id
                     FROM source_search
@@ -289,6 +375,7 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
                     JOIN printings p ON p.printing_id=sr.printing_id
                     WHERE source_search MATCH ? AND p.oracle_id IS NOT NULL""", (name_match,)).fetchall()
                 c.executemany("INSERT INTO search_oracles VALUES(?)", ((row[0],) for row in oracle_ids))
+                c.execute("INSERT OR IGNORE INTO search_oracles SELECT p.oracle_id FROM search_extra_names x JOIN source_records sr USING(provider_card_id) JOIN printings p USING(printing_id) WHERE p.oracle_id IS NOT NULL")
             c.execute("CREATE TEMP TABLE chosen_search AS " + ranked + " SELECT printing_id FROM chosen", ranked_args)
             count = c.execute("SELECT COUNT(*) FROM chosen_search").fetchone()[0]
             if count <= _SEARCH_CANDIDATE_MAX_ROWS:
@@ -335,7 +422,12 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
                 date_value = "(SELECT added_at FROM printing_added WHERE printing_id=p.printing_id)"
             else:
                 date_value = "NULL"
-            order = f"({date_value}) IS NULL,({date_value}) {direction}," + order
+            # Historical cards can share one migration timestamp; reverse their
+            # stable tie-breakers too so ascending and descending remain distinct.
+            order = (f"({date_value}) IS NULL,({date_value}) {direction},"
+                     f"e.released_at {direction},e.code {direction},"
+                     f"CAST(p.collector_number AS INTEGER) {direction},"
+                     f"p.collector_number {direction},p.printing_id {direction}")
         elif result_sort != "date":
             field_name, direction = result_sort.rsplit("_", 1)
             field = sort_fields[field_name]
@@ -364,18 +456,20 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
                 printed_type_line,mana_cost,mana_value,rarity,collector_number,layout,identity_status,
                 oracle_text,printed_text FROM ranked WHERE language_rank=1 ORDER BY ordinal"""
             rows = c.execute(row_query, page_args + [display_language, display_language]).fetchall()
-    return {"contract_version":CONTRACT_VERSION,"total":count,"limit":limit,"offset":offset,"items":[dict(r) for r in rows]}
+    return {"contract_version":CONTRACT_VERSION,"total":count,"limit":limit,"offset":offset,"items":[_readable_record(r) for r in rows]}
 
 
 def card_detail(db, provider_card_id):
     with _connection(db) as c:
         row=c.execute("SELECT sr.*,p.set_id,p.collector_number,p.layout,p.identity_status,p.variant_attributes_json,e.code AS set_code,e.name AS edition FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id) WHERE sr.provider_card_id=?",(str(provider_card_id),)).fetchone()
         if row is None: return {"contract_version":CONTRACT_VERSION,"found":False,"card":None}
-        result=dict(row)
-        translations=[dict(r) for r in c.execute("SELECT lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text FROM source_records WHERE printing_id=? ORDER BY lang",(row['printing_id'],))]
+        result=_readable_record(row)
+        translations=[_readable_record(r) for r in c.execute("SELECT lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text FROM source_records WHERE printing_id=? ORDER BY lang",(row['printing_id'],))]
         image_slots=[dict(r) for r in c.execute("SELECT face_index,preferred_language,selected_language,status,asset_id FROM image_slots WHERE printing_id=? ORDER BY face_index",(row['printing_id'],))]
     localized=next((x for x in translations if x['lang']=='fr'),None)
     fallback=next((x for x in translations if x['lang']=='en'),None)
+    if fallback is None:
+        fallback=next((x for x in translations if x['lang']=='ph'),None)
     result['translations']=translations
     result['display_text']={"language":"fr" if localized and localized['printed_text'] else ("en" if fallback and fallback['oracle_text'] else None),"value":(localized or fallback or {}).get('printed_text') if localized and localized['printed_text'] else (fallback or {}).get('oracle_text') if fallback else None,"fallback_used":not bool(localized and localized['printed_text'])}
     result['image_slots']=image_slots
@@ -394,15 +488,15 @@ def edition_cards(db, set_code, *, limit=50, offset=0):
                sr.mana_cost,sr.mana_value,sr.rarity,p.collector_number,p.layout,
                p.identity_status,sr.oracle_text,sr.printed_text,
                ROW_NUMBER() OVER (
-                   PARTITION BY COALESCE(p.oracle_id,p.printing_id)
-                   ORDER BY CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 ELSE 2 END,
+                   PARTITION BY p.printing_id
+                   ORDER BY CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 WHEN 'ja' THEN 2 WHEN 'ph' THEN 3 ELSE 4 END,
                             CAST(p.collector_number AS INTEGER),p.collector_number,
                             p.printing_id,sr.provider_card_id
                ) AS preferred_rank
         FROM editions e
         CROSS JOIN printings p ON p.set_id=e.set_id
         CROSS JOIN source_records sr ON sr.printing_id=p.printing_id
-        WHERE e.eligibility='eligible' AND e.code IN (""" + placeholders + """) AND sr.lang IN ('fr','en','ja')
+        WHERE e.eligibility='eligible' AND e.code IN (""" + placeholders + """)
     )"""
     with _connection(db) as c:
         total = c.execute(ranked + " SELECT COUNT(*) FROM ranked WHERE preferred_rank=1", codes).fetchone()[0]
@@ -414,4 +508,4 @@ def edition_cards(db, set_code, *, limit=50, offset=0):
             codes + [limit, offset],
         ).fetchall()
     return {"contract_version": CONTRACT_VERSION, "total": total, "limit": limit,
-            "offset": offset, "items": [dict(row) for row in rows]}
+            "offset": offset, "items": [_readable_record(row) for row in rows]}

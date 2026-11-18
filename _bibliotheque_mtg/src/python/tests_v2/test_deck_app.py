@@ -6,6 +6,55 @@ import urllib.request
 from bibliotheque_mtg import local_app
 
 
+def test_manual_image_import_is_allowed_during_batch_download(monkeypatch):
+    monkeypatch.setattr(local_app, "_MAINTENANCE_TASK", None)
+    monkeypatch.setattr(local_app, "_BATCH_TASK", {"status": "running"})
+    imported = []
+    monkeypatch.setattr(local_app, "import_local_image", lambda provider, face, data, **kwargs:
+                        imported.append((provider, face, data)) or {"status": "ready"})
+    server = local_app.LocalServer(("127.0.0.1", 0), local_app.LibraryHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        request = urllib.request.Request(
+            base + "/api/v2/image/import?provider_card_id=card&face_index=0",
+            data=b"image", method="POST", headers={"Origin": base})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+        assert imported == [("card", 0, b"image")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_batch_notification_keeps_edition_filter(monkeypatch, tmp_path):
+    monkeypatch.setattr(local_app, "_BATCH_TASK", None)
+    monkeypatch.setattr(local_app, "_MAINTENANCE_TASK", None)
+    monkeypatch.setattr(local_app, "_maintenance_busy_reason", lambda: None)
+    monkeypatch.setattr(local_app, "_run_batch_task", lambda *args: None)
+    monkeypatch.setattr(local_app, "resolve_current", lambda _root: {"database": tmp_path / "catalogue.sqlite"})
+    server = local_app.LocalServer(("127.0.0.1", 0), local_app.LibraryHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        request = urllib.request.Request(base + "/api/v2/batch-download", method="POST",
+            data=json.dumps({"mode": "edition", "filters": {"set": "m21"}}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            task_id = json.load(response)["task_id"]
+        with urllib.request.urlopen(base + "/api/v2/notifications", timeout=5) as response:
+            items = json.load(response)["items"]
+        batch = next(item for item in items if item.get("task_id") == task_id)
+        assert (batch["mode"], batch["filters"]) == ("edition", {"set": "m21"})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_deck_routes_and_import_use_exact_provider_ids(monkeypatch, tmp_path):
     db = tmp_path / "catalogue.sqlite"
     db.touch()

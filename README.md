@@ -1,5 +1,7 @@
 # Bibliothèque Magic locale
 
+![Icône de Database Magic](Logo.png)
+
 Application Windows de consultation d'un catalogue Magic: The Gathering : recherche et filtres, fiches de cartes, images à la demande, decks préconstruits et personnels, exports et historique des versions. Les métadonnées proviennent notamment de Scryfall et les decks préconstruits de MTGJSON.
 
 Le dépôt contient le programme, pas une bibliothèque déjà constituée : catalogue, archives téléchargées, images, decks personnels, configuration et sauvegardes restent locaux. Une connexion Internet est nécessaire pour le premier import et les mises à jour.
@@ -38,3 +40,58 @@ Le code est sous `_bibliotheque_mtg/src/python/`. Pour installer les outils de t
 ```
 
 Tesseract est facultatif pour l'OCR et Codex CLI pour les fonctions qui l'utilisent ; ils ne sont pas nécessaires à la recherche ordinaire. Voir le guide pour la configuration OCR.
+
+
+## Visite de l’application
+
+Les captures proviennent de l’application locale. Les données affichées dépendent de chaque installation. Les recherches et les ouvertures de fiches ci-dessous n’ont pas modifié la bibliothèque.
+
+### Accueil
+
+![Accueil complet](docs/screenshots/accueil.jpg)
+
+L’accueil résume les cartes, éditions et decks disponibles. Il permet de lancer une mise à jour, de consulter les versions conservées et de récupérer une liste de 100 cartes au maximum, par noms français ou anglais ou URL EDHREC. La récupération télécharge des images ; l’export crée des PNG sur le Bureau.
+
+### Recherche et fiche
+
+![Recherche combinant texte, édition, type, couleur et images présentes](docs/screenshots/recherche.jpg)
+
+Cet exemple cherche « vol » dans Final Fantasy, parmi les créatures bleues ayant déjà une image. Les filtres couvrent aussi rareté, valeur de mana, force, endurance et tri. Chaque résultat est une impression exacte. Le bouton de rafraîchissement relit les images locales ; le téléchargement groupé traite les images manquantes de la sélection.
+
+![Fiche d’une carte](docs/screenshots/fiche-carte.jpg)
+
+La visionneuse affiche les faces et permet de parcourir les résultats, d’ajouter la carte à un deck personnel, d’importer ou d’exporter une image et de rechercher une meilleure image.
+
+### Éditions
+
+![Parcours de l’édition Le Seigneur des Anneaux](docs/screenshots/editions.jpg)
+
+Choisir une édition par son nom ou son code affiche ses cartes avec pagination. On peut ouvrir chaque fiche, rafraîchir l’état local ou demander les images manquantes de l’édition.
+
+### Decks préconstruits
+
+![Kits de démarrage Final Fantasy](docs/screenshots/decks.jpg)
+
+L’index MTGJSON se recherche par nom, édition, format, type de produit, couleurs et disponibilité des images. Ouvrir un deck donne sa composition, ses commandants et ses jetons. Le chargement des images et l’export sont des actions explicites.
+
+### Decks personnels
+
+L’onglet Perso sert à créer ou copier une composition, puis à modifier ses sections, les quantités et l’ordre des cartes. La mention « Enregistré » confirme la sauvegarde.
+
+### Archives
+
+![Archives à identifier](docs/screenshots/archives.jpg)
+
+Les anciennes images non rapprochées d’une impression précise restent séparées du catalogue. La page permet un filtrage par état, une lecture OCR, une recherche de nom et une attribution manuelle avant import. L’installation photographiée ne contenait pas d’archive non résolue.
+
+### Choix d’image et génération française
+
+![Recherche réelle d’images pour une impression](docs/screenshots/comparaison-images.jpg)
+
+Depuis la fiche, la recherche de meilleure image présente des candidates FR, EN et JA avec leurs dimensions. L’image actuelle et la proposition sont comparées avant validation.
+
+![Référence visuelle anglaise choisie](docs/screenshots/reference-visuelle.jpg)
+
+![Référence de texte française choisie](docs/screenshots/reference-francaise.jpg)
+
+Si aucune image française satisfaisante n’existe, le parcours peut créer une candidate avec le Codex CLI installé localement. La première référence fournit le graphisme ; le texte français provient d’une image française choisie ou des données officielles locales. Une candidate doit être comparée et acceptée explicitement avant de remplacer l’image. Vérifiez son illustration, ses symboles et tout son texte : la fidélité n’est pas certifiée automatiquement. La cloche permet de reprendre le suivi d’une génération en cours. Ce parcours s’appuie sur [l’outil image du projet open source Codex](https://github.com/openai/codex/blob/main/codex-rs/ext/image-generation/src/tool.rs).

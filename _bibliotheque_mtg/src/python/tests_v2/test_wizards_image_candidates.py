@@ -1,10 +1,41 @@
 import json
 import sqlite3
 import time
+import threading
+import urllib.request
 from io import BytesIO
 
-from bibliotheque_mtg import image_download
+from bibliotheque_mtg import image_download, local_app
 from PIL import Image
+
+
+def test_japanese_visual_accepts_same_name_french_text_reference(monkeypatch, tmp_path):
+    visual = {"provider_card_id": "jp", "printing_id": "jp-print", "face_index": 0,
+              "language": "ja", "source_data": b"visual"}
+    french = {"provider_card_id": "fr", "printing_id": "fr-print", "face_index": 0,
+              "language": "fr", "source_data": b"text", "text_reference_only": True}
+    monkeypatch.setattr(local_app, "_image_candidate", lambda _id: [visual, french])
+    monkeypatch.setattr(local_app, "_same_name_text_reference", lambda *_args: True)
+    calls = []
+    monkeypatch.setattr(local_app, "_start_image_task", lambda *args, **kwargs:
+                        calls.append((args, kwargs)) or {"task_id": "test", "status": "queued"})
+    monkeypatch.setattr(local_app.LibraryHandler, "db", property(lambda self: tmp_path / "catalogue.sqlite"))
+    server = local_app.LocalServer(("127.0.0.1", 0), local_app.LibraryHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        payload = {"candidate_id": "test", "visual_index": 0, "text_index": 1, "text_mode": "image"}
+        request = urllib.request.Request(base + "/api/v2/image/ai/generate",
+            data=json.dumps(payload).encode(), method="POST",
+            headers={"Content-Type": "application/json", "Origin": base})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 202
+        assert len(calls) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 class _Response:

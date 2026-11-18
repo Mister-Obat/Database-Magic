@@ -1,15 +1,61 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { view: "info", searchPage: 0, editionPage: 0, deckPage: 0, archivePage: 0, searchTotal: 0, searchItems: [], editionCardsTotal: 0, deckTotal: 0, archiveTotal: 0, editions: [], activeSet: "", selectedDeck: null, openDeckId: null, deckDetailRequest: 0, deckListKey: null, deckListScroll: 0, deckListOpener: null, deckTaskId: null, deckPollTimer: null, deckFacetsLoaded: false, deckColorAttempted: false, deckColorPollTimer: null, deckSuggestionRequest: 0, deckRequest: 0, searchRequest: 0, editionRequest: 0, cardRequest: 0, cardGallery: null, maintenancePollTimer: null };
+const state = { view: "info", searchPage: 0, editionPage: 0, deckPage: 0, archivePage: 0, searchTotal: 0, searchItems: [], editionCardsTotal: 0, deckTotal: 0, deckExecuted: false, deckAppliedFilters: null, archiveTotal: 0, editions: [], activeSet: "", selectedDeck: null, openDeckId: null, deckDetailRequest: 0, deckListKey: null, deckListScroll: 0, deckListOpener: null, deckTaskId: null, deckPollTimer: null, deckFacetsLoaded: false, deckColorAttempted: false, deckColorPollTimer: null, deckSuggestionRequest: 0, deckRequest: 0, searchRequest: 0, editionRequest: 0, cardRequest: 0, cardGallery: null, maintenancePollTimer: null };
 const viewScrollPositions = new Map();
 const SEARCH_DRAFT_KEY = "database-magic-search-draft-v1";
 const RECENT_SEARCHES_KEY = "database-magic-recent-searches-v1";
 let initialRouteRestored = false;
 let searchDraftTouched = false;
 const PAGE_SIZE = 50;
+const DECK_PAGE_SIZE = 200;
 const imageTaskHandlers = new Map();
 const notificationButton = document.getElementById("notification-button");
+const REVIEW_SEEN_KEY = "database-magic-seen-reviews-v1";
+let currentReviewTaskIds = new Set();
+let seenReviewTaskIds = new Set();
+let notificationAudioContext = null;
+try {
+  const saved = JSON.parse(localStorage.getItem(REVIEW_SEEN_KEY) || "[]");
+  if (Array.isArray(saved)) seenReviewTaskIds = new Set(saved);
+} catch { /* Storage may be unavailable; the badge still works for this page. */ }
+function primeNotificationAudio() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  try {
+    notificationAudioContext ||= new AudioContextClass();
+    if (notificationAudioContext.state === "suspended") void notificationAudioContext.resume().catch(() => {});
+    return notificationAudioContext;
+  } catch { return null; }
+}
+document.addEventListener("pointerdown", primeNotificationAudio, { once: true });
+document.addEventListener("keydown", primeNotificationAudio, { once: true });
+function playNotificationSound() {
+  const audio = primeNotificationAudio();
+  if (!audio || audio.state !== "running") return;
+  try {
+    const start = audio.currentTime;
+    const tone = audio.createOscillator();
+    const volume = audio.createGain();
+    tone.type = "sine";
+    tone.frequency.setValueAtTime(880, start);
+    tone.frequency.exponentialRampToValueAtTime(660, start + .22);
+    volume.gain.setValueAtTime(.0001, start);
+    volume.gain.exponentialRampToValueAtTime(.018, start + .025);
+    volume.gain.exponentialRampToValueAtTime(.0001, start + .22);
+    tone.connect(volume);
+    volume.connect(audio.destination);
+    tone.onended = () => { tone.disconnect(); volume.disconnect(); };
+    tone.start(start);
+    tone.stop(start + .23);
+  } catch { /* Audio is optional when the browser blocks playback. */ }
+}
+function updateReviewBadge() {
+  const visible = [...currentReviewTaskIds].some(id => !seenReviewTaskIds.has(id));
+  const wasVisible = notificationButton.classList.contains("has-review");
+  notificationButton.classList.toggle("has-review", visible);
+  if (visible && !wasVisible) playNotificationSound();
+}
 const closeApplicationButton = document.getElementById("close-application");
 const shutdownDialog = document.getElementById("shutdown-dialog");
 closeApplicationButton.addEventListener("click", () => shutdownDialog.showModal());
@@ -28,7 +74,16 @@ document.getElementById("shutdown-confirm").addEventListener("click", async () =
     window.alert(`Fermeture impossible : ${error.message}`);
   }
 });
-notificationButton.addEventListener("click", () => { const panel = document.getElementById("notification-panel"); panel.hidden = !panel.hidden; notificationButton.setAttribute("aria-expanded", String(!panel.hidden)); });
+notificationButton.addEventListener("click", () => {
+  const panel = document.getElementById("notification-panel");
+  panel.hidden = !panel.hidden;
+  notificationButton.setAttribute("aria-expanded", String(!panel.hidden));
+  if (!panel.hidden) {
+    seenReviewTaskIds = new Set(currentReviewTaskIds);
+    updateReviewBadge();
+    try { localStorage.setItem(REVIEW_SEEN_KEY, JSON.stringify([...seenReviewTaskIds])); } catch { /* Keep the in-memory state. */ }
+  }
+});
 document.addEventListener("pointerdown", event => {
   if (event.target.closest(".notification-center")) return;
   const panel = document.getElementById("notification-panel");
@@ -41,6 +96,8 @@ async function refreshNotifications() {
     const items = (response.items || []).filter(item => !["complete", "cancelled", "ready"].includes(item.status));
     const count = items.filter(item => ["queued", "running", "needs_review", "error", "failed"].includes(item.status)).length;
     document.getElementById("notification-count").textContent = String(count);
+    currentReviewTaskIds = new Set(items.filter(item => item.status === "needs_review").map(item => item.task_id));
+    updateReviewBadge();
     const list = document.getElementById("notification-list"); list.replaceChildren();
     if (!items.length) { list.append(node("p", "muted", "Aucun traitement en cours ou à vérifier.")); return; }
     for (const item of items) {
@@ -54,6 +111,14 @@ async function refreshNotifications() {
           void openImagePreviewTask(item.task_id);
         } else if (item.kind === "ai_generation") {
           void openAIReviewTask(item.task_id, item);
+        } else if (item.kind === "batch_download") {
+          void openBatchDownloadTask(item);
+        } else if (item.kind === "deck_download" && item.deck_id) {
+          state.deckTaskId = item.task_id;
+          setView("decks");
+          void openDeck(item.deck_id);
+        } else if (item.kind === "maintenance") {
+          setView("info");
         }
       });
       row.append(open);
@@ -167,6 +232,7 @@ function cardActionIcon(name) {
     upload: [["path", { d: "M12 3v12" }], ["path", { d: "m17 8-5-5-5 5" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }]],
     download: [["path", { d: "M12 15V3" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }], ["path", { d: "m7 10 5 5 5-5" }]],
     addDeck: [["path", { d: "M12 10v6" }], ["path", { d: "M9 13h6" }], ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }]],
+    usages: [["rect", { x: 3, y: 3, width: 7, height: 7, rx: 1 }], ["rect", { x: 14, y: 3, width: 7, height: 7, rx: 1 }], ["path", { d: "M6.5 14v7m-3.5-3.5h7M14 15h7m-7 4h7" }]],
     flip: [["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }], ["path", { d: "M21 3v5h-5" }], ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }], ["path", { d: "M8 16H3v5" }]]
   };
   const namespace = "http://www.w3.org/2000/svg";
@@ -231,18 +297,23 @@ function viewRoute(view = state.view) {
     add("page", state.searchPage + 1, 1);
   } else if (view === "editions") {
     add("set", $("edition-select").value); add("q", $("edition-query").value.trim());
+    if (state.exactEditionCode && $("edition-select").value === state.exactEditionCode) add("exact", 1);
     add("page", state.editionPage + 1, 1);
   } else if (view === "decks") {
-    add("q", $("deck-query").value.trim()); add("format", $("deck-format").value);
-    add("set", $("deck-edition").value); add("type", $("deck-type").value);
-    add("colors", selectedManaColors(document.querySelector(".deck-color-filter")));
-    add("color_mode", $("deck-color-mode").value, "contains");
-    add("sort", $("deck-sort").value, "date"); add("order", $("deck-order").value, "desc");
-    add("image_filter", $("deck-image-filter").value, "all");
-    add("page", state.deckPage + 1, 1);
+    const applied = state.deckAppliedFilters || {};
+    if (state.deckExecuted) add("searched", 1);
+    add("q", applied.q); add("format", applied.deck_format);
+    add("set", applied.set_code); add("type", applied.deck_type);
+    add("colors", applied.colors);
+    add("color_mode", applied.color_mode, "contains");
+    add("sort", applied.sort, "date"); add("order", applied.order, "desc");
+    add("image_filter", applied.image_filter, "all");
+    if (state.deckExecuted) add("page", state.deckPage + 1, 1);
     add("deck", state.openDeckId);
   } else if (view === "archives") {
     add("status", $("archive-status").value); add("page", state.archivePage + 1, 1);
+  } else if (view === "perso") {
+    add("deck", personalState.deck?.id);
   }
   return `#${view}${query.size ? `?${query}` : ""}`;
 }
@@ -262,9 +333,8 @@ let routeRestoreRequest = 0;
 let initialInfo, initialEditions;
 async function restoreRoute() {
   const request = ++routeRestoreRequest;
-  const personalRoute = location.hash.slice(1).split("?", 1)[0] === "perso";
-  if (!personalRoute && initialInfo) await initialInfo;
-  if (!personalRoute && initialEditions) await initialEditions;
+  const routeView = location.hash.slice(1).split("?", 1)[0];
+  if (["recherche", "editions"].includes(routeView) && initialEditions) await initialEditions;
   if (request !== routeRestoreRequest) return;
   const pendingUserDraft = !initialRouteRestored && searchDraftTouched ? captureSearchDraft() : null;
   const pendingStoredDraft = readSearchDraft();
@@ -293,7 +363,9 @@ async function restoreRoute() {
     else if (pendingStoredDraft?.route === location.hash) applySearchDraft(pendingStoredDraft);
   } else if (view === "editions") {
     $("edition-query").value = query.get("q") || "";
-    $("edition-select").value = groupedEditionCode(query.get("set"));
+    state.exactEditionCode = query.has("exact") ? query.get("set") : null;
+    if (state.exactEditionCode) selectExactEditionCode(state.exactEditionCode);
+    else $("edition-select").value = groupedEditionCode(query.get("set"));
     renderEditionSuggestions();
     state.editionPage = routePage(query);
   } else if (view === "decks") {
@@ -307,11 +379,13 @@ async function restoreRoute() {
     $("deck-sort").value = query.get("sort") || "date"; $("deck-order").value = query.get("order") || "desc";
     $("deck-image-filter").value = query.get("image_filter") || "all";
     state.deckPage = routePage(query);
+    state.deckExecuted = query.has("searched") || [...query.keys()].some(key => key !== "deck");
+    state.deckAppliedFilters = state.deckExecuted ? deckResultFilters() : null;
   } else if (view === "archives") {
     $("archive-status").value = query.get("status") || ""; state.archivePage = routePage(query);
   }
   initialRouteRestored = true;
-  const restoreDeckScroll = view === "decks" && !query.has("deck") && state.openDeckId
+  const restoreDeckScroll = view === "decks" && state.deckExecuted && !query.has("deck") && state.openDeckId
     && state.deckListKey === params(deckPageQuery());
   if (view === "decks") {
     const id = query.get("deck");
@@ -319,6 +393,8 @@ async function restoreRoute() {
     else if (id !== state.openDeckId) void openDeck(id, null);
   }
   setView(view, null);
+  if (view === "perso" && query.get("deck") && personalState.deck?.id !== query.get("deck"))
+    void openPersonalDeck(query.get("deck"));
   if (restoreDeckScroll) scrollToDeckList();
   if (view === "recherche" && !state.searchItems.length) {
     setText($("search-status"), "Cliquez sur Rechercher pour lancer la recherche.");
@@ -351,8 +427,8 @@ function setView(view, urlMode = "push") {
   activateView(view);
   if (urlMode) syncRoute(urlMode);
   if (view === "editions") void ensureEditions().then(ensureEditionPage);
-  if (view === "decks" && !state.openDeckId) void loadDeckFacets().then(ensureDeckPage);
-  if (view === "perso" && !$("personal-content").hasChildNodes()) void showPersonalDecks();
+  if (view === "decks" && !state.openDeckId) void loadDeckFacets().then(() => { if (state.deckExecuted) ensureDeckPage(); });
+  if (view === "perso" && !$("personal-content").hasChildNodes() && !new URLSearchParams(location.hash.split("?")[1] || "").has("deck")) void showPersonalDecks();
   if (view === "archives") void ensureArchivePage();
   if (view === "info") void loadMaintenanceStatus();
   if (view !== previousView) {
@@ -626,6 +702,14 @@ function groupedEditionCode(code) {
   if (!code) return "";
   return state.editions.find(edition => edition.code === code || edition.code.split(",").includes(code))?.code || code;
 }
+function selectExactEditionCode(code) {
+  const select = $("edition-select");
+  if (![...select.options].some(option => option.value === code)) {
+    const option = node("option", "", `${code.toUpperCase()} · édition précise`);
+    option.value = code; select.append(option);
+  }
+  select.value = code;
+}
 function groupEditions(editions) {
   const suffix = /^(?: (?:Commander|Tokens|Promos|Art Series|Eternal|Jumpstart Front Cards|Minigames|Southeast Asia Tokens))+(?: .*)?$/i;
   const named = editions.map(edition => ({ ...edition, familyName: edition.name.replace(/^Alchemy: /i, "") }));
@@ -884,7 +968,8 @@ async function runSearch() {
   if (state.view === "recherche") syncRoute();
   persistSearchDraft();
   hideRecentSearches();
-  const request = ++state.searchRequest; setText($("search-status"), "Recherche…");
+  const request = ++state.searchRequest;
+  $("search-status").replaceChildren(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", "Recherche…"));
   try {
     const data = await getJSON("/api/v2/search", searchFilters());
     if (request !== state.searchRequest) return;
@@ -919,14 +1004,76 @@ async function refreshSearchImages() {
 }
 function updateSearchPager() { const pages = Math.max(1, Math.ceil(state.searchTotal / SEARCH_PAGE_SIZE)); $("search-pager").hidden = pages <= 1; setText($("page-status"), `Page ${state.searchPage + 1} sur ${pages} · ${formatNumber(state.searchTotal)} résultats`); $("previous-page").disabled = state.searchPage === 0; $("next-page").disabled = (state.searchPage + 1) * SEARCH_PAGE_SIZE >= state.searchTotal; }
 let batchTaskId = null, batchMode = null, batchPollTimer = null;
+const BATCH_BASELINE_SECONDS_PER_IMAGE = 8 * 3600 / 11376;
+function batchTimeRemaining(task) {
+  if (task.status !== "running" || !task.total || !task.processing_started_at) return "";
+  const elapsed = Math.max(0, Date.now() / 1000 - task.processing_started_at);
+  const observed = task.completed > 0 ? elapsed / task.completed : BATCH_BASELINE_SECONDS_PER_IMAGE;
+  const weight = task.completed / (task.completed + 50);
+  const secondsPerImage = BATCH_BASELINE_SECONDS_PER_IMAGE * (1 - weight) + observed * weight;
+  const sinceProgress = Math.max(0, Date.now() / 1000 - (task.last_progress_at || task.processing_started_at));
+  const seconds = Math.max(0, Math.ceil((task.total - task.completed) * secondsPerImage - sinceProgress));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  return ` · temps restant estimé : ${hours ? `${hours} h ` : ""}${minutes} min`;
+}
 function deckResultFilters() { return { q: $("deck-query").value.trim(), deck_format: $("deck-format").value, deck_type: $("deck-type").value, set_code: $("deck-edition").value, colors: selectedManaColors(document.querySelector(".deck-color-filter")), color_mode: $("deck-color-mode").value, sort: $("deck-sort").value, order: $("deck-order").value, image_filter: $("deck-image-filter").value }; }
-function deckHasFilter() { const f = deckResultFilters(); return Boolean(f.q || f.deck_format || f.deck_type || f.set_code || f.colors); }
+function deckHasFilter() { const f = state.deckAppliedFilters || {}; return Boolean(f.q || f.deck_format || f.deck_type || f.set_code || f.colors); }
 function updateBatchButtons() {
   $("download-search-results").disabled = Boolean(batchTaskId) || !state.searchExecuted || !state.searchTotal;
   $("download-edition-results").disabled = Boolean(batchTaskId) || !$("edition-select").value || !state.editionCardsTotal;
-  $("download-deck-results").disabled = Boolean(batchTaskId) || !deckHasFilter() || !state.deckTotal;
+  $("download-deck-results").disabled = Boolean(batchTaskId) || !state.deckExecuted || !deckHasFilter() || !state.deckTotal;
 }
 function batchStatusElement(mode) { return $({ search: "search-batch-status", edition: "edition-batch-status", decks: "deck-batch-status" }[mode]); }
+async function openBatchDownloadTask(task) {
+  const mode = task.mode;
+  if (!batchStatusElement(mode)) return;
+  const filters = task.filters || {};
+  batchTaskId = task.task_id;
+  batchMode = mode;
+  if (mode === "edition") {
+    await ensureEditions();
+    if (filters.set) {
+      $("edition-query").value = "";
+      $("edition-select").value = filters.set;
+      state.exactEditionCode = null;
+      state.editionPage = 0;
+    }
+    setView("editions");
+    void renderEditionPage();
+  } else if (mode === "search") {
+    applySearchDraft({ main: { q: filters.q, set: filters.set, rarity: filters.rarity,
+      color: filters.color, color_mode: filters.color_mode, card_type: filters.card_type },
+      refine: { ...filters, result_sort: (filters.result_sort || "date").split("_")[0],
+        result_order: (filters.result_sort || "date_desc").split("_")[1] || "desc" } });
+    state.searchBaseFilters = mainSearchFilters();
+    state.refineFilters = refineSearchFilters();
+    state.searchPage = 0;
+    setView("recherche");
+    void runSearch();
+  } else {
+    await loadDeckFacets();
+    $("deck-query").value = filters.q || "";
+    $("deck-format").value = filters.deck_format || "";
+    $("deck-type").value = filters.deck_type || "";
+    $("deck-edition").value = filters.set_code || "";
+    restoreManaColors(document.querySelector(".deck-color-filter"), filters.colors);
+    $("deck-color-mode").value = filters.color_mode || "contains";
+    $("deck-sort").value = filters.sort || "date";
+    $("deck-order").value = filters.order || "desc";
+    $("deck-image-filter").value = filters.image_filter || "all";
+    state.deckAppliedFilters = deckResultFilters();
+    state.deckExecuted = true;
+    state.deckPage = 0;
+    closeDeck(null);
+    setView("decks");
+    void renderDeckPage();
+  }
+  updateBatchButtons();
+  void pollBatchDownload();
+  $("notification-panel").hidden = true;
+  notificationButton.setAttribute("aria-expanded", "false");
+}
 async function startBatchDownload(mode) {
   const count = mode === "search" ? state.searchTotal : mode === "edition" ? state.editionCardsTotal : state.deckTotal;
   if (!count || mode === "decks" && !deckHasFilter()) return;
@@ -935,9 +1082,9 @@ async function startBatchDownload(mode) {
     if (!window.confirm(`Télécharger les images manquantes de ${formatNumber(count)} ${unit} ? Cette opération peut utiliser beaucoup de données.`)) return;
   }
   const filters = mode === "search" ? Object.fromEntries(Object.entries(searchFilters()).filter(([key]) => !["limit", "offset"].includes(key)))
-    : mode === "edition" ? { set: $("edition-select").value } : deckResultFilters();
+    : mode === "edition" ? { set: $("edition-select").value } : state.deckAppliedFilters;
   const status = batchStatusElement(mode);
-  setText(status, "Préparation du téléchargement…");
+  setText(status, "Analyse des cartes et des images déjà présentes…");
   try {
     const task = await postJSON("/api/v2/batch-download", { mode, filters });
     batchTaskId = task.task_id; batchMode = mode;
@@ -950,7 +1097,11 @@ async function pollBatchDownload() {
   try {
     const task = await getJSON("/api/v2/batch-download/task", { task_id: batchTaskId });
     const status = batchStatusElement(batchMode);
-    status.replaceChildren(node("span", "", `${task.completed}/${task.total} impressions traitées · ${task.ready} prêtes · ${task.failed} échecs · ${task.unavailable} indisponibles${task.current ? ` · ${task.current}` : ""}`));
+    if (["queued", "running"].includes(task.status) && !task.total) {
+      const spinner = node("span", "card-loading-spinner batch-preparation-spinner");
+      spinner.setAttribute("aria-hidden", "true");
+      status.replaceChildren(spinner, node("span", "", "Analyse des cartes, suppression des doublons et vérification des images déjà présentes…"));
+    } else status.replaceChildren(node("span", "", `${task.completed}/${task.total} impressions traitées${batchTimeRemaining(task)} · ${task.ready} prêtes · ${task.failed} échecs · ${task.unavailable} indisponibles${task.current ? ` · ${task.current}` : ""}`));
     if (task.errors?.length) {
       const details = node("details", "deck-errors"); details.append(node("summary", "error-state", `${task.errors.length} erreur(s)`));
       const list = node("ul"); for (const error of task.errors) list.append(node("li", "", error)); details.append(list); status.append(details);
@@ -967,7 +1118,7 @@ async function pollBatchDownload() {
     if (state.view === "decks") void renderDeckPage();
   } catch (error) { batchPollTimer = setTimeout(pollBatchDownload, 3000); }
 }
-function openEdition(code) { $("edition-query").value = ""; hideEditionSuggestions(); $("edition-select").value = groupedEditionCode(code); state.activeSet = $("edition-select").value; state.editionPage = 0; setView("editions"); }
+function openEdition(code) { $("edition-query").value = ""; hideEditionSuggestions(); state.exactEditionCode = null; $("edition-select").value = groupedEditionCode(code); state.activeSet = $("edition-select").value; state.editionPage = 0; setView("editions"); }
 let editionPageKey = null;
 function editionSelectionKey() {
   return JSON.stringify([$("edition-select").value, state.editionPage]);
@@ -1065,6 +1216,54 @@ async function openImagePreviewTask(taskId) {
     if (choiceDialog.open) choiceDialog.close();
     await openCard(task.provider_card_id, null, task.face_index, task);
   } catch (error) { console.error("Impossible de rouvrir la recherche d’image.", error); }
+}
+async function showCardUsages(card) {
+  const dialog = node("dialog", "card-usages-dialog");
+  const title = node("h2", "", "Éditions et decks utilisant cette carte");
+  const tabs = node("div", "card-usages-tabs"); tabs.setAttribute("role", "tablist");
+  const content = node("div", "card-usages-content");
+  const loading = node("p", "card-usages-loading muted");
+  const spinner = node("span", "card-loading-spinner search-loading-spinner"); spinner.setAttribute("aria-hidden", "true");
+  loading.append(spinner, node("span", "", "Recherche des occurrences locales…")); content.append(loading);
+  const close = node("button", "secondary-button", "Fermer"); close.type = "button";
+  close.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("pointerdown", event => {
+    if (event.target !== dialog) return;
+    const box = dialog.getBoundingClientRect();
+    if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) dialog.close();
+  });
+  dialog.append(title, tabs, content, close); document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true }); dialog.showModal();
+  const group = (label, entries, route, name) => {
+    const section = node("section", "card-usages-group");
+    section.append(node("h3", "", label));
+    if (!entries?.length) section.append(node("p", "muted", "Aucune occurrence locale connue."));
+    for (const entry of entries || []) {
+      const link = node("a", "secondary-button", name(entry));
+      link.href = `${location.origin}/${route(entry)}`; link.target = "_blank"; link.rel = "noopener noreferrer";
+      section.append(link);
+    }
+    return section;
+  };
+  try {
+    const data = await getJSON("/api/v2/card/usage", { id: card.provider_card_id });
+    if (!dialog.open) return;
+    const renderScope = scope => {
+      const entries = data[scope] || data;
+      content.replaceChildren(
+        group("Éditions", entries.editions, e => `#editions?set=${encodeURIComponent(e.code)}&exact=1`, e => `${e.name_fr || e.name || e.code} (${e.code.toUpperCase()})`),
+        group("Decks préconstruits chargés", entries.decks, d => `#decks?deck=${encodeURIComponent(d.id)}`, d => d.name_fr || d.name || d.id),
+        group("Decks personnels", entries.personal_decks, d => `#perso?deck=${encodeURIComponent(d.id)}`, d => d.name || d.id));
+      if (data.unloaded_decks) content.append(node("p", "muted", "Les decks préconstruits non encore chargés ne sont pas examinés."));
+      for (const button of tabs.children) button.setAttribute("aria-selected", String(button.dataset.scope === scope));
+    };
+    for (const [scope, label] of [["exact", "Carte et édition précises"], ["global", "Carte globale"]]) {
+      const button = node("button", "secondary-button", label); button.type = "button";
+      button.dataset.scope = scope; button.setAttribute("role", "tab");
+      button.addEventListener("click", () => renderScope(scope)); tabs.append(button);
+    }
+    renderScope("exact");
+  } catch (error) { if (dialog.open) content.replaceChildren(node("p", "error-state", error.message)); }
 }
 async function openCard(providerId, gallery = null, preferredFace = null, resumedPreview = null) {
   const dialog = $("card-dialog"), target = $("card-detail");
@@ -1185,6 +1384,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           const showPreview = (url, alt, host) => { const preview = node("img", "comparison-preview"); preview.src = url; preview.alt = alt; host.replaceChildren(preview); };
           const addThumb = (url, label, index, dimensions = "") => {
             const button = node("button", "comparison-option"); button.type = "button";
+            if (wizardStep === "text" && String(index) === textSelect.value) button.classList.add("selected");
             const thumb = node("img", "comparison-thumb"); thumb.src = url; thumb.alt = label;
             button.append(thumb, node("span", "comparison-caption", dimensions || label));
             button.addEventListener("click", () => {
@@ -1520,6 +1720,10 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
       addPersonal.type = "button"; addPersonal.setAttribute("aria-label", "Ajouter cette carte à un deck personnel");
       addPersonal.addEventListener("click", () => void choosePersonalDeck(card));
       controls.append(addPersonal);
+      const usages = node("button", "secondary-button card-image-icon card-usages-button"); usages.append(cardActionIcon("usages"));
+      usages.type = "button"; usages.setAttribute("aria-label", "Voir les éditions et decks utilisant cette carte");
+      usages.addEventListener("click", () => void showCardUsages(card));
+      controls.append(usages);
       if (slots.length > 1) {
         const nextFace = slots[(slots.findIndex(x => x.face_index === selectedFace) + 1) % slots.length];
         const flipButton = node("button", "secondary-button card-image-icon card-face-flip"); flipButton.append(cardActionIcon("flip"));
@@ -1577,7 +1781,9 @@ async function openAIReviewTask(taskId, summary = {}) {
     await openCard(providerId, null, faceIndex);
     const comparison = node("section", "image-comparison");
     comparison.dataset.step = "review";
+    comparison.classList.add("resumed-ai-review");
     comparison.append(node("h2", "comparison-title", "Comparer la carte générée"));
+    const previewPane = node("div", "comparison-preview-pane");
     const columns = node("div", "comparison-columns");
     const frenchTextPanel = node("section", "ai-french-text-panel");
     const addColumn = (title, imageUrl, alt) => {
@@ -1599,41 +1805,62 @@ async function openAIReviewTask(taskId, summary = {}) {
     const actions = node("div", "comparison-choices");
     const chooseOld = node("button", "secondary-button", "Conserver l’image actuelle"); chooseOld.type = "button";
     const chooseNew = node("button", "primary-button", "Utiliser l’image générée"); chooseNew.type = "button";
-    const status = node("p", "muted", "Vérifiez le texte français avant de choisir.");
-    const correction = node("textarea", "ai-correction-prompt"); correction.rows = 2; correction.maxLength = 4000; correction.placeholder = "Précision pour la correction (facultatif)"; correction.setAttribute("aria-label", "Précision pour la correction IA");
+    const status = node("p", "muted review-status"); status.setAttribute("aria-live", "polite");
+    const correction = node("textarea", "ai-correction-prompt"); correction.rows = 1; correction.maxLength = 4000; correction.placeholder = "Précision pour la correction (facultatif)"; correction.setAttribute("aria-label", "Précision pour la correction IA");
     correction.value = result.correction_prompt || task.correction_prompt || "";
     const retry = node("button", "secondary-button", "Générer une correction"); retry.type = "button";
-    const cancelRetry = node("button", "secondary-button", "Annuler"); cancelRetry.type = "button"; cancelRetry.hidden = true;
     const retryPane = node("div", "review-correction"); retryPane.append(correction, retry);
     const canRetry = Boolean(sourceCandidateId && Number.isInteger(visualIndex) && (textMode !== "image" || Number.isInteger(textIndex)));
     retryPane.hidden = !canRetry;
+    const reviewTitle = comparison.querySelector(".comparison-title");
+    const loading = node("div", "ai-generation-progress");
+    const loadingMessage = node("p", "muted", "Codex génère la carte française. Cette étape peut prendre quelques minutes.");
+    const leaveWaiting = node("button", "secondary-button", "Reprendre la consultation en attendant la notification"); leaveWaiting.type = "button";
+    const cancelWaiting = node("button", "secondary-button", "Annuler"); cancelWaiting.type = "button";
+    const waitingActions = node("div", "ai-waiting-actions"); waitingActions.append(cancelWaiting, leaveWaiting);
+    loading.append(node("div", "card-loading-spinner"), loadingMessage, waitingActions);
+    leaveWaiting.addEventListener("click", () => { reviewDialog.close(); if ($("card-dialog").open) $("card-dialog").close(); });
+    const showRetryLoading = () => {
+      comparison.dataset.step = "generating";
+      reviewTitle.textContent = "Étape 3 sur 3 · Génération en cours";
+      comparison.replaceChildren(reviewTitle, loading);
+    };
+    const showRetryReview = () => {
+      comparison.dataset.step = "review";
+      reviewTitle.textContent = "Comparer la carte générée";
+      comparison.replaceChildren(reviewTitle, previewPane, reviewFooter);
+      retry.disabled = chooseOld.disabled = chooseNew.disabled = false;
+    };
     retry.addEventListener("click", async () => {
-      retry.disabled = chooseOld.disabled = chooseNew.disabled = true; setText(status, "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications.");
+      retry.disabled = chooseOld.disabled = chooseNew.disabled = true;
+      cancelWaiting.disabled = true;
+      setText(loadingMessage, "Codex génère la carte française. Cette étape peut prendre quelques minutes.");
+      showRetryLoading();
       try {
         const started = await postJSON("/api/v2/image/ai/generate", { candidate_id: sourceCandidateId, visual_index: visualIndex, ...(textMode === "image" ? { text_index: textIndex } : { text_mode: textMode }), correction_prompt: correction.value.trim(), previous_id: currentAiId });
         if (!started.task_id) throw new Error("Le serveur n’a pas retourné l’identifiant de la tâche.");
         imageTaskHandlers.delete(currentTaskId); currentTaskId = started.task_id;
-        cancelRetry.hidden = false;
+        cancelWaiting.disabled = false;
         const openRetry = async () => { if (reviewDialog.open) reviewDialog.close(); await openCard(providerId, null, faceIndex); content.replaceChildren(comparison); reviewDialog.showModal(); $("notification-panel").hidden = true; };
         imageTaskHandlers.set(currentTaskId, { open: openRetry });
-        cancelRetry.onclick = async () => { cancelRetry.disabled = true; try { await postJSON("/api/v2/image/task/cancel", { task_id: currentTaskId }); setText(status, "Annulation demandée…"); } catch (error) { setText(status, `Annulation impossible : ${error.message}`); cancelRetry.disabled = false; } };
+        cancelWaiting.onclick = async () => { cancelWaiting.disabled = true; try { await postJSON("/api/v2/image/task/cancel", { task_id: currentTaskId }); setText(loadingMessage, "Annulation demandée…"); } catch (error) { setText(loadingMessage, `Annulation impossible : ${error.message}`); cancelWaiting.disabled = false; } };
         const pollRetry = async () => {
           try {
             const nextTask = await getJSON("/api/v2/image/task", { task_id: currentTaskId });
-            if (["queued", "running", "cancelling"].includes(nextTask.status)) { setText(status, nextTask.status === "cancelling" ? "Annulation demandée…" : "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications."); void refreshNotifications(); setTimeout(pollRetry, 1200); return; }
+            if (["queued", "running", "cancelling"].includes(nextTask.status)) { setText(loadingMessage, nextTask.status === "cancelling" ? "Annulation demandée…" : nextTask.detail || "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications."); void refreshNotifications(); setTimeout(pollRetry, 1200); return; }
             if (nextTask.status === "needs_review") {
               const nextResult = nextTask.result || {};
               currentAiId = nextResult.id || nextResult.candidate_id; if (!currentAiId) throw new Error("La candidate générée est introuvable.");
               const image = node("img", "comparison-preview"); image.src = nextResult.preview_url || `/api/v2/image/ai/candidate?id=${encodeURIComponent(currentAiId)}`; image.alt = "Nouvelle candidate générée par IA"; aiStage.replaceChildren(image);
               if (textMode === "online") renderVerifiedFrenchText(frenchTextPanel, nextResult.french_text || nextTask.french_text, nextResult.text_provenance || nextTask.text_provenance);
-              cancelRetry.hidden = true; setText(status, "Vérifiez le texte français avant de choisir."); retry.disabled = chooseOld.disabled = chooseNew.disabled = false; void refreshNotifications(); return;
+              showRetryReview(); setText(status, ""); void refreshNotifications(); return;
             }
-            cancelRetry.hidden = true;
+            if (["cancelled", "canceled"].includes(nextTask.status)) { showRetryReview(); setText(status, "Génération annulée."); void refreshNotifications(); return; }
             throw new Error(nextTask.detail || "La génération n’a pas abouti.");
-          } catch (error) { cancelRetry.hidden = true; setText(status, `Génération impossible : ${error.message}`); retry.disabled = chooseOld.disabled = chooseNew.disabled = false; void refreshNotifications(); }
+          } catch (error) { showRetryReview(); setText(status, `Génération impossible : ${error.message}`); void refreshNotifications(); }
         };
         void refreshNotifications(); void pollRetry();
-      } catch (error) { cancelRetry.hidden = true; setText(status, `Génération impossible : ${error.message}`); retry.disabled = chooseOld.disabled = chooseNew.disabled = false; }
+      } catch (error) { showRetryReview(); setText(status, `Génération impossible : ${error.message}`); }
     });
     const choose = async choice => {
       chooseOld.disabled = chooseNew.disabled = true;
@@ -1645,7 +1872,12 @@ async function openAIReviewTask(taskId, summary = {}) {
       } catch (error) { setText(status, `Choix impossible : ${error.message}`); chooseOld.disabled = chooseNew.disabled = false; }
     };
     chooseOld.addEventListener("click", () => void choose("old")); chooseNew.addEventListener("click", () => void choose("new"));
-    actions.append(chooseOld, chooseNew, cancelRetry); comparison.append(columns, ...(textMode === "online" ? [frenchTextPanel] : []), actions, retryPane, status); content.replaceChildren(comparison);
+    actions.classList.add("ai-actions");
+    actions.append(chooseOld, chooseNew);
+    previewPane.append(columns, ...(textMode === "online" ? [frenchTextPanel] : []));
+    const reviewFooter = node("div", "review-footer");
+    reviewFooter.append(retryPane, actions, status);
+    comparison.append(previewPane, reviewFooter); content.replaceChildren(comparison);
     if (!reviewDialog.open) reviewDialog.showModal();
     $("notification-panel").hidden = true;
   } catch (error) {
@@ -1688,11 +1920,12 @@ function renderVerifiedFrenchText(container, frenchText, provenance = null) {
   container.append(block);
 }
 async function refreshDeckResults() {
+  if (!state.deckExecuted) return;
   const button = $("refresh-deck-results"), status = $("deck-batch-status");
   button.disabled = true;
   setText(status, "Vérification des decks de la recherche active…");
   try {
-    const result = await postJSON("/api/v2/decks/recalculate", deckResultFilters());
+    const result = await postJSON("/api/v2/decks/recalculate", state.deckAppliedFilters);
     await renderDeckPage();
     if (state.selectedDeck?.id) await openDeck(state.selectedDeck.id);
     setText(status, `${formatNumber(result.total || 0)} decks vérifiés.`);
@@ -1701,20 +1934,23 @@ async function refreshDeckResults() {
   } finally { button.disabled = false; }
 }
 function deckPageQuery() {
-  return { ...deckResultFilters(), limit: PAGE_SIZE, offset: state.deckPage * PAGE_SIZE };
+  return { ...state.deckAppliedFilters, limit: DECK_PAGE_SIZE, offset: state.deckPage * DECK_PAGE_SIZE };
 }
 function ensureDeckPage() {
+  if (!state.deckExecuted) return;
   if (state.deckListKey !== params(deckPageQuery())) return renderDeckPage();
 }
 async function renderDeckPage() {
-  if (state.openDeckId) return;
+  if (state.openDeckId || !state.deckExecuted) return;
   if (state.view === "decks") syncRoute();
   const query = deckPageQuery();
   state.deckListKey = params(query);
   const request = ++state.deckRequest;
   $("download-deck-results").disabled = true;
   const container = $("deck-list");
-  container.replaceChildren(node("p", "muted", "Chargement des decks…"));
+  const waiting = node("p", "muted search-loading-state");
+  waiting.append(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", "Chargement des decks…"));
+  container.replaceChildren(waiting);
   try {
     const data = await getJSON("/api/v2/decks", query);
     if (request !== state.deckRequest) return;
@@ -1738,11 +1974,11 @@ async function renderDeckPage() {
       tile.append(edition);
       container.append(tile);
     }
-    const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    const pages = Math.max(1, Math.ceil(data.total / DECK_PAGE_SIZE));
     setText($("deck-page-status"), `Page ${state.deckPage + 1} sur ${pages} · ${formatNumber(data.total)} decks`);
     $("deck-pager").hidden = pages <= 1;
     $("deck-prev").disabled = state.deckPage === 0;
-    $("deck-next").disabled = (state.deckPage + 1) * PAGE_SIZE >= data.total;
+    $("deck-next").disabled = (state.deckPage + 1) * DECK_PAGE_SIZE >= data.total;
   } catch (error) {
     if (request === state.deckRequest) {
       state.deckListKey = null;
@@ -1798,7 +2034,7 @@ async function pollDeckColorIndex() {
     const task = await getJSON("/api/v2/decks/colors/status");
     if (task.status === "complete") {
       await loadDeckFacets(true);
-      await renderDeckPage();
+      if (state.deckExecuted) await renderDeckPage();
       if (Number(task.unmatched || 0) || Number(task.failed || 0)) {
         setText($("deck-color-coverage"), `Couleurs indexées pour ${formatNumber(task.indexed)} decks. ${formatNumber(task.unmatched || 0)} sans correspondance, ${formatNumber(task.failed || 0)} en échec.`);
       }
@@ -2330,7 +2566,7 @@ $("search-suggestions").addEventListener("keydown", event => {
 document.addEventListener("pointerdown", event => { if (!event.target.closest(".search-main")) hideRecentSearches(); });
 $("previous-page").addEventListener("click",()=>{state.searchPage=Math.max(0,state.searchPage-1);runSearch();});
 $("next-page").addEventListener("click",()=>{state.searchPage++;runSearch();});
-$("edition-select").addEventListener("change",()=>{state.editionPage=0;hideEditionSuggestions();renderEditionPage();});
+$("edition-select").addEventListener("change",()=>{state.exactEditionCode=null;state.editionPage=0;hideEditionSuggestions();renderEditionPage();});
 $("edition-query").addEventListener("input",()=>{renderEditionSuggestions();if (state.view === "editions") syncRoute();});
 $("edition-query").addEventListener("keydown", event => {
   if (event.key === "Escape") { hideEditionSuggestions(); return; }
@@ -2346,23 +2582,45 @@ document.addEventListener("pointerdown", event => { if (!event.target.closest(".
 $("edition-prev").addEventListener("click",()=>{state.editionPage=Math.max(0,state.editionPage-1);renderEditionPage();});
 $("edition-next").addEventListener("click",()=>{state.editionPage++;renderEditionPage();});
 attachEditionSuggestions("search-edition-query", "search-edition-suggestions", "filter-set", () => { setText($("search-status"), "Édition choisie. Cliquez sur Rechercher."); });
-attachEditionSuggestions("deck-edition-query", "deck-edition-suggestions", "deck-edition", () => { state.deckPage = 0; renderDeckPage(); });
-$("deck-query").addEventListener("input", () => { clearTimeout(deckSuggestionTimer); deckSuggestionTimer = setTimeout(() => { if (state.openDeckId) return; renderDeckSuggestions(); state.deckPage = 0; renderDeckPage(); }, 180); if (state.view === "decks") syncRoute(); });
+attachEditionSuggestions("deck-edition-query", "deck-edition-suggestions", "deck-edition", () => {});
+$("deck-query").addEventListener("input", () => { clearTimeout(deckSuggestionTimer); deckSuggestionTimer = setTimeout(() => { if (!state.openDeckId) renderDeckSuggestions(); }, 180); });
+$("deck-submit").addEventListener("click", () => {
+  clearTimeout(deckSuggestionTimer); ++state.deckSuggestionRequest;
+  hideDeckSuggestions();
+  state.deckAppliedFilters = deckResultFilters();
+  state.deckExecuted = true;
+  state.deckPage = 0;
+  void renderDeckPage();
+});
+$("clear-deck-filters").addEventListener("click", () => {
+  for (const id of ["deck-query", "deck-edition-query", "deck-format", "deck-type", "deck-edition", "deck-color-mode", "deck-image-filter", "deck-sort", "deck-order"]) {
+    const field = $(id); field.value = field.options ? field.options[0].value : "";
+  }
+  document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button => setManaPressed(button, false));
+  clearTimeout(deckSuggestionTimer); ++state.deckSuggestionRequest;
+  hideDeckSuggestions();
+  state.deckExecuted = false; state.deckAppliedFilters = null; state.deckPage = 0; state.deckTotal = 0;
+  state.deckListKey = null; ++state.deckRequest;
+  $("deck-list").replaceChildren();
+  $("deck-pager").hidden = true;
+  updateBatchButtons();
+  if (state.view === "decks") syncRoute();
+});
 $("deck-query").addEventListener("keydown", event => {
   if (event.key === "Escape") { hideDeckSuggestions(); return; }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     const options = $("deck-suggestions").querySelectorAll('[role="option"]');
     if (!options.length || $("deck-suggestions").hidden) return;
     event.preventDefault(); highlightDeckSuggestion(activeDeckSuggestion + (event.key === "ArrowDown" ? 1 : -1));
-  } else if (event.key === "Enter" && activeDeckSuggestion >= 0) {
-    const id = deckSuggestionIds[activeDeckSuggestion];
-    if (id) { event.preventDefault(); hideDeckSuggestions(); void openDeck(id); }
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    const id = activeDeckSuggestion >= 0 ? deckSuggestionIds[activeDeckSuggestion] : null;
+    if (id) { hideDeckSuggestions(); void openDeck(id); }
+    else $("deck-submit").click();
   }
 });
 document.addEventListener("pointerdown", event => { if (!event.target.closest(".deck-search")) hideDeckSuggestions(); });
-for (const id of ["deck-format", "deck-type", "deck-edition", "deck-sort", "deck-order", "deck-image-filter"]) $(id).addEventListener("change",()=>{state.deckPage=0;renderDeckPage();});
-document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button=>button.addEventListener("click",()=>{toggleMana(button, document.querySelector(".deck-color-filter"));state.deckPage=0;renderDeckPage();}));
-$("deck-color-mode").addEventListener("change",()=>{state.deckPage=0;renderDeckPage();});
+document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button=>button.addEventListener("click",()=>{toggleMana(button, document.querySelector(".deck-color-filter"));}));
 $("deck-prev").addEventListener("click",()=>{state.deckPage=Math.max(0,state.deckPage-1);renderDeckPage();});
 $("deck-next").addEventListener("click",()=>{state.deckPage++;renderDeckPage();});
 $("archive-status").addEventListener("change",()=>{archiveResolvedByPage.clear();state.archivePage=0;renderArchivePage();});
@@ -2438,7 +2696,7 @@ const initialView = location.hash.slice(1).split("?", 1)[0];
 activateView(ROUTE_VIEWS.has(initialView) ? initialView : "info");
 initialInfo = loadHome();
 initialEditions = ensureEditions();
-void (initialView === "perso" ? Promise.resolve() : Promise.all([initialInfo, initialEditions])).then(restoreRoute);
+void restoreRoute();
 if (imageDemoMode) {
   void (async () => {
     try {
@@ -2464,7 +2722,8 @@ function personalButton(label, action, primary = false) {
 }
 function personalRead(key) {
     try {
-        return JSON.parse(localStorage.getItem(key));
+        const storage = key === PERSONAL_CURRENT_KEY || key.startsWith("personal-draft-") ? sessionStorage : localStorage;
+        return JSON.parse(storage.getItem(key));
     }
     catch {
         return null;
@@ -2472,10 +2731,11 @@ function personalRead(key) {
 }
 function personalStore(key, value) {
     try {
+        const storage = key === PERSONAL_CURRENT_KEY || key.startsWith("personal-draft-") ? sessionStorage : localStorage;
         if (value === null)
-            localStorage.removeItem(key);
+            storage.removeItem(key);
         else
-            localStorage.setItem(key, JSON.stringify(value));
+            storage.setItem(key, JSON.stringify(value));
     }
     catch { /* The server remains the durable store when browser storage is unavailable. */
     }
@@ -2534,7 +2794,7 @@ async function flushPersonal() {
                     if (!current) return;
                     try {
                         localStorage.setItem(`personal-recovery-${current.id}-${Date.now()}`, JSON.stringify(current));
-                        localStorage.removeItem(`personal-draft-${current.id}`);
+                        personalStore(`personal-draft-${current.id}`, null);
                     } catch (storageError) {
                         personalStatus(`Le brouillon n’a pas pu être mis de côté : ${storageError.message}. Le deck courant est conservé.`, true);
                         $("personal-save-status").append(retry, reload);
@@ -2600,6 +2860,26 @@ async function showPersonalDecks() {
     }
     renderPersonalList();
 }
+async function refreshPersonalOnFocus() {
+    if (document.hidden || state.view !== "perso") return;
+    const deck = personalState.deck;
+    if (!deck) { renderPersonalList(); return; }
+    if (personalState.saving || personalState.change !== personalState.saved) return;
+    try {
+        const result = await getJSON("/api/v2/personal-deck", { id: deck.id });
+        if (personalState.deck !== deck || personalState.saving || personalState.change !== personalState.saved) return;
+        if (result.deck.revision === deck.revision) return;
+        if (personalState.editing) {
+            personalStatus("Ce deck a changé dans un autre onglet. Terminez l’édition puis actualisez le deck.", true);
+            return;
+        }
+        personalState.deck = result.deck;
+        renderPersonalEditor();
+        personalStatus("Deck actualisé depuis un autre onglet.");
+    } catch (error) { personalStatus(`Actualisation impossible : ${error.message}`, true); }
+}
+window.addEventListener("focus", () => void refreshPersonalOnFocus());
+document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshPersonalOnFocus(); });
 function personalColorField(values, onChange) {
     const field = node("div", "personal-color-field");
     field.append(node("span", "", "Couleurs du deck"), personalColors(values.length ? values : ["C"],
@@ -2754,6 +3034,7 @@ function adoptPersonalDeck(deck) {
     personalState.saved = 0;
     personalState.error = null;
     personalStore(PERSONAL_CURRENT_KEY, deck.id);
+    if (state.view === "perso") syncRoute();
     renderPersonalEditor();
     personalStatus("Enregistré");
 }
@@ -2884,6 +3165,7 @@ function renderPersonalEditor() {
         if (await flushPersonal()) {
             personalState.deck = null;
             personalStore(PERSONAL_CURRENT_KEY, null);
+            syncRoute();
             renderPersonalList();
         }
         else
@@ -2934,7 +3216,10 @@ function renderPersonalEditor() {
     refresh.classList.add("search-header-button", "search-header-icon-button");
     refresh.setAttribute("aria-label", "Actualiser le deck");
     refresh.title = "Actualiser le deck";
-    refresh.innerHTML = '<svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg>';
+    const refreshIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    refreshIcon.setAttribute("class", "search-icon"); refreshIcon.setAttribute("aria-hidden", "true");
+    const refreshUse = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    refreshUse.setAttribute("href", "#search-icon-refresh"); refreshIcon.append(refreshUse); refresh.append(refreshIcon);
     const editActions = node("div", "search-header-actions personal-edit-actions");
     editActions.append(editButton, refresh);
     actions.append(editActions);

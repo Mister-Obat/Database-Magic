@@ -14,6 +14,17 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
 - `local_app.py` : serveur HTTP, routes, statistiques, enrichissement des slots,
   service des fichiers et POST de téléchargement.
 - La cloche globale rassemble les traitements actifs et les candidates à revoir.
+  Cliquer sur un téléchargement groupé rouvre la vue et les filtres ayant lancé
+  la tâche (édition, recherche ou decks), puis son suivi. Cliquer sur un
+  téléchargement de deck rouvre ce deck et sa progression, y compris depuis
+  une autre fenêtre. Une notification de maintenance rouvre Info et son suivi.
+  Les filtres du lot sont conservés dans sa tâche serveur.
+  Une pastille rouge à cheval sur l'angle inférieur droit du bouton signale au
+  moins une tâche `needs_review` non encore consultée. L'ouverture du panneau
+  la masque pour les tâches présentes, y compris après rechargement ; une nouvelle
+  tâche à vérifier la fait réapparaître avec un son discret. Plusieurs tâches
+  arrivant pendant que la pastille reste visible ne rejouent pas le son. La revue IA rouverte depuis
+  une autre fenêtre reprend la même structure de panneaux que la revue initiale.
   Une génération IA lancée depuis la fiche reste accessible après fermeture de
   sa modale : sa ligne rouvre la progression, son éventuelle erreur ou la revue
   des trois cartes. L'annulation d'une génération active est une action explicite
@@ -29,6 +40,10 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   absentes.
 - `v2/api.py` : aiguillage des routes catalogue ; `v2/query.py` : requêtes SQLite
   en lecture seule et recherche FTS5.
+- Les lignes de langue phyrexiane (`ph`) conservent leur texte imprimé brut dans
+  `raw_json` ; leurs champs `printed_*` de consultation sont vides. Les réponses
+  emploient le `name` canonique : la transcription des glyphes phyrexians n'est
+  pas un titre lisible.
 - `ui/index.html`, `ui/app.js`, `ui/styles.css` : affichage navigateur et appels à
   l’API.
 - Le choix d'image existante et les deux étapes de références IA partagent la
@@ -95,6 +110,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 
 - `GET /api/v2/health`, `/stats`, `/editions`, `/search`, `/edition`, `/card` pour
   le catalogue.
+- La liste `/edition` conserve chaque impression et son numéro de collection
+  exact. Seules les langues de cette même impression sont réduites à une ligne
+  préférée (FR, EN, JA, puis PH et autres langues disponibles). Deux variantes
+  d'une même carte dans la même édition restent donc toutes deux consultables.
 - `POST /api/v2/search/image-slots` accepte de 1 à 200 `printing_ids` et renvoie
   les slots locaux de ces impressions afin de rafraîchir les tuiles de la page
   Recherche sans recalculer ses résultats.
@@ -129,6 +148,17 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   prêts et traite les autres avec `download_printing`. La tâche asynchrone expose
   progression, erreurs et annulation ; les mises à jour du catalogue sont
   bloquées pendant son exécution. Un filtre actif est requis pour les Decks.
+  Le lot emploie au plus quatre workers pour les téléchargements d'impressions,
+  avec au plus quatre départs de requêtes d'images Scryfall par seconde.
+  Tant que le total des impressions manquantes n'est pas calculé, le suivi
+  affiche une analyse en cours avec un indicateur animé, plutôt que « 0/0 ».
+  Dès que ce total est connu, le suivi affiche près des impressions traitées
+  un temps restant estimé. Il part de la cadence observée de 11 376 images en
+  huit heures, puis se réajuste à la cadence du lot courant. Le décompte est
+  indicatif et disparaît lorsque la tâche se termine.
+  Dans Decks, le suivi du téléchargement se place à droite des boutons
+  Rechercher et Effacer les filtres, sur la même ligne lorsque la largeur le
+  permet, comme le statut de Recherche.
 - `POST /api/v2/maintenance/update` démarre en tâche de fond l'actualisation du
   catalogue puis de l'index des decks préconstruits ; `GET` du même chemin expose
   l'état (`idle`, `queued`, `running`, `complete`, `failed`), l'étape, le message,
@@ -161,13 +191,13 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   impressions du catalogue, éditions complètes sur éditions éligibles, decks
   complets sur decks répertoriés dans l'index local. Les trois tuiles occupent
   leur place dès l'ouverture et seuls leurs chiffres sont mis à jour.
-- `/health` expose `app_api_revision`. Le lanceur arrête d'abord le processus
-  local qui écoute sur son port seulement si sa commande exécute exactement
-  `bibliotheque_mtg.local_app`, puis démarre la version courante. Un autre
-  programme occupant le port n'est jamais arrêté. Le serveur est lancé dans un
-  processus sans fenêtre de console ; le BAT se termine dès que `/health`
-  confirme le démarrage. La page Info signale les compteurs absents
-  au lieu de les afficher à zéro.
+- `/health` expose `app_api_revision`. Le lanceur réutilise une instance locale
+  compatible et ouvre sa page ; il arrête une instance incompatible seulement si
+  sa commande exécute exactement `bibliotheque_mtg.local_app`. Un autre programme
+  occupant le port n'est jamais arrêté. Un nouveau serveur est lancé sans fenêtre
+  de console ; le BAT attend jusqu'à cinq minutes que `/health` confirme son
+  démarrage, y compris la synchronisation préalable des images. La page Info
+  signale les compteurs absents au lieu de les afficher à zéro.
 - L'en-tête place « Fermer l’application » à gauche des notifications. Les
   commandes ont les mêmes dimensions, et l'en-tête compact utilise des
   pictogrammes avec des libellés accessibles. Son POST
@@ -295,12 +325,13 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   icône lorsqu’elle est connue. L’API fournit l’URL Scryfall validée de l’icône.
   Les mosaïques de Recherche, Éditions, Decks et Perso ne proposent pas
   d’agrandissement au survol.
-- La page d'une édition liste un seul exemplaire par carte oracle dans cette
-  édition, avant pagination. Elle privilégie une ligne française de cette
-  édition ; à défaut, une ligne anglaise, puis japonaise. Chaque vignette montre l'image de
+- La page d'une édition liste chaque impression et son numéro de collection
+  dans cette édition, avant pagination. Elle privilégie une ligne française de cette
+  impression ; à défaut, une ligne anglaise, puis japonaise, phyrexiane ou une
+  autre langue disponible. Chaque vignette montre l'image de
   l'impression choisie et son nom dans la langue retenue en dessous, comme dans
   une composition de deck. Le clic ouvre la même visionneuse ; les flèches
-  parcourent l'ordre dédupliqué, y compris entre pages. La liste et sa pagination
+  parcourent l'ordre des impressions, y compris entre pages. La liste et sa pagination
   restent vides tant qu'aucune édition n'est choisie. Une page d'édition contient
   au plus 300 cartes ; la recherche utilise la même grille et la même limite. L'encart des
   éditions différées n'apparaît pas sur cette page.
@@ -418,6 +449,11 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   les cases de couleur attendent sa fin pour éviter des résultats partiels.
   `GET /api/v2/decks/filters` fournit les facettes et la couverture mesurée.
   L'interface affiche l'avancement et les erreurs de cette indexation.
+  L'onglet n'interroge pas la liste des decks avant un clic sur Rechercher.
+  Les changements de filtres préparent la demande sans modifier les résultats
+  affichés ; Effacer les filtres revient à l'état initial sans message sous le
+  formulaire. Chaque page de
+  résultats contient au plus 200 decks, avec pagination sur la recherche validée.
 - Dans l'interface, le texte de recherche des decks porte uniquement sur le nom
   français ou anglais. Les suggestions ouvrent directement le deck choisi. Le
   sélecteur d'édition des vues Recherche et Decks dispose du même champ de
@@ -479,7 +515,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   L'asset déjà intégré au slot exact reste proposé parmi les références même
   quand la recherche trouve d'autres images ; `visual_only` l'empêche seulement
   de devenir un nouvel asset publié. Le choix du texte français précontrôle la
-  base locale. En l'absence de texte officiel, un avertissement, une zone de prompt
+  base locale et retient une variante compatible si plusieurs textes officiels
+  diffèrent. En l'absence de texte officiel, un avertissement, une zone de prompt
   facultatif et les actions retour/annuler ou envoi quand même précèdent la
   génération dans une modale centrée dédiée, qui remplace la sélection pendant
   cette étape. L'envoi sans traduction conserve ce mode et le prompt en correction
@@ -487,12 +524,19 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   l'original intégré même si sa langue d'import est incertaine et les assets FR
   prêts d'autres impressions au même nom (ou au même Oracle), avec layout et
   structure de faces compatibles. Ces images sont des références de texte
-  seulement ; la publication reste liée à l'impression cible.
+  seulement : Codex en transcrit les champs, puis la génération reçoit uniquement
+  l'image visuelle et cette transcription. La publication reste liée à
+  l'impression cible. À l'étape 2, la vignette choisie garde le même contour de
+  sélection qu'à l'étape 1.
   La revue d'une génération réussie utilise toute la largeur de la modale pour
   les cartes de référence et la candidate IA côte à côte, entièrement visibles
-  avec `object-fit: contain` sans barre de défilement qui coupe l'image, avec
-  Retour, Valider et Relancer en
-  bas. La consigne de correction n'apparaît qu'après Relancer. Si le fournisseur
+  avec `object-fit: contain` sans barre de défilement qui coupe l'image. La zone
+  de correction et les actions de revue partagent une ligne en vue large, sous
+  les cartes ; le message d'état ne prend de place que pendant un traitement ou
+  une erreur. La consigne de correction du parcours initial n'apparaît qu'après
+  Relancer. Une correction lancée depuis la revue reprend le même écran de
+  chargement que la première génération, avec retour à la consultation et
+  annulation explicite. Si le fournisseur
   échoue, une étape d'erreur affiche sa cause et un bouton ramène à la sélection
   initiale des images; aucune carte IA absente n'est présentée comme résultat.
 - Le serveur vérifie si une instance locale répond déjà à `/api/v2/health` avant
@@ -503,6 +547,9 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 1. Chaque requête de catalogue résout `current.json`, puis ouvre la base pointée
    en mode SQLite `ro`.
 2. La recherche FTS5 cite les mots saisis pour éviter des opérateurs injectés ;
+   le nom alternatif imprimé sur une carte participe aussi à la recherche
+   textuelle lorsqu'il est présent dans les données source. Une recherche de
+   nom propre doit retrouver ces impressions.
    chaque mot accepte un début de mot afin que les noms et capacités partiels
    trouvent les textes français ou anglais. La ligne affichée privilégie FR,
    puis EN, JA et les autres langues disponibles ; il n'y a pas de filtre de
@@ -541,7 +588,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
    le classement ; autrement, c'est la première
    apparition de l'impression dans une publication. Le catalogue antérieur
    à ce suivi forme un seul lot lors de sa première mise à jour ; la date de
-   sortie de l'édition départage ces cartes. Une correspondance par nom FR ou EN
+   sortie de l'édition, son code, le numéro et l'identifiant d'impression
+   départagent ces cartes dans le sens de tri choisi. Une correspondance par nom FR ou EN
    peut étendre les résultats aux impressions du même Oracle dans les autres
    éditions éligibles ; édition et filtres de carte restent appliqués. Chaque
    impression exacte choisit une ligne FR, puis EN, puis JA, puis une autre
@@ -662,3 +710,19 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Elle vérifie la révision courante et utilise la même protection POST locale.
 - Après un ajout réussi, fermer le sélecteur et afficher un message bref sur
   la fiche. Afficher les erreurs dans le sélecteur, avec Fermer centré en bas.
+
+### Consultation des utilisations d’une carte
+
+- `GET /api/v2/card/usage?id=<provider_card_id>` renvoie `found`, `editions`, `decks`, `personal_decks` et `unloaded_decks`. Les rapprochements utilisent l'identité oracle du catalogue actif, ou l'impression exacte si elle n'a pas d'oracle. Les éditions éligibles sont regroupées par code. Les decks préconstruits sont limités aux compositions locales chargées ; `unloaded_decks` signale les compositions non chargées. Les rapprochements de leurs entrées emploient un identifiant Scryfall, une identité oracle explicite ou une édition et un numéro non ambigus. Les decks personnels utilisent les impressions conservées dans leurs compositions actives. Aucun accès réseau ni chargement implicite n'est effectué.
+- La visionneuse ouvre la liste des éditions et des decks associés dans une
+  modale ; chaque lien s'ouvre dans un nouvel onglet à la destination précise.
+  Cette modale propose deux vues : impression précise (même `printing_id`) et
+  carte globale (même `oracle_id`, ou l'impression seule sans oracle). Les
+  éditions et decks sont séparés dans chacune. Une édition ouverte par ce
+  parcours sélectionne son code exact, sans regroupement automatique ; un deck
+  s'ouvre directement sur son détail. Le bouton d'accès reste en bas à gauche
+  de la visionneuse. La modale utilise la palette violette, et un clic sur son
+  arrière-plan la ferme pour revenir à la visionneuse de carte.
+  Les brouillons de decks personnels sont isolés par onglet via sessionStorage.
+  Au retour sur un onglet Perso, un deck consulté sans modification locale est
+  relu si sa révision a changé ; une édition active est préservée et avertie.
