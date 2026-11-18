@@ -5,7 +5,9 @@ from pathlib import Path
 def catalogue_root(ops_root: Path) -> Path:
     preferred = ops_root / "v3-staging"
     legacy = ops_root / "work" / "v3-staging"
-    if not (preferred / "current.json").exists() and (legacy / "current.json").exists():
+    if (preferred / "current.json").is_file():
+        return preferred
+    if (legacy / "current.json").is_file():
         return legacy
     return preferred
 

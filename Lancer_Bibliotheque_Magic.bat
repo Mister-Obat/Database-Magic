@@ -6,6 +6,7 @@ set "PROG_DIR=%OPS_ROOT%\src\python"
 set "PYTHON=%OPS_ROOT%\.venv\Scripts\python.exe"
 set "MAGIC_PORT=%MAGIC_LIBRARY_PORT%"
 if not defined MAGIC_PORT set "MAGIC_PORT=8765"
+echo [1/3] Verification du port %MAGIC_PORT% et des anciennes instances...
 %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Arreter_ancienne_Bibliotheque_Magic.ps1" -Port %MAGIC_PORT% -Python "%PYTHON%" -ProgDir "%PROG_DIR%"
 if errorlevel 1 (
   echo.
@@ -13,4 +14,5 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+
 endlocal

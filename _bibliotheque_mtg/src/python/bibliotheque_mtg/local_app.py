@@ -2529,13 +2529,9 @@ def open_existing_or_start(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *
 def main():
     host = DEFAULT_HOST
     port = int(os.environ.get("MAGIC_LIBRARY_PORT", DEFAULT_PORT))
-    from .organized_images import synchronize_organized_images
     if not (CATALOGUE_ROOT / "current.json").is_file():
         raise SystemExit("Catalogue absent. Lancez Initialiser_Bibliotheque_Magic.bat "
                          "ou restaurez un catalogue avant de démarrer.")
-    organized = synchronize_organized_images(CATALOGUE_ROOT)
-    if organized["missing"]:
-        print(f"Images non classées : {organized['missing']}/{organized['ready']}")
     server = open_existing_or_start(host, port)
     if server is None:
         print(f"Bibliothèque Magic déjà active : http://{host}:{port}/")

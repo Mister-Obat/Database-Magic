@@ -24,9 +24,10 @@ de recherche avec fiche, traductions et état de chaque image.
    cinq minutes que `/api/v2/health` réponde. Un processus du même exécutable
    déjà en cours de démarrage est attendu plutôt que lancé une seconde fois.
    La fenêtre de commande se ferme ensuite.
-2. Au démarrage, l'application synchronise `_bibliotheque_mtg/Images/` avec les
-   slots prêts du catalogue actif avant de lier un `ThreadingHTTPServer` à
-   `127.0.0.1`.
+2. Le serveur ouvre rapidement le catalogue actif en mode lecture et lie le
+   `ThreadingHTTPServer` à `127.0.0.1`. La synchronisation exhaustive de
+   `_bibliotheque_mtg/Images/` n'est pas exécutée au démarrage ; les images sont
+   classées au moment des opérations qui les ajoutent ou les réparent.
 3. La page charge le JavaScript/CSS locaux puis demande les statistiques et les
    éditions par l’API V2.
 4. Une recherche utilise `GET /api/v2/search?q=...` avec nom/texte, édition,

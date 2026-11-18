@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Write-Host "Recherche d'une instance sur 127.0.0.1:$Port..."
 $listeners = @(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 foreach ($listener in $listeners) {
     $listenerPid = [int]$listener.OwningProcess
@@ -12,23 +13,6 @@ foreach ($listener in $listeners) {
     if (-not $process -or $process.CommandLine -notmatch '(?i)(?:^|\s)-m\s+bibliotheque_mtg\.local_app(?:\s|$)') {
         Write-Error "Le port $Port est utilise par un autre programme. Aucun processus n'a ete arrete."
         exit 1
-    }
-    if ($Python -and $ProgDir -and (Test-Path -LiteralPath $Python -PathType Leaf) -and (Test-Path -LiteralPath $ProgDir -PathType Container)) {
-        Push-Location -LiteralPath $ProgDir
-        try {
-            $revision = & $Python -c 'from bibliotheque_mtg.local_app import APP_API_REVISION; print(APP_API_REVISION)'
-            if ($LASTEXITCODE -eq 0) {
-                try {
-                    $health = Invoke-RestMethod "http://127.0.0.1:$Port/api/v2/health" -TimeoutSec 2
-                    if ($health.status -eq 'ok' -and $health.app_api_revision -eq [int]$revision) {
-                        Start-Process "http://127.0.0.1:$Port/"
-                        exit 0
-                    }
-                } catch { }
-            }
-        } finally {
-            Pop-Location
-        }
     }
     Write-Host "Fermeture de l'ancienne Bibliotheque Magic (PID $listenerPid)..."
     Stop-Process -Id $listenerPid -Force
@@ -54,6 +38,7 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf) -or -not (Test-Path -Li
 }
 $env:PYTHONIOENCODING = 'utf-8'
 $env:MAGIC_LIBRARY_PORT = [string]$Port
+Write-Host 'Recherche des anciens processus de la bibliotheque...'
 # A previous launch can still be synchronizing before it opens its socket.
 $pending = @(Get-CimInstance Win32_Process | Where-Object {
     $_.ExecutablePath -and $_.ExecutablePath -ieq $Python -and
@@ -61,8 +46,10 @@ $pending = @(Get-CimInstance Win32_Process | Where-Object {
 } | Select-Object -First 1)
 $reusedPending = $pending.Count -gt 0
 if ($reusedPending) {
+    Write-Host "Attente de l'instance existante (PID $($pending[0].ProcessId))..."
     $server = Get-Process -Id $pending[0].ProcessId -ErrorAction Stop
 } else {
+    Write-Host 'Demarrage du serveur Python...'
     $server = Start-Process -FilePath $Python -ArgumentList '-m', 'bibliotheque_mtg.local_app' -WorkingDirectory $ProgDir -WindowStyle Hidden -PassThru
 }
 $timer = [System.Diagnostics.Stopwatch]::StartNew()

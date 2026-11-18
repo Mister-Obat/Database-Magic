@@ -65,6 +65,9 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   Firefox, y compris pour les sélecteurs ajoutés dynamiquement.
 - Le logo seul identifie le lien Accueil dans l’en-tête. Le logo et le favicon utilisent `Logo.png` et `Logo.ico` à la
   racine du projet, servis par les routes locales `/logo.png` et `/favicon.ico`.
+- Le démarrage ne synchronise pas intégralement les images organisées. Cette
+  opération parcourt tout le catalogue et doit rester hors du chemin critique ;
+  chaque ajout ou réparation met à jour le miroir au fil de l'eau.
 - Tests : `tests_v2/test_local_app.py` et `tests_v2/test_query_v2.py`.
 
 Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la

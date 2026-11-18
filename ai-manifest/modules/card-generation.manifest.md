@@ -72,6 +72,12 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   autorisation implicite de traduction.
 - Le mode de traduction IA et la consigne facultative restent attachés à la
   candidate lors des corrections et de la reprise de revue depuis les notifications.
+- Avant toute première génération, le sélecteur visuel et le choix du texte
+  (image française ou données officielles locales) exposent une consigne
+  facultative de 4 000 caractères maximum. La sélection du texte officiel local
+  prépare le mode sans lancer la génération ; l'utilisateur peut saisir sa
+  consigne puis cliquer sur Générer. La même consigne est transmise au premier
+  appel imagegen et reste préremplie pour les tentatives de correction.
 - La consigne de correction est limitée à 4 000 caractères; la génération expire
   après 600 secondes par défaut. Chaque référence est un fichier image local
   déchiffrable de 20 MiB maximum et de 40 mégapixels maximum. Une référence de
@@ -97,6 +103,16 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   tour Codex de transcription structurée. Le tour imagegen reçoit la première
   image visuelle, les champs textuels validés et la candidate précédente
   facultative, jamais la seconde image. Le prompt demande
+  une traduction guidée simplement par cette transcription lorsqu'une image
+  française est choisie. Sans image française, il insiste sur la traduction
+  directe des mots visibles sur l'original et sur les noms et textes d'ambiance
+  propres à cette impression ; les champs de la base ne servent que d'aide.
+  Si une consigne manuelle est fournie, elle prime sur ces règles automatiques :
+  le prompt ne fixe plus que la première image comme référence visuelle, une
+  carte française complète en haute définition et un seul appel imagegen. Les
+  champs français éventuels restent une référence facultative subordonnée à la
+  consigne de l'utilisateur.
+  Le prompt demande aussi
   une édition localisée de la première carte : illustration, cadre, composition,
   mise en page et symbole d'édition strictement identiques ; seuls les mots
   imprimés nécessaires au français changent. La transcription française sert à

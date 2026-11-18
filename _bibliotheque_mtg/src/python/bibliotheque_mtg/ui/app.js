@@ -1411,7 +1411,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
               if (wizardStep === "visual" && reference) { visualSelect.value=String(index); alignReferenceOptions(); }
               if (wizardStep === "text" && reference && (reference.language === "fr" || reference.text_reference_only || reference.local_original_reference)) { textMode = "image"; textSelect.value=String(index); alignReferenceOptions(); }
               if (wizardStep === "visual" || wizardStep === "text") showPreview(url, label, selectionPreview);
-              if (wizardStep !== "compare") { updateReferenceStages(); nextStep.disabled = !reference; }
+              if (wizardStep !== "compare") { updateReferenceStages(); nextStep.disabled = !visualSelect.value; }
             });
             thumbs.append(button);
           };
@@ -1458,11 +1458,8 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           const textSelect = node("select", ""); textSelect.setAttribute("aria-label", "Référence de texte");
           const fillReferenceSelect = (select, label, language) => { const first = node("option", "", label); first.value = ""; select.append(first); for (const item of options.filter(value => language === "fr" ? value.language === "fr" || value.text_reference_only || value.local_original_reference : !value.text_reference_only || value.local_original_reference)) { const origin = item.local_original_reference ? " · image originale intégrée" : item.text_reference_only ? " · même nom, autre édition" : ""; const option = node("option", "", `${item.language.toUpperCase()}${origin} · ${item.width} × ${item.height} px`); option.value = String(item.index); select.append(option); } };
           fillReferenceSelect(visualSelect, "Choisir une référence visuelle", null); fillReferenceSelect(textSelect, "Choisir une image française", "fr");
-          const correction = node("textarea", "ai-correction-prompt"); correction.rows = 2; correction.maxLength = 4000; correction.placeholder = "Correction ou précision (facultatif)"; correction.setAttribute("aria-label", "Précision pour la génération IA");
-          const generateButton = node("button", "secondary-button", "Générer avec ces deux références"); generateButton.type = "button";
-          generateButton.hidden = true;
-          const onlineTextButton = node("button", "primary-button", "Utiliser le texte français officiel de la base locale"); onlineTextButton.type = "button"; onlineTextButton.hidden = true;
-          stepActions.append(backStep, nextStep, onlineTextButton);
+          const correction = node("textarea", "ai-correction-prompt"); correction.rows = 2; correction.maxLength = 4000; correction.placeholder = "Consigne supplémentaire avant génération (facultatif)"; correction.setAttribute("aria-label", "Consigne supplémentaire pour la génération IA");
+          stepActions.append(backStep, nextStep);
           const aiStatus = node("p", "muted ai-status", "Choisissez une image visuelle et une référence française de la même impression ou d’une carte au même nom.");
           const aiActions = node("div", "comparison-choices ai-actions");
           aiActions.hidden=true;
@@ -1492,9 +1489,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
             if (textSelect.selectedOptions[0]?.disabled) textSelect.value = "";
             updateReferenceStages();
             const validLocalText = Boolean(visual && options.some(item=>String(item.index)===textSelect.value&&(item.language==="fr"&&item.printing_id===visual.printing_id&&item.face_index===visual.face_index||item.text_reference_only||item.local_original_reference)));
-            generateButton.disabled = !validLocalText;
-            nextStep.disabled = wizardStep === "visual" ? !visualSelect.value : !validLocalText;
-            onlineTextButton.disabled = !visual;
+            nextStep.disabled = wizardStep === "visual" ? !visualSelect.value : !visual;
             if (wizardStep === "text") renderThumbnails("fr");
           };
           const updateReferenceStages = () => {
@@ -1520,8 +1515,6 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
             stepDescription.hidden = !choosing;
             aiProgress.hidden = step !== "generating";
             stepActions.hidden = !choosing;
-            onlineTextButton.hidden = step !== "text";
-            generateButton.hidden = step !== "text";
             columns.hidden = step !== "review";
             onlineTextPanel.hidden = step !== "review" || textMode !== "online";
             aiControls.hidden = step !== "review";
@@ -1553,16 +1546,15 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
             } else {
               comparison.querySelector(".comparison-title").textContent = "Comparer la carte générée";
             }
-            if (choosing) nextStep.disabled = !(step === "visual" ? visualSelect.value : textSelect.value && options.some(item=>String(item.index)===textSelect.value&&(item.language==="fr"||item.text_reference_only||item.local_original_reference)));
-            nextStep.textContent = step === "visual" ? "Continuer" : "Générer avec cette référence de texte";
+            if (choosing) nextStep.disabled = !visualSelect.value;
+            nextStep.textContent = step === "visual" ? "Continuer" : "Générer";
           };
           createVersionButton.addEventListener("click",()=>{ textMode = "image"; setWizardStep("visual"); });
           backStep.addEventListener("click",()=>{ textMode = "image"; setWizardStep(wizardStep === "text" ? "visual" : "compare"); });
           nextStep.addEventListener("click",()=>{
             if (wizardStep === "visual" && visualSelect.value) setWizardStep("text");
-            else if (wizardStep === "text" && textSelect.value) { textMode = "image"; void runAIGeneration(); }
+            else if (wizardStep === "text") { textMode = textSelect.value ? "image" : "online"; void runAIGeneration(); }
           });
-          onlineTextButton.addEventListener("click", () => { textMode = "online"; updateReferenceStages(); void runAIGeneration(); });
           translationCancel.onclick = () => { translationDialog.close(); textMode = "image"; setWizardStep("text"); if (!choiceDialog.open) choiceDialog.showModal(); };
           translationDialog.oncancel = event => { event.preventDefault(); translationCancel.click(); };
           translationSend.onclick = () => {
@@ -1582,7 +1574,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           const runAIGeneration = async (promptOverride = null) => {
             const visual=options.find(item=>String(item.index)===visualSelect.value),text=options.find(item=>String(item.index)===textSelect.value);
             if (!visual || textMode === "image" && (!text || !(text.language === "fr" || text.text_reference_only || text.local_original_reference) || !(visual.printing_id===text.printing_id&&visual.face_index===text.face_index || text.text_reference_only || text.local_original_reference))) { setText(aiStatus, "Choisissez une référence visuelle, puis une image française, l’original intégré ou une image du même nom."); return; }
-            setWizardStep("generating"); generateButton.disabled = retryAI.disabled = true; acceptAI.disabled = true; aiStage.replaceChildren(node("div", "card-loading-spinner")); setText(aiStatus, "Génération de la carte… cela peut prendre quelques minutes.");
+            setWizardStep("generating"); retryAI.disabled = true; acceptAI.disabled = true; aiStage.replaceChildren(node("div", "card-loading-spinner")); setText(aiStatus, "Génération de la carte… cela peut prendre quelques minutes.");
             if (textMode === "online") textStage.replaceChildren(node("p", "muted", "Recherche du texte français vérifié…"));
             try {
               const requestedCorrection = promptOverride === null ? correction.value.trim() : promptOverride;
@@ -1620,7 +1612,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
                     if (textMode === "online" || textMode === "translate") {
                       columns.classList.add("ai-online-review"); columns.children[0].querySelector("h3").textContent = "Image originale";
                       columns.children[1].hidden = true;
-                      if (textMode === "online") { columns.children[1].querySelector("h3").textContent = "Texte français vérifié"; onlineTextPanel.hidden = false; renderVerifiedFrenchText(onlineTextPanel, value.french_text || task.french_text, value.text_provenance || task.text_provenance); }
+                      if (textMode === "online") { renderVerifiedFrenchText(onlineTextPanel, value.french_text || task.french_text, value.text_provenance || task.text_provenance); }
                     }
                     setText(aiStatus, "Comparez le texte français et le graphisme avant de valider."); acceptAI.disabled = false; retryAI.disabled = false; setWizardStep("review");
                     cancelWaiting.hidden = true; void refreshNotifications(); return;
@@ -1635,7 +1627,6 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
             } catch (error) { setText(errorMessage, error.message || "La génération n’a pas abouti."); setWizardStep("error"); }
             finally { alignReferenceOptions(); }
           };
-          generateButton.addEventListener("click", runAIGeneration);
           retryAI.addEventListener("click", () => { reviewCorrection.hidden = false; retryAI.disabled = true; correction.focus(); });
           retryCancel.addEventListener("click", () => { reviewCorrection.hidden = true; retryAI.disabled = false; });
           retrySubmit.addEventListener("click", () => { reviewCorrection.hidden = true; void runAIGeneration(); });
@@ -1646,6 +1637,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           cancelAI.addEventListener("click", async () => { if (aiId && !demoThisCard) { try { await postJSON("/api/v2/image/ai/choose", { id: aiId, choice: "old" }); } catch {} } aiId = null; reviewCorrection.hidden = true; setWizardStep("compare"); });
           aiActions.append(acceptAI, retryAI, cancelAI);
           aiControls.append(visualSelect, textSelect, cancelSetup, aiStatus);
+          stepActions.prepend(correction);
           reviewFooter.append(aiActions, reviewCorrection);
           selectionPane.append(thumbs, choices, createVersionButton, stepActions, aiControls);
           previewPane.append(comparePanel, selectionPreview, columns, onlineTextPanel, aiProgress, errorPane);
@@ -1801,7 +1793,7 @@ async function openAIReviewTask(taskId, summary = {}) {
     comparison.append(node("h2", "comparison-title", "Comparer la carte générée"));
     const previewPane = node("div", "comparison-preview-pane");
     const columns = node("div", "comparison-columns");
-    const frenchTextPanel = node("section", "ai-french-text-panel");
+    const frenchTextPanel = node("section", "ai-french-text-panel"); frenchTextPanel.hidden = true;
     const addColumn = (title, imageUrl, alt) => {
       const column = node("section", "comparison-column"), stage = node("div", "comparison-column-stage");
       column.append(node("h3", "", title));
@@ -1890,7 +1882,7 @@ async function openAIReviewTask(taskId, summary = {}) {
     chooseOld.addEventListener("click", () => void choose("old")); chooseNew.addEventListener("click", () => void choose("new"));
     actions.classList.add("ai-actions");
     actions.append(chooseOld, chooseNew);
-    previewPane.append(columns, ...(textMode === "online" ? [frenchTextPanel] : []));
+    previewPane.append(columns);
     const reviewFooter = node("div", "review-footer");
     reviewFooter.append(retryPane, actions, status);
     comparison.append(previewPane, reviewFooter); content.replaceChildren(comparison);
