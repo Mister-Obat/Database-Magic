@@ -76,7 +76,17 @@ L’index MTGJSON se recherche par nom, édition, format, type de produit, coule
 
 ### Decks personnels
 
-L’onglet Perso sert à créer ou copier une composition, puis à modifier ses sections, les quantités et l’ordre des cartes. La mention « Enregistré » confirme la sauvegarde.
+![Liste des decks personnels avec le kit Final Fantasy Blue-Black](docs/screenshots/perso-final-fantasy.jpg)
+
+L’onglet Perso sert à créer ou copier une composition, puis à la retrouver par nom ou couleurs. L’exemple montre le kit de démarrage Final Fantasy **Blue-Black** ajouté à la bibliothèque personnelle.
+
+![Composition du deck Blue-Black](docs/screenshots/deck-final-fantasy.jpg)
+
+Ouvrir le deck affiche ses cartes réparties par sections et leurs quantités. Le bouton **Exporter le deck sur le Bureau** crée un dossier d’images lorsque les images nécessaires sont disponibles.
+
+![Éditeur du deck Blue-Black](docs/screenshots/editeur-final-fantasy.jpg)
+
+**Modifier** permet de renommer le deck, de choisir ses couleurs, de déplacer les cartes, de régler leurs quantités et de gérer les sections. La mention **Enregistré** confirme la sauvegarde. Les captures ont été prises sans changer le deck.
 
 ### Archives
 
@@ -94,4 +104,8 @@ Depuis la fiche, la recherche de meilleure image présente des candidates FR, EN
 
 ![Référence de texte française choisie](docs/screenshots/reference-francaise.jpg)
 
+![Revue d’une version française générée par IA](docs/screenshots/revue-ia-demo.jpg)
+
 Si aucune image française satisfaisante n’existe, le parcours peut créer une candidate avec le Codex CLI installé localement. La première référence fournit le graphisme ; le texte français provient d’une image française choisie ou des données officielles locales. Une candidate doit être comparée et acceptée explicitement avant de remplacer l’image. Vérifiez son illustration, ses symboles et tout son texte : la fidélité n’est pas certifiée automatiquement. La cloche permet de reprendre le suivi d’une génération en cours. Ce parcours s’appuie sur [l’outil image du projet open source Codex](https://github.com/openai/codex/blob/main/codex-rs/ext/image-generation/src/tool.rs).
+
+La capture montre une génération réelle laissée à l’étape de revue : aucune image du catalogue n’a été remplacée pour cette démonstration.
