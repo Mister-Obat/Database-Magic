@@ -11,9 +11,20 @@ from PIL import Image
 from bibliotheque_mtg.v2 import card_generation
 
 
+FRENCH_TEXT = {"name": "Carte", "type_line": "Créature", "oracle_text": "Vol"}
+
+
 def _image(path: Path, size=(744, 1039), color=(30, 50, 80)) -> Path:
     Image.new("RGB", size, color).save(path, format="PNG")
     return path
+
+
+def _complete_transcription(args):
+    response = Path(args[args.index("--output-last-message") + 1])
+    fields = dict.fromkeys(card_generation.TEXT_REFERENCE_FIELDS, "")
+    fields.update(FRENCH_TEXT)
+    response.write_text(json.dumps(fields, ensure_ascii=False), encoding="utf-8")
+    return subprocess.CompletedProcess(args, 0, "", "")
 
 
 def test_generate_card_candidate_uses_french_text_and_optional_previous_reference(
@@ -26,12 +37,17 @@ def test_generate_card_candidate_uses_french_text_and_optional_previous_referenc
     visual = _image(tmp_path / "english.png", color=(80, 40, 20))
     text = _image(tmp_path / "french.png", color=(20, 80, 40))
     previous = _image(tmp_path / "previous.png", color=(40, 20, 80))
-    observed = {}
+    calls = []
 
     def fake_run(args, **kwargs):
-        observed["args"] = args
-        observed["input"] = kwargs["input"]
-        observed["env"] = kwargs["env"]
+        references = []
+        for index, arg in enumerate(args):
+            if arg == "--image":
+                with Image.open(args[index + 1]) as image:
+                    references.append(image.getpixel((0, 0)))
+        calls.append((args, kwargs["input"], kwargs["env"], references))
+        if "--output-last-message" in args:
+            return _complete_transcription(args)
         output = Path(kwargs["env"]["CODEX_HOME"]) / "generated_images" / "result.png"
         _image(output)
         return subprocess.CompletedProcess(args, 0, "{}", "")
@@ -42,14 +58,19 @@ def test_generate_card_candidate_uses_french_text_and_optional_previous_referenc
         executable="codex",
     )
 
-    assert result["reference_count"] == 3
+    assert result["reference_count"] == 2
     assert Path(result["path"]).is_file()
     assert result["width"] == 744 and result["height"] == 1039
-    assert "Corrige le nom français" in observed["input"]
-    assert observed["args"].count("--image") == 3
-    assert observed["args"][-1] == "-"
-    assert "OPENAI_API_KEY" not in observed["env"]
-    assert observed["env"]["CODEX_HOME"] != str(account_home)
+    (text_args, _, text_env, text_refs), (image_args, prompt, image_env, image_refs) = calls
+    assert "image_generation" not in text_args
+    assert text_refs == [(20, 80, 40)]
+    assert "image_generation" in image_args
+    assert image_refs == [(80, 40, 20), (40, 20, 80)]
+    assert "Corrige le nom français" in prompt
+    assert '"oracle_text": "Vol"' in prompt
+    assert image_args[-1] == "-"
+    assert "OPENAI_API_KEY" not in text_env and "OPENAI_API_KEY" not in image_env
+    assert len({text_env["CODEX_HOME"], image_env["CODEX_HOME"], str(account_home)}) == 3
 
 
 def test_generate_card_candidate_uses_verified_french_text_without_text_image(
@@ -69,9 +90,8 @@ def test_generate_card_candidate_uses_verified_french_text_without_text_image(
         return subprocess.CompletedProcess(args, 0, "{}", "")
 
     monkeypatch.setattr(card_generation.subprocess, "run", fake_run)
-    fields = {"name": "Carte", "type_line": "Créature", "oracle_text": "Vol"}
     result = card_generation.generate_card_candidate(
-        visual, None, tmp_path / "candidates", french_text=fields, executable="codex")
+        visual, None, tmp_path / "candidates", french_text=FRENCH_TEXT, executable="codex")
     assert Path(result["path"]).is_file()
     assert observed["args"].count("--image") == 1
     assert '"oracle_text": "Vol"' in observed["input"]
@@ -84,13 +104,12 @@ def test_generate_card_candidate_rejects_missing_codex_output(tmp_path, monkeypa
     (account_home / "auth.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(account_home))
     visual = _image(tmp_path / "english.png")
-    text = _image(tmp_path / "french.png")
     monkeypatch.setattr(card_generation.subprocess, "run", lambda args, **kwargs:
                        subprocess.CompletedProcess(args, 0, "{}", ""))
 
     with pytest.raises(card_generation.CardGenerationError, match="aucun PNG"):
         card_generation.generate_card_candidate(
-            visual, text, tmp_path / "candidates", executable="codex")
+            visual, None, tmp_path / "candidates", french_text=FRENCH_TEXT, executable="codex")
 
 
 def test_small_french_jpeg_reference_keeps_full_generated_resolution(tmp_path, monkeypatch):
@@ -103,6 +122,8 @@ def test_small_french_jpeg_reference_keeps_full_generated_resolution(tmp_path, m
     Image.new("RGB", (146, 204), (50, 70, 90)).save(french, format="JPEG")
 
     def fake_run(args, **kwargs):
+        if "--output-last-message" in args:
+            return _complete_transcription(args)
         output = Path(kwargs["env"]["CODEX_HOME"]) / "generated_images" / "result.png"
         _image(output, size=(1024, 1430))
         return subprocess.CompletedProcess(args, 0, "{}", "")
@@ -130,13 +151,12 @@ def test_generate_card_candidate_reports_safe_cli_failure_categories(
     (account_home / "auth.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(account_home))
     visual = _image(tmp_path / "english.png")
-    text = _image(tmp_path / "french.png")
     monkeypatch.setattr(card_generation.subprocess, "run", lambda args, **kwargs:
                        subprocess.CompletedProcess(args, 1, "", diagnostic))
 
     with pytest.raises(card_generation.CardGenerationError) as error:
         card_generation.generate_card_candidate(
-            visual, text, tmp_path / "candidates", executable="codex")
+            visual, None, tmp_path / "candidates", french_text=FRENCH_TEXT, executable="codex")
 
     assert expected in str(error.value)
     assert "secret" not in str(error.value)
@@ -149,16 +169,15 @@ def test_generate_card_candidate_recovers_inline_png_payload(tmp_path, monkeypat
     (account_home / "auth.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(account_home))
     visual = _image(tmp_path / "english.png")
-    text = _image(tmp_path / "french.png")
 
     def fake_run(args, **kwargs):
-        encoded = base64.b64encode((tmp_path / "french.png").read_bytes()).decode("ascii")
+        encoded = base64.b64encode(visual.read_bytes()).decode("ascii")
         return subprocess.CompletedProcess(
             args, 0, json.dumps({"type": "image_generation", "result": encoded}), "")
 
     monkeypatch.setattr(card_generation.subprocess, "run", fake_run)
     result = card_generation.generate_card_candidate(
-        visual, text, tmp_path / "candidates", executable="codex")
+        visual, None, tmp_path / "candidates", french_text=FRENCH_TEXT, executable="codex")
 
     assert Path(result["path"]).is_file()
     assert result["width"] == 744 and result["height"] == 1039
@@ -170,7 +189,6 @@ def test_generate_card_candidate_uses_last_of_multiple_pngs(tmp_path, monkeypatc
     (account_home / "auth.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(account_home))
     visual = _image(tmp_path / "english.png")
-    french = _image(tmp_path / "french.png")
 
     def fake_run(args, **kwargs):
         generated = Path(kwargs["env"]["CODEX_HOME"]) / "generated_images"
@@ -182,7 +200,7 @@ def test_generate_card_candidate_uses_last_of_multiple_pngs(tmp_path, monkeypatc
 
     monkeypatch.setattr(card_generation.subprocess, "run", fake_run)
     result = card_generation.generate_card_candidate(
-        visual, french, tmp_path / "candidates", executable="codex")
+        visual, None, tmp_path / "candidates", french_text=FRENCH_TEXT, executable="codex")
     with Image.open(result["path"]) as candidate:
         assert candidate.getpixel((0, 0)) == (90, 80, 70)
 
@@ -206,7 +224,6 @@ def test_generate_card_candidate_classifies_quota_from_timeout_partial_output(tm
     (account_home / "auth.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(account_home))
     visual = _image(tmp_path / "english.png")
-    text = _image(tmp_path / "french.png")
 
     def fake_run(args, **kwargs):
         raise subprocess.TimeoutExpired(args, 1, output=b"image_generation usage_limit_reached secret")
@@ -214,7 +231,7 @@ def test_generate_card_candidate_classifies_quota_from_timeout_partial_output(tm
     monkeypatch.setattr(card_generation.subprocess, "run", fake_run)
     with pytest.raises(card_generation.CardGenerationError, match="quota de génération d’images") as error:
         card_generation.generate_card_candidate(
-            visual, text, tmp_path / "candidates", executable="codex")
+            visual, None, tmp_path / "candidates", french_text=FRENCH_TEXT, executable="codex")
     assert "secret" not in str(error.value)
 
 
@@ -236,13 +253,12 @@ def test_missing_png_diagnostic_distinguishes_safe_failure_classes(
     (account_home / "auth.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(account_home))
     visual = _image(tmp_path / "english.png")
-    text = _image(tmp_path / "french.png")
     monkeypatch.setattr(card_generation.subprocess, "run", lambda args, **kwargs:
                        subprocess.CompletedProcess(args, returncode, diagnostic, ""))
 
     with pytest.raises(card_generation.CardGenerationError) as error:
         card_generation.generate_card_candidate(
-            visual, text, tmp_path / "candidates", executable="codex")
+            visual, None, tmp_path / "candidates", french_text=FRENCH_TEXT, executable="codex")
 
     message = str(error.value)
     assert expected in message

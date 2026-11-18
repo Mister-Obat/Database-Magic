@@ -46,6 +46,11 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   pas un titre lisible.
 - `ui/index.html`, `ui/app.js`, `ui/styles.css` : affichage navigateur et appels à
   l’API.
+- Une nouvelle soumission de Recherche ou de Decks annule côté navigateur la
+  requête de liste encore en cours avant de lancer la suivante ; ouvrir une autre
+  fiche annule de même le chargement précédent. Les réponses obsolètes restent
+  ignorées. La fermeture de la connexion n’interrompt pas nécessairement un
+  calcul SQLite déjà démarré côté serveur.
 - Le choix d'image existante et les deux étapes de références IA partagent la
   même position de vignettes et d'aperçu. Les consignes des références sont à
   droite du titre, hors de la sélection. Les images comparées restent visibles

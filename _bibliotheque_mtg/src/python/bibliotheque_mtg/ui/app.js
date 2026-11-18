@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { view: "info", searchPage: 0, editionPage: 0, deckPage: 0, archivePage: 0, searchTotal: 0, searchItems: [], editionCardsTotal: 0, deckTotal: 0, deckExecuted: false, deckAppliedFilters: null, archiveTotal: 0, editions: [], activeSet: "", selectedDeck: null, openDeckId: null, deckDetailRequest: 0, deckListKey: null, deckListScroll: 0, deckListOpener: null, deckTaskId: null, deckPollTimer: null, deckFacetsLoaded: false, deckColorAttempted: false, deckColorPollTimer: null, deckSuggestionRequest: 0, deckRequest: 0, searchRequest: 0, editionRequest: 0, cardRequest: 0, cardGallery: null, maintenancePollTimer: null };
+const state = { view: "info", searchPage: 0, editionPage: 0, deckPage: 0, archivePage: 0, searchTotal: 0, searchItems: [], editionCardsTotal: 0, deckTotal: 0, deckExecuted: false, deckAppliedFilters: null, archiveTotal: 0, editions: [], activeSet: "", selectedDeck: null, openDeckId: null, deckDetailRequest: 0, deckListKey: null, deckListScroll: 0, deckListOpener: null, deckTaskId: null, deckPollTimer: null, deckFacetsLoaded: false, deckColorAttempted: false, deckColorPollTimer: null, deckSuggestionRequest: 0, deckRequest: 0, deckController: null, searchRequest: 0, searchController: null, editionRequest: 0, cardRequest: 0, cardController: null, cardGallery: null, maintenancePollTimer: null };
 const viewScrollPositions = new Map();
 const SEARCH_DRAFT_KEY = "database-magic-search-draft-v1";
 const RECENT_SEARCHES_KEY = "database-magic-recent-searches-v1";
@@ -407,8 +407,8 @@ async function getJSON(path, query = {}, options = {}) {
   if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
   return data;
 }
-async function postJSON(path, body) {
-  const response = await fetch(path, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+async function postJSON(path, body, options = {}) {
+  const response = await fetch(path, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body), ...options });
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
   return data;
@@ -968,10 +968,14 @@ async function runSearch() {
   if (state.view === "recherche") syncRoute();
   persistSearchDraft();
   hideRecentSearches();
+  state.searchController?.abort();
+  const controller = new AbortController();
+  state.searchController = controller;
   const request = ++state.searchRequest;
+  $("refresh-search-results").disabled = true;
   $("search-status").replaceChildren(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", "Recherche…"));
   try {
-    const data = await getJSON("/api/v2/search", searchFilters());
+    const data = await getJSON("/api/v2/search", searchFilters(), { signal: controller.signal });
     if (request !== state.searchRequest) return;
     state.searchTotal = data.total;
     state.searchItems = data.items || [];
@@ -980,16 +984,23 @@ async function runSearch() {
     setText($("search-status"), `${formatNumber(data.total)} résultat(s)`);
   }
   catch (error) { if (request === state.searchRequest) { showError($("results"), error.message); setText($("search-status"), "La recherche a échoué."); } }
+  finally {
+    if (state.searchController === controller) state.searchController = null;
+    if (request === state.searchRequest) $("refresh-search-results").disabled = false;
+  }
 }
 async function refreshSearchImages() {
   const button = $("refresh-search-results"), items = state.searchItems, request = state.searchRequest;
   if (!items.length) return;
+  state.searchController?.abort();
+  const controller = new AbortController();
+  state.searchController = controller;
   button.disabled = true;
   setText($("search-status"), "Actualisation des images locales…");
   try {
     const data = await postJSON("/api/v2/search/image-slots", {
       printing_ids: [...new Set(items.map(item => item.printing_id).filter(Boolean))],
-    });
+    }, { signal: controller.signal });
     if (request !== state.searchRequest || items !== state.searchItems) return;
     for (const item of items) item.image_slots = data.image_slots?.[item.printing_id] || [];
     renderEditionItems($("results"), items);
@@ -1000,6 +1011,7 @@ async function refreshSearchImages() {
     }
   } finally {
     if (request === state.searchRequest && items === state.searchItems) button.disabled = false;
+    if (state.searchController === controller) state.searchController = null;
   }
 }
 function updateSearchPager() { const pages = Math.max(1, Math.ceil(state.searchTotal / SEARCH_PAGE_SIZE)); $("search-pager").hidden = pages <= 1; setText($("page-status"), `Page ${state.searchPage + 1} sur ${pages} · ${formatNumber(state.searchTotal)} résultats`); $("previous-page").disabled = state.searchPage === 0; $("next-page").disabled = (state.searchPage + 1) * SEARCH_PAGE_SIZE >= state.searchTotal; }
@@ -1267,6 +1279,9 @@ async function showCardUsages(card) {
 }
 async function openCard(providerId, gallery = null, preferredFace = null, resumedPreview = null) {
   const dialog = $("card-dialog"), target = $("card-detail");
+  state.cardController?.abort();
+  const controller = new AbortController();
+  state.cardController = controller;
   const request = ++state.cardRequest;
   const context = gallery || galleryContextFor(providerId); context.current = String(providerId); state.cardGallery = context;
   hoverPreview.hidden = true;
@@ -1282,7 +1297,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
   stage.replaceChildren(node("div", "card-loading-spinner"));
   target.classList.add("card-detail-loading");
   try {
-    const data = await getJSON("/api/v2/card", { id: providerId });
+    const data = await getJSON("/api/v2/card", { id: providerId }, { signal: controller.signal });
     if (request !== state.cardRequest || !dialog.open) return;
     if (!data.found) { target.replaceChildren(node("p", "empty-state", "Cette fiche n’existe pas dans le catalogue.")); target.classList.remove("card-detail-loading"); return; }
     const card = data.card; context.currentPrinting = card.printing_id || card.provider_card_id;
@@ -1739,6 +1754,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     shell.append(header, imageArea); target.replaceChildren(shell); target.classList.remove("card-detail-loading");
     if (resumedPreview) controls.querySelector(".card-image-search")?.click();
   } catch (error) { if (request === state.cardRequest) { showError(target,error.message); target.classList.remove("card-detail-loading"); } }
+  finally { if (state.cardController === controller) state.cardController = null; }
 }
 async function openAIReviewTask(taskId, summary = {}) {
   const content = $("image-choice-content"), reviewDialog = $("image-choice-dialog");
@@ -1945,6 +1961,9 @@ async function renderDeckPage() {
   if (state.view === "decks") syncRoute();
   const query = deckPageQuery();
   state.deckListKey = params(query);
+  state.deckController?.abort();
+  const controller = new AbortController();
+  state.deckController = controller;
   const request = ++state.deckRequest;
   $("download-deck-results").disabled = true;
   const container = $("deck-list");
@@ -1952,7 +1971,7 @@ async function renderDeckPage() {
   waiting.append(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", "Chargement des decks…"));
   container.replaceChildren(waiting);
   try {
-    const data = await getJSON("/api/v2/decks", query);
+    const data = await getJSON("/api/v2/decks", query, { signal: controller.signal });
     if (request !== state.deckRequest) return;
     state.deckTotal = data.total;
     updateBatchButtons();
@@ -1985,6 +2004,7 @@ async function renderDeckPage() {
       showError(container, error.message);
     }
   }
+  finally { if (state.deckController === controller) state.deckController = null; }
 }
 
 async function loadDeckFacets(force = false) {
@@ -2536,7 +2556,7 @@ $("download-deck-results").addEventListener("click", () => void startBatchDownlo
 $("refresh-search-results").addEventListener("click", () => void refreshSearchImages());
 $("refresh-edition-results").addEventListener("click", () => void renderEditionPage());
 $("refresh-deck-results").addEventListener("click", () => void refreshDeckResults());
-$("clear-search").addEventListener("click", () => { $("search-form").reset(); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
+$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("refresh-search-results").disabled = false; $("search-form").reset(); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
 $("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
 $("query").addEventListener("focus", renderRecentSearches);
 $("query").addEventListener("click", renderRecentSearches);
@@ -2600,7 +2620,7 @@ $("clear-deck-filters").addEventListener("click", () => {
   clearTimeout(deckSuggestionTimer); ++state.deckSuggestionRequest;
   hideDeckSuggestions();
   state.deckExecuted = false; state.deckAppliedFilters = null; state.deckPage = 0; state.deckTotal = 0;
-  state.deckListKey = null; ++state.deckRequest;
+  state.deckListKey = null; state.deckController?.abort(); state.deckController = null; ++state.deckRequest;
   $("deck-list").replaceChildren();
   $("deck-pager").hidden = true;
   updateBatchButtons();

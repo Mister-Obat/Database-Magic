@@ -422,7 +422,12 @@ def test_preview_excludes_current_source_and_keeps_other_language(tmp_path, imag
     assert {item["language"] for item in preview["candidates"]} == {"en"}
 
 
-def test_official_gallery_matches_exact_french_name(monkeypatch):
+def test_official_gallery_matches_exact_french_name(tmp_path, monkeypatch):
+    article_url = "https://magic.wizards.com/fr/news/card-image-gallery/eldritch-moon-2016-06-28"
+    index = tmp_path / "gallery_catalogue.json"
+    index.write_text(json.dumps({"articles": [{"url": article_url}]}), encoding="utf-8")
+    monkeypatch.setattr(image_download, "_WIZARDS_INDEX_PATH", index)
+
     class Response:
         status_code = 200
         headers = {"Content-Type": "text/html; charset=utf-8"}
@@ -437,13 +442,14 @@ def test_official_gallery_matches_exact_french_name(monkeypatch):
 
     class Session:
         def get(self, url, **kwargs):
-            assert url.endswith("/fr/products/eldritch-moon/card-image-gallery")
+            assert url == article_url
             return Response()
 
     monkeypatch.setattr(image_download, "_GALLERY_CACHE", {})
     found = image_download._official_gallery_images("Eldritch Moon", "Effort collectif", Session())
     assert len(found) == 1
     assert found[0]["url"] == "https://media.wizards.com/2016/test/fr_card.png"
+    assert found[0]["evidence"] == article_url
     assert image_download._official_gallery_images("Eldritch Moon", "Autre nom", Session()) == []
 
 

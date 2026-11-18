@@ -1,8 +1,6 @@
-# Bibliothèque Magic locale
+<h1><img src="Logo.png" alt="Icône de Database Magic" width="48" align="absmiddle"> Bibliothèque Magic locale</h1>
 
-![Icône de Database Magic](Logo.png)
-
-Application Windows de consultation d'un catalogue Magic: The Gathering : recherche et filtres, fiches de cartes, images à la demande, decks préconstruits et personnels, exports et historique des versions. Les métadonnées proviennent notamment de Scryfall et les decks préconstruits de MTGJSON.
+Bibliothèque locale de cartes Magic: The Gathering pour Windows. L’application télécharge le catalogue, puis permet de rechercher une carte et de récupérer son image à la demande, en privilégiant les versions françaises. Si une impression n’a pas d’image française satisfaisante, Codex CLI peut préparer une version française à partir d’un visuel anglais.
 
 Le dépôt contient le programme, pas une bibliothèque déjà constituée : catalogue, archives téléchargées, images, decks personnels, configuration et sauvegardes restent locaux. Une connexion Internet est nécessaire pour le premier import et les mises à jour.
 
@@ -44,68 +42,15 @@ Tesseract est facultatif pour l'OCR et Codex CLI pour les fonctions qui l'utilis
 
 ## Visite de l’application
 
-Les captures proviennent de l’application locale. Les données affichées dépendent de chaque installation. Les recherches et les ouvertures de fiches ci-dessous n’ont pas modifié la bibliothèque.
+![Démonstration en 33 secondes : récupérer une image française, puis générer et enregistrer une carte avec Codex CLI](docs/demo-final.gif)
 
-### Accueil
+La démonstration utilise une copie du catalogue. Depuis la loupe, elle récupère et enregistre l’image française d’*Arme Diamant*. Elle reproduit ensuite la recherche pour *Noctis*, utilise le visuel anglais pour demander une génération française à Codex CLI, puis compare et enregistre le résultat. Le texte d’une carte générée doit être relu avant utilisation.
 
-![Accueil complet](docs/screenshots/accueil.jpg)
+### Images françaises avec Codex CLI
 
-L’accueil résume les cartes, éditions et decks disponibles. Il permet de lancer une mise à jour, de consulter les versions conservées et de récupérer une liste de 100 cartes au maximum, par noms français ou anglais ou URL EDHREC. La récupération télécharge des images ; l’export crée des PNG sur le Bureau.
+Lorsqu’aucune image française satisfaisante n’existe, l’application peut demander au Codex CLI local de préparer une candidate. Une image existante sert de référence visuelle, tandis qu’une carte française ou les données officielles locales fournissent le texte. La dernière étape compare les deux références et la version générée avant toute validation : rien n’est remplacé automatiquement. Ce parcours s’appuie sur [l’outil image du projet open source Codex](https://github.com/openai/codex/blob/main/codex-rs/ext/image-generation/src/tool.rs).
 
-### Recherche et fiche
+### Archives et decks
 
-![Recherche combinant texte, édition, type, couleur et images présentes](docs/screenshots/recherche.jpg)
-
-Cet exemple cherche « vol » dans Final Fantasy, parmi les créatures bleues ayant déjà une image. Les filtres couvrent aussi rareté, valeur de mana, force, endurance et tri. Chaque résultat est une impression exacte. Le bouton de rafraîchissement relit les images locales ; le téléchargement groupé traite les images manquantes de la sélection.
-
-![Fiche d’une carte](docs/screenshots/fiche-carte.jpg)
-
-La visionneuse affiche les faces et permet de parcourir les résultats, d’ajouter la carte à un deck personnel, d’importer ou d’exporter une image et de rechercher une meilleure image.
-
-### Éditions
-
-![Parcours de l’édition Le Seigneur des Anneaux](docs/screenshots/editions.jpg)
-
-Choisir une édition par son nom ou son code affiche ses cartes avec pagination. On peut ouvrir chaque fiche, rafraîchir l’état local ou demander les images manquantes de l’édition.
-
-### Decks préconstruits
-
-![Kits de démarrage Final Fantasy](docs/screenshots/decks.jpg)
-
-L’index MTGJSON se recherche par nom, édition, format, type de produit, couleurs et disponibilité des images. Ouvrir un deck donne sa composition, ses commandants et ses jetons. Le chargement des images et l’export sont des actions explicites.
-
-### Decks personnels
-
-![Liste des decks personnels avec le kit Final Fantasy Blue-Black](docs/screenshots/perso-final-fantasy.jpg)
-
-L’onglet Perso sert à créer ou copier une composition, puis à la retrouver par nom ou couleurs. L’exemple montre le kit de démarrage Final Fantasy **Blue-Black** ajouté à la bibliothèque personnelle.
-
-![Composition du deck Blue-Black](docs/screenshots/deck-final-fantasy.jpg)
-
-Ouvrir le deck affiche ses cartes réparties par sections et leurs quantités. Le bouton **Exporter le deck sur le Bureau** crée un dossier d’images lorsque les images nécessaires sont disponibles.
-
-![Éditeur du deck Blue-Black](docs/screenshots/editeur-final-fantasy.jpg)
-
-**Modifier** permet de renommer le deck, de choisir ses couleurs, de déplacer les cartes, de régler leurs quantités et de gérer les sections. La mention **Enregistré** confirme la sauvegarde. Les captures ont été prises sans changer le deck.
-
-### Archives
-
-![Archives à identifier](docs/screenshots/archives.jpg)
-
-Les anciennes images non rapprochées d’une impression précise restent séparées du catalogue. La page permet un filtrage par état, une lecture OCR, une recherche de nom et une attribution manuelle avant import. L’installation photographiée ne contenait pas d’archive non résolue.
-
-### Choix d’image et génération française
-
-![Recherche réelle d’images pour une impression](docs/screenshots/comparaison-images.jpg)
-
-Depuis la fiche, la recherche de meilleure image présente des candidates FR, EN et JA avec leurs dimensions. L’image actuelle et la proposition sont comparées avant validation.
-
-![Référence visuelle anglaise choisie](docs/screenshots/reference-visuelle.jpg)
-
-![Référence de texte française choisie](docs/screenshots/reference-francaise.jpg)
-
-![Revue d’une version française générée par IA](docs/screenshots/revue-ia-demo.jpg)
-
-Si aucune image française satisfaisante n’existe, le parcours peut créer une candidate avec le Codex CLI installé localement. La première référence fournit le graphisme ; le texte français provient d’une image française choisie ou des données officielles locales. Une candidate doit être comparée et acceptée explicitement avant de remplacer l’image. Vérifiez son illustration, ses symboles et tout son texte : la fidélité n’est pas certifiée automatiquement. La cloche permet de reprendre le suivi d’une génération en cours. Ce parcours s’appuie sur [l’outil image du projet open source Codex](https://github.com/openai/codex/blob/main/codex-rs/ext/image-generation/src/tool.rs).
-
-La capture montre une génération réelle laissée à l’étape de revue : aucune image du catalogue n’a été remplacée pour cette démonstration.
+- **Archives** — Les PNG personnels peuvent être analysés par OCR, rapprochés d’une impression et intégrés au catalogue après vérification.
+- **Decks** — Consultez les listes préconstruites ou composez un deck personnel, avec sections, couleurs et quantités. L’export peut rassembler les images sur le Bureau.

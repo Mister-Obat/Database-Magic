@@ -237,7 +237,7 @@ body > .custom-select-menu {
   justify-content: space-between;
   gap: .65rem 1rem;
 }
-#search-status { flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
+#search-status { display: flex; align-items: center; justify-content: flex-end; gap: .3rem; flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
 #search-status:empty { position: absolute; }
 #deck-batch-status { flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
 #deck-batch-status.batch-status:not(:empty) { margin: 0; padding: 0; background: none; border: 0; }
@@ -278,6 +278,7 @@ body > .custom-select-menu {
 .batch-status button{margin-left:.8rem;padding:.35rem .6rem}
 .batch-status .batch-preparation-spinner{display:inline-block;width:1rem;height:1rem;margin-right:.55rem;border-width:2px;vertical-align:-.15rem}
 .search-loading-spinner{display:inline-block;width:1rem;height:1rem;border-width:2px;vertical-align:-.15rem;margin-right:.45rem}
+.card-loading-spinner.search-loading-spinner{box-sizing:border-box;flex:0 0 1rem;width:1rem;height:1rem;margin:0;border-width:2px;border-radius:50%}
 .search-loading-state{display:flex;align-items:center;gap:.3rem}
 .card-usages-dialog{width:min(40rem,calc(100vw - 2rem));max-height:80vh;overflow:auto;background:#211b2e;color:var(--ink);border:1px solid var(--line);border-radius:14px;padding:1.25rem}
 .card-usages-dialog::backdrop{background:#080611b8}
