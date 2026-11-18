@@ -1,0 +1,3194 @@
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const state = { view: "info", searchPage: 0, editionPage: 0, deckPage: 0, archivePage: 0, searchTotal: 0, searchItems: [], editionCardsTotal: 0, deckTotal: 0, archiveTotal: 0, editions: [], activeSet: "", selectedDeck: null, openDeckId: null, deckDetailRequest: 0, deckListKey: null, deckListScroll: 0, deckListOpener: null, deckTaskId: null, deckPollTimer: null, deckFacetsLoaded: false, deckColorAttempted: false, deckColorPollTimer: null, deckSuggestionRequest: 0, deckRequest: 0, searchRequest: 0, editionRequest: 0, cardRequest: 0, cardGallery: null, maintenancePollTimer: null };
+const viewScrollPositions = new Map();
+const SEARCH_DRAFT_KEY = "database-magic-search-draft-v1";
+const RECENT_SEARCHES_KEY = "database-magic-recent-searches-v1";
+let initialRouteRestored = false;
+let searchDraftTouched = false;
+const PAGE_SIZE = 50;
+const imageTaskHandlers = new Map();
+const notificationButton = document.getElementById("notification-button");
+const closeApplicationButton = document.getElementById("close-application");
+const shutdownDialog = document.getElementById("shutdown-dialog");
+closeApplicationButton.addEventListener("click", () => shutdownDialog.showModal());
+document.getElementById("shutdown-cancel").addEventListener("click", () => shutdownDialog.close());
+document.getElementById("shutdown-confirm").addEventListener("click", async () => {
+  shutdownDialog.close();
+  closeApplicationButton.disabled = true;
+  closeApplicationButton.setAttribute("aria-label", "Fermeture…");
+  try {
+    await postJSON("/api/v2/app/shutdown", {});
+    window.close();
+    window.setTimeout(() => { window.location.replace("about:blank"); }, 100);
+  } catch (error) {
+    closeApplicationButton.disabled = false;
+    closeApplicationButton.setAttribute("aria-label", "Fermer l’application");
+    window.alert(`Fermeture impossible : ${error.message}`);
+  }
+});
+notificationButton.addEventListener("click", () => { const panel = document.getElementById("notification-panel"); panel.hidden = !panel.hidden; notificationButton.setAttribute("aria-expanded", String(!panel.hidden)); });
+document.addEventListener("pointerdown", event => {
+  if (event.target.closest(".notification-center")) return;
+  const panel = document.getElementById("notification-panel");
+  panel.hidden = true;
+  notificationButton.setAttribute("aria-expanded", "false");
+});
+async function refreshNotifications() {
+  try {
+    const response = await getJSON("/api/v2/notifications");
+    const items = (response.items || []).filter(item => !["complete", "cancelled", "ready"].includes(item.status));
+    const count = items.filter(item => ["queued", "running", "needs_review", "error", "failed"].includes(item.status)).length;
+    document.getElementById("notification-count").textContent = String(count);
+    const list = document.getElementById("notification-list"); list.replaceChildren();
+    if (!items.length) { list.append(node("p", "muted", "Aucun traitement en cours ou à vérifier.")); return; }
+    for (const item of items) {
+      const row = node("div", "notification-item");
+      const open = node("button", "notification-open", ""); open.type = "button";
+      open.append(node("strong", "", item.label || (item.kind === "ai_generation" ? "Génération IA" : item.kind === "image_preview" ? "Recherche d’image" : item.kind || "Traitement")), node("span", "notification-status", notificationStatusLabel(item.status)), node("span", "notification-detail", `${item.completed != null && item.total ? `${item.completed}/${item.total} · ` : ""}${item.detail || ""}`));
+      open.addEventListener("click", () => {
+        const handler = imageTaskHandlers.get(item.task_id);
+        if (handler) handler.open();
+        else if (item.kind === "image_preview") {
+          void openImagePreviewTask(item.task_id);
+        } else if (item.kind === "ai_generation") {
+          void openAIReviewTask(item.task_id, item);
+        }
+      });
+      row.append(open);
+      if (item.kind === "batch_download" && ["queued", "running"].includes(item.status)) {
+        const cancel = node("button", "secondary-button", "Annuler"); cancel.addEventListener("click", async event => { event.stopPropagation(); await postJSON("/api/v2/batch-download/cancel", {task_id:item.task_id}); void refreshNotifications(); }); row.append(cancel);
+      } else if (item.kind === "deck_download" && ["queued", "running"].includes(item.status)) {
+        const cancel = node("button", "secondary-button", "Annuler"); cancel.addEventListener("click", async event => { event.stopPropagation(); await postJSON("/api/v2/deck/cancel", {task_id:item.task_id}); void refreshNotifications(); }); row.append(cancel);
+      } else if (item.kind === "maintenance" && ["queued", "running"].includes(item.status)) {
+        const cancel = node("button", "secondary-button", "Annuler"); cancel.addEventListener("click", async event => { event.stopPropagation(); await postJSON("/api/v2/maintenance/update/cancel", {task_id:item.task_id}); void refreshNotifications(); }); row.append(cancel);
+      } else if (["ai_generation", "image_preview"].includes(item.kind) && ["queued", "running"].includes(item.status)) {
+        const cancel = node("button", "secondary-button", "Annuler"); cancel.addEventListener("click", async event => { event.stopPropagation(); await postJSON("/api/v2/image/task/cancel", { task_id: item.task_id }); void refreshNotifications(); }); row.append(cancel);
+      }
+      list.append(row);
+    }
+  } catch { document.getElementById("notification-count").textContent = "!"; }
+}
+function notificationStatusLabel(status) { return ({ queued: "En attente", running: "En cours", cancelling: "Annulation…", needs_review: "À vérifier", ready: "Terminé", error: "Erreur", failed: "Échec", cancelled: "Annulé" })[status] || status || "En cours"; }
+setInterval(() => { void refreshNotifications(); }, 2500);
+void refreshNotifications();
+const EDITION_PAGE_SIZE = 300;
+const SEARCH_PAGE_SIZE = 200;
+const ROUTE_VIEWS = new Set(["info", "recherche", "editions", "decks", "perso", "archives"]);
+let imageDemoMode = location.pathname === "/1" ? "existing" : location.pathname === "/2" ? "ai" : null;
+let imageDemoCandidate = null;
+let imageDemoCardId = null;
+const COLOR_NAMES = { W: "blanc", U: "bleu", B: "noir", R: "rouge", G: "vert", C: "incolore" };
+const PRODUCT_TYPES_FR = {
+  "Advanced Deck": "Deck avancé", "Archenemy Deck": "Deck Archenemy", "Arena Promotional Deck": "Deck promotionnel Arena",
+  "Arena Starter Deck": "Deck de démarrage Arena", "Arena Starter Kit": "Kit de démarrage Arena", "Brawl Deck": "Deck Brawl",
+  "Challenge Deck": "Deck défi", "Challenger Deck": "Deck Challenger", "Clash Pack": "Pack Duel",
+  "Commander Deck": "Deck Commander", "Dandan Deck": "Deck Dandân", "Demo Deck": "Deck de démonstration",
+  "Duel Deck": "Deck Duel", "Duel Of The Planeswalkers Deck": "Deck Duels of the Planeswalkers", "Enemy Deck": "Deck adverse",
+  "Enhanced Deck": "Deck amélioré", "Event Deck": "Deck événement", "Game Night Deck": "Deck Game Night",
+  "Guild Kit": "Kit de guilde", "Halfdeck": "Demi-deck", "Historic Brawl Precon Deck": "Deck Brawl historique préconstruit",
+  "Intro Pack": "Pack d'introduction", "Jumpstart": "Deck Jumpstart", "Modern Event Deck": "Deck événement Modern",
+  "MTGO Commander Deck": "Deck Commander MTGO", "MTGO Duel Deck": "Deck Duel MTGO", "MTGO Theme Deck": "Deck à thème MTGO",
+  "Pioneer Challenger Deck": "Deck Challenger Pioneer", "Planechase Deck": "Deck Planechase", "Planeswalker Deck": "Deck Planeswalker",
+  "Premium Deck": "Deck Premium", "Pro Tour Deck": "Deck Pro Tour", "Sample Deck": "Deck d'initiation",
+  "Shandalar Enemy Deck": "Deck adverse de Shandalar", "Spellslinger Starter Kit": "Kit de démarrage Spellslinger",
+  "Starter Deck": "Deck de démarrage", "Starter Kit": "Kit de démarrage", "Theme Deck": "Deck à thème",
+  "Welcome Deck": "Deck de bienvenue", "World Championship Deck": "Deck de championnat du monde",
+};
+function productTypeLabel(type) { return PRODUCT_TYPES_FR[type] || type || "Type non renseigné"; }
+function deckNameLabel(deck) {
+  const french = (deck.name_fr || "").trim(), english = (deck.name || "").trim();
+  return french && french.toLocaleLowerCase("fr") !== english.toLocaleLowerCase("fr") ? `${french} / ${english}` : french || english || "Deck sans nom";
+}
+function deckTitleContent(eyebrow, name, colors, titleId) {
+  const heading = node("div", "deck-heading");
+  const title = node("h1", "", name);
+  if (titleId) title.id = titleId;
+  heading.append(title);
+  const symbols = colorSymbols(colors);
+  if (symbols) heading.append(symbols);
+  return [node("p", "eyebrow", eyebrow), heading];
+}
+function deckSectionCount(cards) {
+  return cards.reduce((total, card) => total + Number(card.count || 0), 0);
+}
+function deckSectionTitle(name, cards) {
+  return node("h3", "", `${name} (${deckSectionCount(cards)})`);
+}
+function editionLabel(deck) {
+  const name = deck.set_name_fr || deck.set_name || "";
+  return [deck.set_code || "", name].filter(Boolean).join(" · ");
+}
+function selectedManaColors(container) {
+  return Array.from(container.querySelectorAll('.mana-toggle[aria-pressed="true"]'), button => button.dataset.color).join("");
+}
+function colorSymbols(colors) {
+  if (!Array.isArray(colors)) return null;
+  const values = colors.length ? colors : ["C"];
+  const group = node("span", "deck-colors");
+  group.setAttribute("role", "img");
+  group.setAttribute("aria-label", values.length === 1 && values[0] === "C" ? "Deck incolore" : `Couleurs du deck : ${values.map(color => COLOR_NAMES[color]).join(", ")}`);
+  for (const color of values) {
+    const symbol = node("span", `mana-toggle mana-${color.toLowerCase()}`);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "mana-icon");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", `#mana-${color.toLowerCase()}`);
+    svg.append(use);
+    symbol.append(svg);
+    symbol.setAttribute("aria-hidden", "true");
+    group.append(symbol);
+  }
+  return group;
+}
+function setManaPressed(button, pressed) { button.setAttribute("aria-pressed", pressed ? "true" : "false"); }
+function toggleMana(button, container) {
+  const activate = button.getAttribute("aria-pressed") !== "true";
+  if (activate) {
+    if (button.dataset.color === "C") container.querySelectorAll(".mana-toggle").forEach(item => setManaPressed(item, false));
+    else { const colorless = container.querySelector('.mana-toggle[data-color="C"]'); if (colorless) setManaPressed(colorless, false); }
+  }
+  setManaPressed(button, activate);
+}
+
+function node(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined && text !== null) el.textContent = String(text);
+  return el;
+}
+// Lucide SVG paths (ISC/MIT); see LUCIDE_LICENSE.txt.
+function cardActionIcon(name) {
+  const shapes = {
+    search: [["path", { d: "m21 21-4.34-4.34" }], ["circle", { cx: 11, cy: 11, r: 8 }]],
+    minus: [["path", { d: "M5 12h14" }]],
+    plus: [["path", { d: "M5 12h14" }], ["path", { d: "M12 5v14" }]],
+    upload: [["path", { d: "M12 3v12" }], ["path", { d: "m17 8-5-5-5 5" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }]],
+    download: [["path", { d: "M12 15V3" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }], ["path", { d: "m7 10 5 5 5-5" }]],
+    addDeck: [["path", { d: "M12 10v6" }], ["path", { d: "M9 13h6" }], ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }]],
+    flip: [["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }], ["path", { d: "M21 3v5h-5" }], ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }], ["path", { d: "M8 16H3v5" }]]
+  };
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  for (const [key, value] of Object.entries({ viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) svg.setAttribute(key, value);
+  svg.classList.add("card-action-icon");
+  for (const [tag, attributes] of shapes[name]) {
+    const shape = document.createElementNS(namespace, tag);
+    for (const [key, value] of Object.entries(attributes)) shape.setAttribute(key, value);
+    svg.append(shape);
+  }
+  return svg;
+}
+function setupCardSizeControls() {
+  const scales = [0.7, 0.85, 1, 1.25, 1.5, 1.8, 2.1, 2.4, 2.7, 3, 3.4];
+  const key = "database-magic-card-columns";
+  const minus = $("card-size-minus"), plus = $("card-size-plus");
+  const minimumIndex = scales.length - 9;
+  const maximumIndex = scales.length - 3;
+  let index = minimumIndex;
+  try {
+    const columns = Number(localStorage.getItem(key));
+    if (Number.isInteger(columns) && columns >= 1 && columns <= scales.length) {
+      index = scales.length - columns;
+    } else {
+      const previousIndex = scales.indexOf(Number(localStorage.getItem("database-magic-card-size")));
+      if (previousIndex >= 0) index = previousIndex;
+    }
+  } catch {}
+  index = Math.max(minimumIndex, Math.min(maximumIndex, index));
+  function render() {
+    document.documentElement.style.setProperty("--card-grid-columns", scales.length - index);
+    document.documentElement.style.setProperty("--card-thumbnail-scale", scales[index]);
+    minus.disabled = index === minimumIndex;
+    plus.disabled = index === maximumIndex;
+  }
+  for (const [button, icon, direction] of [[minus, "minus", -1], [plus, "plus", 1]]) {
+    button.append(cardActionIcon(icon));
+    button.addEventListener("click", () => {
+      index = Math.max(minimumIndex, Math.min(maximumIndex, index + direction));
+      render();
+      try { localStorage.setItem(key, String(scales.length - index)); } catch {}
+    });
+  }
+  render();
+}
+setupCardSizeControls();
+function setText(el, value) { el.textContent = value == null ? "" : String(value); }
+function formatNumber(value) { return Number(value || 0).toLocaleString("fr-FR"); }
+function params(values) { const p = new URLSearchParams(); for (const [k,v] of Object.entries(values)) if (v !== "" && v !== null && v !== undefined) p.set(k, String(v)); return p.toString(); }
+function viewRoute(view = state.view) {
+  const query = new URLSearchParams();
+  const add = (key, value, fallback = "") => { if (value !== "" && value !== fallback && value != null) query.set(key, String(value)); };
+  if (view === "recherche") {
+    const applied = state.searchBaseFilters || {};
+    const refined = state.refineFilters || {};
+    if (state.searchExecuted) add("searched", 1);
+    add("q", applied.q); add("set", applied.set);
+    add("rarity", applied.rarity); add("card_type", applied.card_type);
+    add("colors", applied.color); add("color_mode", applied.color_mode, "contains");
+    for (const [key, value] of Object.entries(refined)) add(key, value);
+    add("page", state.searchPage + 1, 1);
+  } else if (view === "editions") {
+    add("set", $("edition-select").value); add("q", $("edition-query").value.trim());
+    add("page", state.editionPage + 1, 1);
+  } else if (view === "decks") {
+    add("q", $("deck-query").value.trim()); add("format", $("deck-format").value);
+    add("set", $("deck-edition").value); add("type", $("deck-type").value);
+    add("colors", selectedManaColors(document.querySelector(".deck-color-filter")));
+    add("color_mode", $("deck-color-mode").value, "contains");
+    add("sort", $("deck-sort").value, "date"); add("order", $("deck-order").value, "desc");
+    add("image_filter", $("deck-image-filter").value, "all");
+    add("page", state.deckPage + 1, 1);
+    add("deck", state.openDeckId);
+  } else if (view === "archives") {
+    add("status", $("archive-status").value); add("page", state.archivePage + 1, 1);
+  }
+  return `#${view}${query.size ? `?${query}` : ""}`;
+}
+function syncRoute(mode = "replace") {
+  const hash = viewRoute();
+  if (location.hash !== hash) history[mode === "push" ? "pushState" : "replaceState"](null, "", hash);
+}
+function restoreManaColors(container, colors) {
+  const selected = new Set(String(colors || "").toUpperCase());
+  container.querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, selected.has(button.dataset.color)));
+}
+function routePage(query) {
+  const value = Number(query.get("page"));
+  return Number.isSafeInteger(value) && value > 0 && value <= 100000 ? value - 1 : 0;
+}
+let routeRestoreRequest = 0;
+let initialInfo, initialEditions;
+async function restoreRoute() {
+  const request = ++routeRestoreRequest;
+  const personalRoute = location.hash.slice(1).split("?", 1)[0] === "perso";
+  if (!personalRoute && initialInfo) await initialInfo;
+  if (!personalRoute && initialEditions) await initialEditions;
+  if (request !== routeRestoreRequest) return;
+  const pendingUserDraft = !initialRouteRestored && searchDraftTouched ? captureSearchDraft() : null;
+  const pendingStoredDraft = readSearchDraft();
+  const fragment = location.hash.slice(1);
+  const separator = fragment.indexOf("?");
+  const candidate = separator < 0 ? fragment : fragment.slice(0, separator);
+  const view = ROUTE_VIEWS.has(candidate) ? candidate : "info";
+  const query = new URLSearchParams(separator < 0 ? "" : fragment.slice(separator + 1));
+  if (view === "recherche") {
+    state.searchExecuted = query.has("searched") || query.size > 0;
+    $("query").value = query.get("q") || ""; $("filter-set").value = groupedEditionCode(query.get("set"));
+    $("filter-rarity").value = query.get("rarity") || "";
+    restoreManaColors($("filter-color"), query.get("colors"));
+    $("filter-color-mode").value = query.get("color_mode") || "contains";
+    const savedCardType = (query.get("card_type") || query.get("type") || "").toLowerCase();
+    $("filter-type").value = [...$("filter-type").options].some(option => option.value === savedCardType) ? savedCardType : "";
+    for (const [key, id] of Object.entries(REFINE_IDS)) $(id).value = query.get(key) || (key === "image_filter" ? "all" : key === "result_order" ? "desc" : key === "result_sort" ? "date" : "");
+    const legacySort = query.get("result_sort");
+    if (legacySort && legacySort.includes("_")) {
+      const [sort, order] = legacySort.split("_"); $("refine-sort").value = sort; $("refine-order").value = order;
+    } else if (legacySort) $("refine-sort").value = legacySort;
+    state.searchBaseFilters = mainSearchFilters();
+    state.refineFilters = refineSearchFilters();
+    state.searchPage = routePage(query);
+    if (pendingUserDraft) applySearchDraft(pendingUserDraft);
+    else if (pendingStoredDraft?.route === location.hash) applySearchDraft(pendingStoredDraft);
+  } else if (view === "editions") {
+    $("edition-query").value = query.get("q") || "";
+    $("edition-select").value = groupedEditionCode(query.get("set"));
+    renderEditionSuggestions();
+    state.editionPage = routePage(query);
+  } else if (view === "decks") {
+    await loadDeckFacets();
+    if (request !== routeRestoreRequest) return;
+    $("deck-query").value = query.get("q") || "";
+    $("deck-format").value = query.get("format") || ""; $("deck-edition").value = query.get("set") || "";
+    $("deck-type").value = query.get("type") || "";
+    restoreManaColors(document.querySelector(".deck-color-filter"), query.get("colors"));
+    $("deck-color-mode").value = query.get("color_mode") || "contains";
+    $("deck-sort").value = query.get("sort") || "date"; $("deck-order").value = query.get("order") || "desc";
+    $("deck-image-filter").value = query.get("image_filter") || "all";
+    state.deckPage = routePage(query);
+  } else if (view === "archives") {
+    $("archive-status").value = query.get("status") || ""; state.archivePage = routePage(query);
+  }
+  initialRouteRestored = true;
+  const restoreDeckScroll = view === "decks" && !query.has("deck") && state.openDeckId
+    && state.deckListKey === params(deckPageQuery());
+  if (view === "decks") {
+    const id = query.get("deck");
+    if (!id) closeDeck(null);
+    else if (id !== state.openDeckId) void openDeck(id, null);
+  }
+  setView(view, null);
+  if (restoreDeckScroll) scrollToDeckList();
+  if (view === "recherche" && !state.searchItems.length) {
+    setText($("search-status"), "Cliquez sur Rechercher pour lancer la recherche.");
+  }
+  if (!ROUTE_VIEWS.has(candidate)) syncRoute();
+}
+async function getJSON(path, query = {}, options = {}) {
+  const response = await fetch(path + (Object.keys(query).length ? `?${params(query)}` : ""), { headers: { Accept: "application/json" }, ...options });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+  return data;
+}
+async function postJSON(path, body) {
+  const response = await fetch(path, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+  return data;
+}
+function activateView(view) {
+  hoverPreview.hidden = true;
+  state.view = view;
+  document.querySelectorAll(".view").forEach((x) => x.classList.toggle("active", x.id === `view-${view}`));
+  document.querySelectorAll(".nav-button").forEach((x) => x.classList.toggle("active", x.dataset.view === view));
+}
+function setView(view, urlMode = "push") {
+  if (!ROUTE_VIEWS.has(view)) return;
+  if (urlMode) routeRestoreRequest++;
+  const previousView = state.view;
+  if (view !== previousView) viewScrollPositions.set(previousView, window.scrollY);
+  activateView(view);
+  if (urlMode) syncRoute(urlMode);
+  if (view === "editions") void ensureEditions().then(ensureEditionPage);
+  if (view === "decks" && !state.openDeckId) void loadDeckFacets().then(ensureDeckPage);
+  if (view === "perso" && !$("personal-content").hasChildNodes()) void showPersonalDecks();
+  if (view === "archives") void ensureArchivePage();
+  if (view === "info") void loadMaintenanceStatus();
+  if (view !== previousView) {
+    window.scrollTo({ top: viewScrollPositions.get(view) ?? 0, behavior: "instant" });
+  }
+}
+function showError(container, message) { container.replaceChildren(node("p", "empty-state error-state", `Erreur : ${message}`)); }
+function imageNode(slot, className = "card-preview") {
+  if (!slot || slot.status !== "ready" || !slot.relative_path) return node("div", "missing-image", slot?.status === "pending_review" ? "À vérifier" : "Image absente");
+  const img = node("img", className);
+  img.alt = `Image ${slot.selected_language === "fr" ? "française" : "anglaise"} de la carte`;
+  img.loading = "lazy";
+  img.src = `/assets?${params({ path: slot.relative_path })}`;
+  img.onerror = () => { const missing = node("div", "missing-image", "Image indisponible"); img.replaceWith(missing); };
+  return img;
+}
+function cardTile(item) {
+  const card = node("article", "card-card");
+  card.dataset.providerId = item.provider_card_id || "";
+  card.dataset.printingId = item.printing_id || "";
+  card.dataset.lang = item.lang || "";
+  const main = node("div");
+  const title = node("h3", "", item.printed_name || item.name || "Nom indisponible");
+  const languageLabel = ({ fr: "Texte FR", en: "Texte EN", ja: "Texte JA" })[item.lang] || `Texte ${String(item.lang || "?").toUpperCase()}`;
+  const meta = node("p", "card-meta", `${item.set_code || "—"} · ${item.collector_number || "—"} · ${languageLabel}`);
+  const type = node("p", "card-type", item.printed_type_line || item.type_line || "Type non renseigné");
+  const cost = node("p", "card-meta", `Coût : ${item.mana_cost || "—"} · Valeur : ${item.mana_value ?? "—"} · Rareté : ${item.rarity || "—"}`);
+  const opener = node("button", "open-card", "Ouvrir la fiche");
+  opener.type = "button"; opener.addEventListener("click", () => openCard(item.provider_card_id));
+  main.append(title, meta, type, cost, opener);
+  const slot = (item.image_slots || []).find((x) => x.face_index === 0 && (x.selected_language === item.lang || x.status === "ready")) || (item.image_slots || [])[0];
+  const preview = imageNode(slot);
+  if (item.provider_card_id) {
+    preview.tabIndex = 0; preview.setAttribute("role", "button"); preview.setAttribute("aria-label", `Ouvrir la fiche ${item.printed_name || item.name || "carte"}`);
+    preview.addEventListener("click", () => openCard(item.provider_card_id));
+    preview.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openCard(item.provider_card_id); } });
+  }
+  card.append(main, preview);
+  return card;
+}
+function renderItems(container, items, emptyText = "Aucun résultat.") {
+  container.replaceChildren();
+  if (!items.length) { container.append(node("p", "empty-state", emptyText)); return; }
+  for (const item of items) container.append(cardTile(item));
+}
+function editionTile(item) {
+    const tile = node("button", "deck-card-tile deck-card-open edition-card-tile");
+    tile.type = "button";
+    tile.dataset.providerId = item.provider_card_id;
+    tile.dataset.printingId = item.printing_id;
+    tile.dataset.lang = item.lang;
+    tile.setAttribute("aria-label", `Ouvrir la carte ${item.printed_name || item.name}`);
+    tile.addEventListener("click", () => openCard(item.provider_card_id));
+    const slot = (item.image_slots || []).find(face => face.face_index === 0 && face.status === "ready");
+    const art = slot?.relative_path ? node("img", "deck-card-image") : node("div", "deck-card-image deck-card-image-empty", "Image absente");
+    if (slot?.relative_path) {
+      art.src = `/assets?${params({ path: slot.relative_path })}`;
+      art.alt = "";
+      art.loading = "lazy";
+      art.onerror = () => art.replaceWith(node("div", "deck-card-image deck-card-image-empty", "Image indisponible"));
+    }
+    tile.append(art, node("span", "deck-card-name", item.printed_name || item.name));
+    return tile;
+}
+function renderEditionItems(container, items) {
+  container.replaceChildren();
+  if (!items.length) { container.append(node("p", "empty-state", "Aucune carte dans cette édition.")); return; }
+  for (const item of items) container.append(editionTile(item));
+}
+
+async function loadHome() {
+  const grid = $("stats");
+  grid.setAttribute("aria-busy", "true");
+  try {
+    const stats = await getJSON("/api/v2/stats");
+    if (!["complete_cards", "printings", "complete_editions", "complete_decks", "decks_total"].every(key => Number.isFinite(stats[key])) || !Number.isFinite(stats.editions?.eligible)) {
+      throw new Error("Le serveur local est une ancienne version. Fermez-le puis relancez la Bibliothèque Magic.");
+    }
+    const counters = [
+      ["stat-cards", stats.complete_cards, stats.printings],
+      ["stat-editions", stats.complete_editions, stats.editions.eligible],
+      ["stat-decks", stats.complete_decks, stats.decks_total],
+    ];
+    for (const [id, present, total] of counters) {
+      setText($(id), `${formatNumber(present)} / ${formatNumber(total)}`);
+    }
+    setText($("stats-error"), "");
+  } catch (error) {
+    setText($("stats-error"), error.message);
+  } finally {
+    grid.setAttribute("aria-busy", "false");
+  }
+}
+function maintenanceElapsed(task) {
+  const measured = Number(task.seconds);
+  if (Number.isFinite(measured) && measured > 0) return Math.round(measured);
+  const started = Date.parse(task.started_at || "");
+  return Number.isFinite(started) ? Math.max(0, Math.round((Date.now() - started) / 1000)) : 0;
+}
+function renderMaintenanceSteps(steps) {
+  const target = $("update-steps");
+  target.replaceChildren();
+  target.hidden = !Array.isArray(steps) || steps.length === 0;
+  if (target.hidden) return;
+  const list = node("ol", "maintenance-step-list");
+  for (const step of steps) {
+    const status = step.status || "pending";
+    const percent = Math.max(0, Math.min(100, Number(step.progress) || 0));
+    const label = status === "running" ? "En cours" : status === "complete" ? "Terminée"
+      : status === "skipped" ? "Sans objet" : status === "failed" ? "Échec"
+      : status === "cancelled" ? "Annulée" : "Restante";
+    const item = node("li", `maintenance-step maintenance-step-${status}`);
+    const heading = node("div", "maintenance-step-heading");
+    heading.append(node("span", "", step.label || step.key || "Étape"),
+      node("span", "", `${label} · ${Math.round(percent)} %`));
+    const bar = node("progress");
+    bar.max = 100;
+    bar.value = percent;
+    bar.setAttribute("aria-label", step.label || step.key || "Étape");
+    item.append(heading, bar);
+    if (step.detail && status !== "pending") item.append(node("p", "muted", step.detail));
+    list.append(item);
+  }
+  target.append(list);
+}
+function renderMaintenanceTask(task) {
+  const button = $("update-library"), status = $("update-status");
+  renderMaintenanceSteps(task.steps);
+  const running = ["queued", "running", "cancelling"].includes(task.status);
+  button.disabled = task.status === "cancelling";
+  $("update-library-label").textContent = task.status === "cancelling" ? "Annulation en cours…" : running ? "Annuler la mise à jour"
+    : task.status === "complete" || task.status === "failed" || task.status === "cancelled" ? "Relancer la mise à jour" : "Lancer la mise à jour";
+  if (task.status === "idle") {
+    status.className = "muted maintenance-status";
+    setText(status, "");
+    return;
+  }
+  if (running) {
+    const elapsed = maintenanceElapsed(task);
+    status.className = "muted maintenance-status";
+    setText(status, `${task.message || "Mise à jour en cours…"}${elapsed ? ` (${formatNumber(elapsed)} s)` : ""}`);
+    return;
+  }
+  const details = [];
+  if (task.message) details.push(task.message);
+  for (const error of task.errors || []) {
+    const label = error.step === "catalogue" ? "catalogue" : error.step === "decks" ? "decks" : "mise à jour";
+    details.push(`Échec ${label} : ${error.error}`);
+  }
+  if (Number(task.seconds) > 0) details.push(`Durée : ${formatNumber(Math.round(task.seconds))} s.`);
+  status.className = `maintenance-status ${task.status === "failed" ? "error-state" : "muted"}`;
+  setText(status, details.join(" "));
+}
+async function loadMaintenanceStatus() {
+  try {
+    const task = await getJSON("/api/v2/maintenance/update");
+    renderMaintenanceTask(task);
+    if (["queued", "running", "cancelling"].includes(task.status)) pollMaintenanceTask();
+  } catch (error) {
+    $("update-status").className = "maintenance-status error-state";
+    setText($("update-status"), `État de la mise à jour indisponible : ${error.message}`);
+  }
+}
+async function startLibraryUpdate() {
+  const button = $("update-library"), status = $("update-status");
+  button.disabled = true;
+  $("update-library-label").textContent = "Démarrage…";
+  status.className = "muted maintenance-status";
+  setText(status, "Démarrage de la mise à jour…");
+  try {
+    const task = await postJSON("/api/v2/maintenance/update", {});
+    renderMaintenanceTask(task);
+    pollMaintenanceTask();
+  } catch (error) {
+    button.disabled = false;
+    $("update-library-label").textContent = "Lancer la mise à jour";
+    status.className = "maintenance-status error-state";
+    setText(status, `Mise à jour impossible : ${error.message}`);
+  }
+}
+async function cancelLibraryUpdate(taskId) {
+  const button = $("update-library");
+  button.disabled = true;
+  $("update-library-label").textContent = "Annulation en cours…";
+  try {
+    renderMaintenanceTask(await postJSON("/api/v2/maintenance/update/cancel", { task_id: taskId }));
+    pollMaintenanceTask();
+  } catch (error) {
+    button.disabled = false;
+    setText($("update-status"), `Annulation impossible : ${error.message}`);
+  }
+}
+async function toggleLibraryUpdate() {
+  try {
+    const task = await getJSON("/api/v2/maintenance/update");
+    if (["queued", "running"].includes(task.status)) {
+      await cancelLibraryUpdate(task.task_id);
+    } else if (task.status !== "cancelling") {
+      await startLibraryUpdate();
+    }
+  } catch (error) {
+    setText($("update-status"), `Action indisponible : ${error.message}`);
+  }
+}
+function pollMaintenanceTask() {
+  clearTimeout(state.maintenancePollTimer);
+  state.maintenancePollTimer = setTimeout(async () => {
+    try {
+      const task = await getJSON("/api/v2/maintenance/update");
+      renderMaintenanceTask(task);
+      if (["queued", "running", "cancelling"].includes(task.status)) { pollMaintenanceTask(); return; }
+      await refreshAfterMaintenanceUpdate();
+    } catch (error) {
+      setText($("update-status"), `Suivi indisponible : ${error.message}. Nouvelle tentative…`);
+      state.maintenancePollTimer = setTimeout(pollMaintenanceTask, 5000);
+    }
+  }, 2000);
+}
+async function refreshAfterMaintenanceUpdate() {
+  state.deckFacetsLoaded = false;
+  editionsPromise = null;
+  await Promise.all([loadHome(), ensureEditions()]);
+  if (state.view === "editions") await renderEditionPage();
+  if (state.view === "decks") { await loadDeckFacets(true); await renderDeckPage(); }
+  if (state.view === "recherche" && state.searchItems.length) await refreshSearchImages();
+  if (!$('version-history-list').hidden) await loadVersionHistory();
+}
+function formatVersionSize(bytes) { return `${(Number(bytes || 0) / (1024 ** 3)).toLocaleString("fr-FR", {maximumFractionDigits: 1})} Go`; }
+async function loadVersionHistory() {
+  const target = $("version-history-list");
+  target.replaceChildren(node("p", "muted", "Chargement des versions…"));
+  try {
+    const {versions} = await getJSON("/api/v2/maintenance/versions");
+    target.replaceChildren();
+    if (!versions.length) { target.append(node("p", "muted", "Aucune version conservée.")); return; }
+    for (const version of versions) {
+      const row = node("div", "version-history-row");
+      const info = node("div");
+      info.append(node("strong", "", version.version_id),
+        node("span", "muted", version.active ? "Version active" : version.eligible ? "Version conservée" : "Version indisponible"));
+      if (version.modified_at) info.append(node("span", "muted", `Modifiée le ${new Date(version.modified_at * 1000).toLocaleString("fr-FR")} · ${formatVersionSize(version.size_bytes)}`));
+      if (version.error) info.append(node("span", "error-state", version.error));
+      row.append(info);
+      if (version.eligible && !version.active) {
+        const button = node("button", "secondary-button", "Restaurer cette version");
+        button.type = "button";
+        button.addEventListener("click", async () => {
+          if (!window.confirm(`Activer la version ${version.version_id} ? La version actuelle restera dans l'historique.`)) return;
+          button.disabled = true;
+          setText($("update-status"), `Validation de la version ${version.version_id}…`);
+          try {
+            await postJSON("/api/v2/maintenance/activate", {version_id: version.version_id});
+            await refreshAfterMaintenanceUpdate();
+            setText($("update-status"), `Version ${version.version_id} restaurée.`);
+          } catch (error) { setText($("update-status"), `Restauration impossible : ${error.message}`); button.disabled = false; }
+        });
+        row.append(button);
+      }
+      target.append(row);
+    }
+  } catch (error) { target.replaceChildren(node("p", "error-state", `Historique indisponible : ${error.message}`)); }
+}
+$("version-history-toggle").addEventListener("click", () => {
+  const list = $("version-history-list");
+  list.hidden = !list.hidden;
+  $("version-history-toggle").setAttribute("aria-expanded", String(!list.hidden));
+  if (!list.hidden) void loadVersionHistory();
+});
+let editionsPromise = null;
+function groupedEditionCode(code) {
+  if (!code) return "";
+  return state.editions.find(edition => edition.code === code || edition.code.split(",").includes(code))?.code || code;
+}
+function groupEditions(editions) {
+  const suffix = /^(?: (?:Commander|Tokens|Promos|Art Series|Eternal|Jumpstart Front Cards|Minigames|Southeast Asia Tokens))+(?: .*)?$/i;
+  const named = editions.map(edition => ({ ...edition, familyName: edition.name.replace(/^Alchemy: /i, "") }));
+  const groups = new Map();
+  const rootFor = edition => {
+    const parent = named.filter(candidate => candidate !== edition &&
+      (edition.name.startsWith("Alchemy: ") && candidate.familyName === edition.familyName && !candidate.name.startsWith("Alchemy: ") ||
+      edition.familyName.startsWith(candidate.familyName + " ") &&
+      suffix.test(edition.familyName.slice(candidate.familyName.length))))
+      .sort((a, b) => b.familyName.length - a.familyName.length)[0];
+    return parent ? rootFor(parent) : edition;
+  };
+  for (const edition of named) {
+    const root = rootFor(edition);
+    const key = root.code;
+    if (!groups.has(key)) groups.set(key, { ...root, members: [] });
+    groups.get(key).members.push(edition.code);
+  }
+  return [...groups.values()].map(group => ({ ...group, code: [group.code, ...group.members.filter(code => code !== group.code)].join(",") }))
+    .sort((a, b) => (b.released_at || "").localeCompare(a.released_at || "") || a.name.localeCompare(b.name));
+}
+async function loadEditions() {
+  const all = []; let offset = 0; let total = Infinity;
+  while (offset < total) { const page = await getJSON("/api/v2/editions", { limit: 100, offset }); total = page.total; all.push(...page.items); offset += page.items.length; if (!page.items.length) break; }
+  const grouped = groupEditions(all);
+  state.editions = grouped.map(e => ({ ...e, search_fr: editionSearchKey(e.name_fr || e.name), search_en: editionSearchKey(e.name || e.name_fr) }));
+  for (const id of ["filter-set", "edition-select"]) {
+    const select = $(id), selected = select.value;
+    const options = document.createDocumentFragment(); options.append(select.options[0]);
+    for (const e of grouped) { const option = document.createElement("option"); option.value = e.code; option.textContent = `${e.name_fr || e.name} (${e.code.split(",")[0]})`; option.dataset.searchTerms = [e.name_fr || e.name, e.name || e.name_fr, ...e.code.split(",")].map(editionSearchKey).join("|"); options.append(option); }
+    select.replaceChildren(options); select.value = groupedEditionCode(selected);
+  }
+  renderEditionSuggestions();
+  setText($("edition-count"), `${formatNumber(grouped.length)} groupes d’éditions · ${formatNumber(all.length)} séries interrogeables.`);
+}
+function ensureEditions() {
+  if (!editionsPromise) editionsPromise = loadEditions().catch(error => { editionsPromise = null; setText($("edition-count"), `Éditions indisponibles : ${error.message}`); });
+  return editionsPromise;
+}
+function editionSearchKey(value) { return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr"); }
+let editionSuggestionCodes = [];
+let activeEditionSuggestion = -1;
+function hideEditionSuggestions() {
+  $("edition-suggestions").hidden = true;
+  $("edition-query").setAttribute("aria-expanded", "false");
+  $("edition-query").removeAttribute("aria-activedescendant");
+  activeEditionSuggestion = -1;
+}
+function highlightEditionSuggestion(index) {
+  const options = $("edition-suggestions").querySelectorAll('[role="option"]');
+  if (!options.length) return;
+  activeEditionSuggestion = (index + options.length) % options.length;
+  options.forEach((option, i) => option.setAttribute("aria-selected", i === activeEditionSuggestion ? "true" : "false"));
+  $("edition-query").setAttribute("aria-activedescendant", options[activeEditionSuggestion].id);
+  options[activeEditionSuggestion].scrollIntoView({ block: "nearest" });
+}
+function chooseEditionSuggestion(code) {
+  $("edition-select").value = code;
+  $("edition-query").value = "";
+  hideEditionSuggestions();
+  state.editionPage = 0;
+  void renderEditionPage();
+}
+function matchingEditionOptions(select, term) {
+  const options = Array.from(select.options).filter(option => option.value);
+  const terms = option => (option.dataset.searchTerms || editionSearchKey(option.textContent)).split("|");
+  const starts = options.filter(option => terms(option).some(value => value.startsWith(term)));
+  const contains = options.filter(option => !starts.includes(option) && terms(option).some(value => value.includes(term)));
+  return [...starts, ...contains].slice(0, 8);
+}
+function renderEditionSuggestions() {
+  const term = editionSearchKey($("edition-query").value.trim());
+  const list = $("edition-suggestions");
+  list.replaceChildren();
+  editionSuggestionCodes = [];
+  hideEditionSuggestions();
+  if (!term) return;
+  const matches = matchingEditionOptions($("edition-select"), term);
+  for (const edition of matches) {
+    const option = node("div", "edition-suggestion", edition.textContent);
+    option.id = `edition-suggestion-${editionSuggestionCodes.length}`;
+    option.setAttribute("role", "option"); option.setAttribute("aria-selected", "false");
+    option.addEventListener("click", () => chooseEditionSuggestion(edition.value));
+    list.append(option); editionSuggestionCodes.push(edition.value);
+  }
+  if (!matches.length) { list.append(node("p", "edition-suggestion-empty", "Aucune édition trouvée.")); }
+  list.hidden = false;
+  $("edition-query").setAttribute("aria-expanded", "true");
+}
+function attachEditionSuggestions(inputId, listId, selectId, onSelect) {
+  const input = $(inputId), list = $(listId), select = $(selectId);
+  let codes = [], active = -1;
+  const hide = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); active = -1; };
+  const choose = code => { select.value = code; input.value = ""; hide(); onSelect(); };
+  const render = () => {
+    const term = editionSearchKey(input.value.trim());
+    list.replaceChildren(); codes = []; hide();
+    if (!term) return;
+    for (const option of matchingEditionOptions(select, term)) {
+      const item = node("div", "edition-suggestion", option.textContent);
+      item.id = `${listId}-${codes.length}`;
+      item.setAttribute("role", "option"); item.setAttribute("aria-selected", "false");
+      item.addEventListener("click", () => choose(option.value));
+      list.append(item); codes.push(option.value);
+    }
+    if (!codes.length) list.append(node("p", "edition-suggestion-empty", "Aucune édition trouvée."));
+    list.hidden = false; input.setAttribute("aria-expanded", "true");
+  };
+  input.addEventListener("input", render);
+  input.addEventListener("keydown", event => {
+    if (event.key === "Escape") { hide(); return; }
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && codes.length && !list.hidden) {
+      event.preventDefault(); active = (active + (event.key === "ArrowDown" ? 1 : -1) + codes.length) % codes.length;
+      list.querySelectorAll('[role="option"]').forEach((item, index) => item.setAttribute("aria-selected", index === active ? "true" : "false"));
+      input.setAttribute("aria-activedescendant", `${listId}-${active}`);
+    } else if (event.key === "Enter" && active >= 0) { event.preventDefault(); choose(codes[active]); }
+  });
+  document.addEventListener("pointerdown", event => { if (!event.target.closest(`#${inputId}`) && !event.target.closest(`#${listId}`)) hide(); });
+}
+let deckSuggestionIds = [];
+let activeDeckSuggestion = -1;
+let deckSuggestionTimer = null;
+function hideDeckSuggestions() {
+  $("deck-suggestions").hidden = true;
+  $("deck-query").setAttribute("aria-expanded", "false");
+  $("deck-query").removeAttribute("aria-activedescendant");
+  activeDeckSuggestion = -1;
+}
+function highlightDeckSuggestion(index) {
+  const options = $("deck-suggestions").querySelectorAll('[role="option"]');
+  if (!options.length) return;
+  activeDeckSuggestion = (index + options.length) % options.length;
+  options.forEach((option, i) => option.setAttribute("aria-selected", i === activeDeckSuggestion ? "true" : "false"));
+  $("deck-query").setAttribute("aria-activedescendant", options[activeDeckSuggestion].id);
+  options[activeDeckSuggestion].scrollIntoView({ block: "nearest" });
+}
+async function renderDeckSuggestions() {
+  const term = $("deck-query").value.trim(), list = $("deck-suggestions");
+  const request = ++state.deckSuggestionRequest;
+  list.replaceChildren(); deckSuggestionIds = []; hideDeckSuggestions();
+  if (!term) return;
+  try {
+    const data = await getJSON("/api/v2/decks", { q: term, limit: 8, offset: 0, sort: "name", order: "asc" });
+    if (request !== state.deckSuggestionRequest || term !== $("deck-query").value.trim()) return;
+    const key = editionSearchKey(term);
+    const matches = (data.items || []).filter(deck => editionSearchKey(`${deck.name_fr || ""} ${deck.name || ""}`).includes(key)).slice(0, 8);
+    for (const deck of matches) {
+      const option = node("div", "edition-suggestion", deckNameLabel(deck));
+      option.id = `deck-suggestion-${deckSuggestionIds.length}`;
+      option.setAttribute("role", "option"); option.setAttribute("aria-selected", "false");
+      option.addEventListener("click", () => { hideDeckSuggestions(); void openDeck(deck.id); });
+      list.append(option); deckSuggestionIds.push(deck.id);
+    }
+    if (!matches.length) list.append(node("p", "edition-suggestion-empty", "Aucun deck trouvé."));
+    list.hidden = false; $("deck-query").setAttribute("aria-expanded", "true");
+  } catch (error) {
+    if (request === state.deckSuggestionRequest) { list.append(node("p", "edition-suggestion-empty", `Suggestions indisponibles : ${error.message}`)); list.hidden = false; }
+  }
+}
+const REFINE_IDS = { image_filter: "refine-images", result_sort: "refine-sort", result_order: "refine-order", mana_min: "refine-mana-min", mana_max: "refine-mana-max", power_min: "refine-power-min", power_max: "refine-power-max", toughness_min: "refine-toughness-min", toughness_max: "refine-toughness-max" };
+function mainSearchFilters() { return { q: $("query").value.trim(), set: $("filter-set").value, rarity: $("filter-rarity").value.toLowerCase(), color: selectedManaColors($("filter-color")), color_mode: $("filter-color-mode").value, card_type: $("filter-type").value }; }
+function refineSearchFilters() { return Object.fromEntries(Object.entries(REFINE_IDS).map(([key, id]) => [key, $(id).value])); }
+function captureSearchDraft() { return { route: location.hash, main: mainSearchFilters(), refine: refineSearchFilters() }; }
+function readSearchDraft() {
+  try {
+    const value = JSON.parse(localStorage.getItem(SEARCH_DRAFT_KEY) || "null");
+    return value && typeof value === "object" && value.main && value.refine ? value : null;
+  } catch { return null; }
+}
+function applySearchDraft(draft) {
+  const main = draft.main || {}, refine = draft.refine || {};
+  $("query").value = main.q || "";
+  $("filter-set").value = groupedEditionCode(main.set);
+  $("filter-rarity").value = main.rarity || "";
+  restoreManaColors($("filter-color"), main.color);
+  $("filter-color-mode").value = main.color_mode || "contains";
+  $("filter-type").value = main.card_type || "";
+  for (const [key, id] of Object.entries(REFINE_IDS)) {
+    const fallback = key === "image_filter" ? "all" : key === "result_order" ? "desc" : key === "result_sort" ? "date" : "";
+    $(id).value = refine[key] || fallback;
+  }
+}
+function persistSearchDraft() {
+  try { localStorage.setItem(SEARCH_DRAFT_KEY, JSON.stringify(captureSearchDraft())); } catch {}
+}
+function recentSearchTerms() {
+  try {
+    const items = JSON.parse(localStorage.getItem(RECENT_SEARCHES_KEY) || "[]");
+    return Array.isArray(items) ? items.filter(value => typeof value === "string" && value.trim()).slice(0, 10) : [];
+  } catch { return []; }
+}
+function rememberSearchTerm(value) {
+  const term = String(value || "").trim();
+  if (!term) return;
+  const items = recentSearchTerms().filter(item => item.toLocaleLowerCase("fr") !== term.toLocaleLowerCase("fr"));
+  items.unshift(term);
+  try { localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(items.slice(0, 10))); } catch {}
+}
+function forgetSearchTerm(term) {
+  const items = recentSearchTerms().filter(item => item.toLocaleLowerCase("fr") !== term.toLocaleLowerCase("fr"));
+  try { localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(items)); } catch {}
+}
+function hideRecentSearches() {
+  $("search-suggestions").hidden = true;
+  $("query").setAttribute("aria-expanded", "false");
+}
+function renderRecentSearches() {
+  const input = $("query"), list = $("search-suggestions"), key = input.value.trim().toLocaleLowerCase("fr");
+  if (!document.hasFocus() || (document.activeElement !== input && !list.contains(document.activeElement))) {
+    hideRecentSearches();
+    return;
+  }
+  const terms = recentSearchTerms().filter(term => term.toLocaleLowerCase("fr") !== key && (!key || term.toLocaleLowerCase("fr").includes(key))).slice(0, 8);
+  list.replaceChildren();
+  if (!terms.length) { hideRecentSearches(); return; }
+  for (const term of terms) {
+    const row = node("div", "recent-search-row");
+    const option = node("button", "edition-suggestion", term);
+    option.type = "button";
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", "false");
+    option.addEventListener("pointerdown", event => event.preventDefault());
+    option.addEventListener("click", () => {
+      input.value = term;
+      searchDraftTouched = true;
+      persistSearchDraft();
+      input.focus();
+      hideRecentSearches();
+      setText($("search-status"), "Terme repris. Cliquez sur Rechercher.");
+    });
+    const remove = node("button", "recent-search-remove", "×");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Supprimer « ${term} » des recherches récentes`);
+    remove.addEventListener("pointerdown", event => event.preventDefault());
+    remove.addEventListener("click", () => {
+      forgetSearchTerm(term);
+      input.focus();
+      renderRecentSearches();
+    });
+    row.append(option, remove);
+    list.append(row);
+  }
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+}
+function searchFilters() {
+  const refined = state.refineFilters || refineSearchFilters();
+  const direction = refined.result_order || "desc";
+  const sortField = refined.result_sort || "date";
+  const resultSort = sortField === "date" ? (direction === "asc" ? "date_asc" : "date") : `${sortField}_${direction}`;
+  const { result_order, ...backendRefined } = refined;
+  return { ...(state.searchBaseFilters || mainSearchFilters()), ...backendRefined, result_sort: resultSort, limit: SEARCH_PAGE_SIZE, offset: state.searchPage * SEARCH_PAGE_SIZE };
+}
+async function runSearch() {
+  state.searchExecuted = true;
+  if (state.view === "recherche") syncRoute();
+  persistSearchDraft();
+  hideRecentSearches();
+  const request = ++state.searchRequest; setText($("search-status"), "Recherche…");
+  try {
+    const data = await getJSON("/api/v2/search", searchFilters());
+    if (request !== state.searchRequest) return;
+    state.searchTotal = data.total;
+    state.searchItems = data.items || [];
+    renderEditionItems($("results"), state.searchItems);
+    updateSearchPager(); updateBatchButtons();
+    setText($("search-status"), `${formatNumber(data.total)} résultat(s)`);
+  }
+  catch (error) { if (request === state.searchRequest) { showError($("results"), error.message); setText($("search-status"), "La recherche a échoué."); } }
+}
+async function refreshSearchImages() {
+  const button = $("refresh-search-results"), items = state.searchItems, request = state.searchRequest;
+  if (!items.length) return;
+  button.disabled = true;
+  setText($("search-status"), "Actualisation des images locales…");
+  try {
+    const data = await postJSON("/api/v2/search/image-slots", {
+      printing_ids: [...new Set(items.map(item => item.printing_id).filter(Boolean))],
+    });
+    if (request !== state.searchRequest || items !== state.searchItems) return;
+    for (const item of items) item.image_slots = data.image_slots?.[item.printing_id] || [];
+    renderEditionItems($("results"), items);
+    setText($("search-status"), `${formatNumber(state.searchTotal)} résultat(s) · images actualisées`);
+  } catch (error) {
+    if (request === state.searchRequest && items === state.searchItems) {
+      setText($("search-status"), `Actualisation des images impossible : ${error.message}`);
+    }
+  } finally {
+    if (request === state.searchRequest && items === state.searchItems) button.disabled = false;
+  }
+}
+function updateSearchPager() { const pages = Math.max(1, Math.ceil(state.searchTotal / SEARCH_PAGE_SIZE)); $("search-pager").hidden = pages <= 1; setText($("page-status"), `Page ${state.searchPage + 1} sur ${pages} · ${formatNumber(state.searchTotal)} résultats`); $("previous-page").disabled = state.searchPage === 0; $("next-page").disabled = (state.searchPage + 1) * SEARCH_PAGE_SIZE >= state.searchTotal; }
+let batchTaskId = null, batchMode = null, batchPollTimer = null;
+function deckResultFilters() { return { q: $("deck-query").value.trim(), deck_format: $("deck-format").value, deck_type: $("deck-type").value, set_code: $("deck-edition").value, colors: selectedManaColors(document.querySelector(".deck-color-filter")), color_mode: $("deck-color-mode").value, sort: $("deck-sort").value, order: $("deck-order").value, image_filter: $("deck-image-filter").value }; }
+function deckHasFilter() { const f = deckResultFilters(); return Boolean(f.q || f.deck_format || f.deck_type || f.set_code || f.colors); }
+function updateBatchButtons() {
+  $("download-search-results").disabled = Boolean(batchTaskId) || !state.searchExecuted || !state.searchTotal;
+  $("download-edition-results").disabled = Boolean(batchTaskId) || !$("edition-select").value || !state.editionCardsTotal;
+  $("download-deck-results").disabled = Boolean(batchTaskId) || !deckHasFilter() || !state.deckTotal;
+}
+function batchStatusElement(mode) { return $({ search: "search-batch-status", edition: "edition-batch-status", decks: "deck-batch-status" }[mode]); }
+async function startBatchDownload(mode) {
+  const count = mode === "search" ? state.searchTotal : mode === "edition" ? state.editionCardsTotal : state.deckTotal;
+  if (!count || mode === "decks" && !deckHasFilter()) return;
+  const unit = mode === "decks" ? "decks" : "cartes";
+  if (count > 100 || mode === "decks") {
+    if (!window.confirm(`Télécharger les images manquantes de ${formatNumber(count)} ${unit} ? Cette opération peut utiliser beaucoup de données.`)) return;
+  }
+  const filters = mode === "search" ? Object.fromEntries(Object.entries(searchFilters()).filter(([key]) => !["limit", "offset"].includes(key)))
+    : mode === "edition" ? { set: $("edition-select").value } : deckResultFilters();
+  const status = batchStatusElement(mode);
+  setText(status, "Préparation du téléchargement…");
+  try {
+    const task = await postJSON("/api/v2/batch-download", { mode, filters });
+    batchTaskId = task.task_id; batchMode = mode;
+    updateBatchButtons(); void pollBatchDownload();
+  } catch (error) { setText(status, `Téléchargement impossible : ${error.message}`); }
+}
+async function pollBatchDownload() {
+  if (!batchTaskId) return;
+  clearTimeout(batchPollTimer);
+  try {
+    const task = await getJSON("/api/v2/batch-download/task", { task_id: batchTaskId });
+    const status = batchStatusElement(batchMode);
+    status.replaceChildren(node("span", "", `${task.completed}/${task.total} impressions traitées · ${task.ready} prêtes · ${task.failed} échecs · ${task.unavailable} indisponibles${task.current ? ` · ${task.current}` : ""}`));
+    if (task.errors?.length) {
+      const details = node("details", "deck-errors"); details.append(node("summary", "error-state", `${task.errors.length} erreur(s)`));
+      const list = node("ul"); for (const error of task.errors) list.append(node("li", "", error)); details.append(list); status.append(details);
+    }
+    if (["queued", "running"].includes(task.status)) {
+      const cancel = node("button", "secondary-button", "Annuler"); cancel.type = "button";
+      cancel.addEventListener("click", async () => { cancel.disabled = true; await postJSON("/api/v2/batch-download/cancel", { task_id: batchTaskId }); });
+      status.append(cancel); batchPollTimer = setTimeout(pollBatchDownload, 1500); return;
+    }
+    status.prepend(node("strong", "", task.status === "complete" ? "Terminé · " : task.status === "cancelled" ? "Annulé · " : "Échec · "));
+    batchTaskId = null; batchMode = null; updateBatchButtons();
+    if (state.view === "recherche" && state.searchItems.length) void refreshSearchImages();
+    if (state.view === "editions") void renderEditionPage();
+    if (state.view === "decks") void renderDeckPage();
+  } catch (error) { batchPollTimer = setTimeout(pollBatchDownload, 3000); }
+}
+function openEdition(code) { $("edition-query").value = ""; hideEditionSuggestions(); $("edition-select").value = groupedEditionCode(code); state.activeSet = $("edition-select").value; state.editionPage = 0; setView("editions"); }
+let editionPageKey = null;
+function editionSelectionKey() {
+  return JSON.stringify([$("edition-select").value, state.editionPage]);
+}
+function ensureEditionPage() {
+  if (state.view === "editions" && editionPageKey !== editionSelectionKey()) return renderEditionPage();
+}
+async function renderEditionPage() {
+  editionPageKey = editionSelectionKey();
+  if (state.view === "editions") syncRoute();
+  const request = ++state.editionRequest;
+  const code = $("edition-select").value; state.activeSet = code; const container = $("edition-cards");
+  $("download-edition-results").disabled = true;
+  $("edition-pager").hidden = !code;
+  if (!code) { container.replaceChildren(); state.editionCardsTotal = 0; setText($("edition-page-status"), ""); updateBatchButtons(); return; }
+  container.replaceChildren(node("p", "muted", "Chargement…"));
+  try { const data = await getJSON("/api/v2/edition", { set: code, limit: EDITION_PAGE_SIZE, offset: state.editionPage * EDITION_PAGE_SIZE }); if (request !== state.editionRequest) return; state.editionCardsTotal = data.total; renderEditionItems(container, data.items); updateEditionPager(); updateBatchButtons(); }
+  catch (error) {
+    if (request === state.editionRequest) {
+      editionPageKey = null;
+      showError(container, error.message);
+    }
+  }
+}
+function updateEditionPager() { const pages = Math.max(1, Math.ceil(state.editionCardsTotal / EDITION_PAGE_SIZE)); $("edition-pager").hidden = !state.activeSet || pages <= 1; setText($("edition-page-status"), `Page ${state.editionPage + 1} sur ${pages} · ${formatNumber(state.editionCardsTotal)} cartes`); $("edition-prev").disabled = state.editionPage === 0; $("edition-next").disabled = (state.editionPage + 1) * EDITION_PAGE_SIZE >= state.editionCardsTotal; }
+function galleryRecords(items) {
+  const byPrinting = new Map();
+  for (const item of items || []) {
+    const key = item.printing_id || item.provider_card_id;
+    if (!key) continue;
+    const old = byPrinting.get(key);
+    if (!old || item.lang === "fr") byPrinting.set(key, { provider_card_id: item.provider_card_id, printing_id: key, lang: item.lang });
+  }
+  return [...byPrinting.values()];
+}
+function galleryContextFor(providerId) {
+  const id = String(providerId || "");
+  const visible = selector => [...document.querySelectorAll(selector)].map(el => ({ provider_card_id: el.dataset.providerId, printing_id: el.dataset.printingId, lang: el.dataset.lang }));
+  if (state.view === "info" && document.querySelector(`#list-import-results .edition-card-tile[data-provider-id="${CSS.escape(id)}"]`))
+    return { kind: "list", rows: galleryRecords(visible("#list-import-results .edition-card-tile")), current: id };
+  if (state.view === "recherche") return { kind: "search", page: state.searchPage, query: searchFilters(), total: state.searchTotal, rows: galleryRecords(visible("#results .edition-card-tile")), current: id };
+  if (state.view === "editions" && state.activeSet) return { kind: "edition", page: state.editionPage, set: state.activeSet, total: state.editionCardsTotal, rows: galleryRecords(visible("#edition-cards .edition-card-tile")), current: id };
+  if (state.view === "decks" && state.selectedDeck) {
+    const rows = [];
+    const sections = Object.entries(state.selectedDeck.sections || {});
+    const ordered = sections.slice().sort(([a], [b]) => a === "commander" ? -1 : b === "commander" ? 1 : a === "tokens" ? 1 : b === "tokens" ? -1 : 0);
+    for (const [, cards] of ordered) for (const card of cards) if (card.provider_card_id) rows.push(card);
+    return { kind: "deck", rows: galleryRecords(rows), current: id };
+  }
+  if (state.view === "perso" && personalState.deck) {
+    const cards = personalState.deck.sections.flatMap(section => section.cards).filter(card => card.provider_card_id);
+    const opened = cards.find(card => String(card.provider_card_id) === id);
+    if (opened) {
+      const rows = galleryRecords(cards);
+      const key = opened.printing_id || opened.provider_card_id;
+      const index = rows.findIndex(row => row.printing_id === key);
+      rows[index] = { ...rows[index], provider_card_id: opened.provider_card_id };
+      return { kind: "deck", rows, current: id };
+    }
+  }
+  return { kind: "single", rows: [{ provider_card_id: id, printing_id: id }], current: id };
+}
+async function galleryNeighbor(direction) {
+  const ctx = state.cardGallery; if (!ctx) return;
+  let rows = ctx.rows || [], index = rows.findIndex(x => String(x.provider_card_id) === ctx.current);
+  if (ctx.kind === "search" || ctx.kind === "edition") {
+    const getPage = async page => {
+      const values = ctx.kind === "search" ? { ...ctx.query, offset: page * SEARCH_PAGE_SIZE } : { set: ctx.set, limit: EDITION_PAGE_SIZE, offset: page * EDITION_PAGE_SIZE };
+      const data = await getJSON(ctx.kind === "search" ? "/api/v2/search" : "/api/v2/edition", values);
+      return galleryRecords(data.items);
+    };
+    rows = ctx.rows || await getPage(ctx.page);
+    index = rows.findIndex(x => ctx.currentPrinting ? x.printing_id === ctx.currentPrinting : String(x.provider_card_id) === ctx.current);
+    let page = ctx.page, target = index + direction;
+    while (true) {
+      if (target >= 0 && target < rows.length && rows[target].printing_id !== ctx.currentPrinting) break;
+      if (direction < 0) {
+        if (target >= 0 && target < rows.length) { target--; continue; }
+        if (page <= 0) return;
+        page--; rows = await getPage(page); target = rows.length - 1;
+      } else {
+        if (target >= 0 && target < rows.length) { target++; continue; }
+        if ((page + 1) * (ctx.kind === "edition" ? EDITION_PAGE_SIZE : SEARCH_PAGE_SIZE) >= ctx.total) return;
+        page++; rows = await getPage(page); target = 0;
+      }
+    }
+    ctx.page = page; ctx.rows = rows; await openCard(rows[target].provider_card_id, ctx);
+  } else if (rows[index + direction]) await openCard(rows[index + direction].provider_card_id, ctx);
+}
+async function openImagePreviewTask(taskId) {
+  try {
+    const task = await getJSON("/api/v2/image/task", { task_id: taskId });
+    if (task.kind !== "image_preview" || task.status !== "needs_review" || task.result?.status !== "candidate") return;
+    const choiceDialog = $("image-choice-dialog");
+    if (choiceDialog.open) choiceDialog.close();
+    await openCard(task.provider_card_id, null, task.face_index, task);
+  } catch (error) { console.error("Impossible de rouvrir la recherche d’image.", error); }
+}
+async function openCard(providerId, gallery = null, preferredFace = null, resumedPreview = null) {
+  const dialog = $("card-dialog"), target = $("card-detail");
+  const request = ++state.cardRequest;
+  const context = gallery || galleryContextFor(providerId); context.current = String(providerId); state.cardGallery = context;
+  hoverPreview.hidden = true;
+  if (!dialog.open) dialog.showModal();
+  let stage = target.querySelector(".card-image-stage");
+  if (!stage) {
+    const shell = node("section", "card-viewer");
+    shell.append(node("header", "card-viewer-header"), node("div", "card-viewer-image", ""));
+    shell.querySelector(".card-viewer-image").append(node("div", "card-image-stage"));
+    target.replaceChildren(shell);
+    stage = shell.querySelector(".card-image-stage");
+  }
+  stage.replaceChildren(node("div", "card-loading-spinner"));
+  target.classList.add("card-detail-loading");
+  try {
+    const data = await getJSON("/api/v2/card", { id: providerId });
+    if (request !== state.cardRequest || !dialog.open) return;
+    if (!data.found) { target.replaceChildren(node("p", "empty-state", "Cette fiche n’existe pas dans le catalogue.")); target.classList.remove("card-detail-loading"); return; }
+    const card = data.card; context.currentPrinting = card.printing_id || card.provider_card_id;
+    const shell = node("section", "card-viewer");
+    const header = node("header", "card-viewer-header");
+    header.append(node("p", "eyebrow", `${card.edition || card.set_code} · n° ${card.collector_number}`));
+    const imageArea = node("div", "card-viewer-image");
+    const slots = (card.image_slots || []).slice().sort((a,b) => a.face_index - b.face_index);
+    let selectedFace = preferredFace !== null && slots.some(x => x.face_index === preferredFace)
+      ? preferredFace
+      : slots.some(x => x.status === "ready") ? slots.find(x => x.status === "ready").face_index : (slots[0]?.face_index ?? 0);
+    const imageWrap = node("div", "card-image-stage");
+    const controls = node("div", "card-image-actions");
+    let faceRequest = 0;
+    const renderFace = async () => {
+      const faceLoad = ++faceRequest;
+      const slot = slots.find(x => x.face_index === selectedFace);
+      imageWrap.replaceChildren(node("div", "card-loading-spinner"));
+      let visual;
+      if (slot?.status === "ready") {
+        const img = node("img", "card-viewer-art");
+        img.alt = card.printed_name || card.name || "Image de carte";
+        img.loading = "eager";
+        img.src = `/assets?${params({ path: slot.relative_path })}`;
+        try { await img.decode(); visual = img; }
+        catch { visual = node("div", "card-viewer-missing", "Image indisponible"); }
+      } else visual = node("div", "card-viewer-missing", "Image absente");
+      if (faceLoad !== faceRequest || request !== state.cardRequest || !dialog.open) return;
+      imageWrap.replaceChildren(visual);
+      controls.replaceChildren();
+      const ready = slot?.status === "ready";
+      const action = node("button", "secondary-button card-image-search"); action.type = "button"; action.append(cardActionIcon("search"));
+      action.setAttribute("aria-label", ready ? "Rechercher une meilleure image" : "Rechercher une image");
+      action.addEventListener("click", async () => {
+        const demoThisCard = Boolean(imageDemoMode && imageDemoCandidate && card.provider_card_id === imageDemoCardId);
+        if (ready && !demoThisCard && !resumedPreview && !window.confirm("Voulez-vous rechercher une meilleure image ?")) return;
+        action.disabled = true; controls.classList.add("image-search-pending"); imageWrap.replaceChildren(node("div", "card-loading-spinner"));
+        let downloadedOtherFaces = false;
+        let previewTaskId = null;
+        try {
+          let previewTask;
+          if (!demoThisCard) {
+          if (resumedPreview) {
+            previewTask = resumedPreview;
+            previewTaskId = resumedPreview.task_id;
+          } else {
+          const otherMissingFaces = slots.filter(x => x.face_index !== selectedFace && x.status !== "ready");
+          if (otherMissingFaces.length) {
+            for (const face of otherMissingFaces)
+              await postJSON("/api/v2/download", { provider_card_id: card.provider_card_id, face_index: face.face_index });
+            downloadedOtherFaces = true;
+            refreshCurrentCollection();
+          }
+          const started = await postJSON("/api/v2/image/preview", { provider_card_id: card.provider_card_id, face_index: selectedFace });
+          previewTaskId = started.task_id;
+          if (!previewTaskId) throw new Error("La recherche n’a pas retourné de tâche.");
+          const cancelPreview = node("button", "secondary-button image-search-cancel", "Annuler");
+          cancelPreview.type = "button";
+          cancelPreview.addEventListener("click", async () => {
+            cancelPreview.disabled = true;
+            try { await postJSON("/api/v2/image/task/cancel", { task_id: previewTaskId }); }
+            catch (error) { cancelPreview.disabled = false; controls.append(node("p", "error-state", error.message)); }
+          });
+          controls.append(cancelPreview);
+          imageTaskHandlers.set(previewTaskId, { open: () => openImagePreviewTask(previewTaskId) });
+          void refreshNotifications();
+          do {
+            await new Promise(resolve => setTimeout(resolve, 900));
+            previewTask = await getJSON("/api/v2/image/task", { task_id: previewTaskId });
+          } while (["queued", "running", "cancelling"].includes(previewTask.status));
+          }
+          } else previewTask = { result: imageDemoCandidate };
+          if (previewTask.status === "cancelled") throw new Error("Recherche annulée.");
+          if (previewTask.status === "error") throw new Error(previewTask.detail || "Recherche impossible.");
+          const candidate = previewTask.result;
+          if (candidate.status !== "candidate") throw new Error(candidate.detail || "Aucune candidate trouvée.");
+          if (dialog.open && request === state.cardRequest) await renderFace();
+          const comparison = node("section", "image-comparison");
+          comparison.append(node("h2", "comparison-title", "Comparer les images"));
+          const comparePanel = node("div", "comparison-columns comparison-current-panel");
+          const currentImageStage = node("div", "comparison-column-stage");
+          const proposedImageStage = node("div", "comparison-column-stage");
+          const currentSlot = slots.find(item => item.face_index === selectedFace);
+          if (currentSlot?.status === "ready" && currentSlot.relative_path) {
+            const image = node("img", "comparison-preview"); image.src = `/assets?${params({path: currentSlot.relative_path})}`; image.alt = "Image actuelle"; currentImageStage.append(image);
+          } else currentImageStage.append(node("p", "muted", "Aucune image actuelle"));
+          for (const [title, stage] of [["Image actuelle", currentImageStage], ["Image proposée", proposedImageStage]]) {
+            const column = node("section", "comparison-column"); column.append(node("h3", "", title), stage); comparePanel.append(column);
+          }
+          const columns = node("div", "comparison-columns");
+          const onlineTextPanel = node("section", "ai-french-text-panel"); onlineTextPanel.hidden = true;
+          const selectionPane = node("aside", "comparison-selection-pane");
+          const previewPane = node("div", "comparison-preview-pane");
+          const selectionPreview = node("div", "ai-selection-preview");
+          const thumbs = node("div", "comparison-thumbnails");
+          const choices = node("div", "comparison-choices");
+          let selected = null;
+          const options = candidate.candidates;
+          const showPreview = (url, alt, host) => { const preview = node("img", "comparison-preview"); preview.src = url; preview.alt = alt; host.replaceChildren(preview); };
+          const addThumb = (url, label, index, dimensions = "") => {
+            const button = node("button", "comparison-option"); button.type = "button";
+            const thumb = node("img", "comparison-thumb"); thumb.src = url; thumb.alt = label;
+            button.append(thumb, node("span", "comparison-caption", dimensions || label));
+            button.addEventListener("click", () => {
+              const reference=options.find(value=>value.index===index);
+              if (wizardStep === "compare") selected = index;
+              thumbs.querySelectorAll(".comparison-option").forEach(x => x.classList.remove("selected"));
+              button.classList.add("selected"); if (wizardStep === "compare") chooseNew.disabled = index === null || reference?.visual_only === true;
+              if (wizardStep === "compare") showPreview(url, label, proposedImageStage);
+              if (wizardStep === "visual" && reference) { visualSelect.value=String(index); alignReferenceOptions(); }
+              if (wizardStep === "text" && reference && (reference.language === "fr" || reference.text_reference_only || reference.local_original_reference)) { textMode = "image"; textSelect.value=String(index); alignReferenceOptions(); }
+              if (wizardStep === "visual" || wizardStep === "text") showPreview(url, label, selectionPreview);
+              if (wizardStep !== "compare") { updateReferenceStages(); nextStep.disabled = !reference; }
+            });
+            thumbs.append(button);
+          };
+          const renderThumbnails = language => {
+            thumbs.replaceChildren();
+            const visual = options.find(item => String(item.index) === visualSelect.value);
+            const visible = options.filter(value => (wizardStep !== "compare" || !value.visual_only && !value.text_reference_only)
+              && (wizardStep === "text" ? value.language === "fr" || value.text_reference_only || value.local_original_reference : wizardStep === "visual" ? !value.text_reference_only || value.local_original_reference : !language || value.language === language));
+            for (const item of visible)
+              addThumb(item.preview_url, `Image ${item.language.toUpperCase()}${item.local_original_reference ? " déjà intégrée" : item.text_reference_only ? " même nom" : ""}`, item.index,
+                `${item.language.toUpperCase()}${item.local_original_reference ? " · originale intégrée" : item.text_reference_only ? " · même nom · autre édition" : ""} · ${item.width} × ${item.height} px`);
+            if (!visible.length) thumbs.append(node("p", "muted", wizardStep === "compare" ? "Aucune autre image à comparer." : "Aucune image disponible pour ce choix."));
+          };
+          const chooseOld = node("button", "secondary-button", "Annuler"); chooseOld.type = "button";
+          const chooseNew = node("button", "primary-button", "Valider l’image choisie"); chooseNew.type = "button"; chooseNew.disabled = true;
+          const choiceDialog = $("image-choice-dialog");
+          const translationDialog = $("ai-translation-dialog");
+          const translationPrompt = $("ai-translation-prompt");
+          const translationCancel = $("ai-translation-cancel");
+          const translationSend = $("ai-translation-send");
+          const choose = async choice => { if (demoThisCard) { choiceDialog.close(); return; } chooseOld.disabled = chooseNew.disabled = true; try { await postJSON("/api/v2/image/candidate/choose", { candidate_id: candidate.candidate_id, choice, index: selected ?? 0 }); choiceDialog.close(); if (previewTaskId) { imageTaskHandlers.delete(previewTaskId); choiceDialog.removeAttribute("data-preview-task-id"); void refreshNotifications(); } if (choice === "new" || downloadedOtherFaces) { refreshCurrentCollection(); await openCard(card.provider_card_id, context, selectedFace); } } catch (error) { choices.append(node("p", "error-state", error.message)); chooseOld.disabled = false; chooseNew.disabled = selected === null; } };
+          chooseOld.addEventListener("click", () => choose("old")); chooseNew.addEventListener("click", () => choose("new")); choices.append(chooseOld, chooseNew);
+          const visualStage = node("div", "comparison-column-stage visual-original-stage");
+          const textStage = node("div", "comparison-column-stage text-original-stage");
+          const aiStage = node("div", "comparison-column-stage ai-result-stage");
+          const makeColumn = (title, stage) => { const column = node("section", "comparison-column"); column.append(node("h3", "", title), stage); return column; };
+          columns.append(makeColumn("Référence visuelle", visualStage), makeColumn("Référence française", textStage), makeColumn("Version IA", aiStage));
+          aiStage.append(node("p", "muted", "L’illustration apparaîtra ici."));
+          const createVersionButton = node("button", "primary-button ai-create-version", "Créer une version IA"); createVersionButton.type = "button";
+          const stepDescription = node("p", "muted ai-step-description");
+          const aiProgress = node("div", "ai-generation-progress");
+          const aiProgressMessage = node("p", "muted", "Codex génère la carte française. Cette étape peut prendre quelques minutes.");
+          const leaveWaiting = node("button", "secondary-button", "Reprendre la consultation en attendant la notification"); leaveWaiting.type = "button";
+          const cancelWaiting = node("button", "secondary-button", "Annuler"); cancelWaiting.type = "button";
+          const waitingActions = node("div", "ai-waiting-actions");
+          waitingActions.append(cancelWaiting, leaveWaiting);
+          aiProgress.append(node("div", "card-loading-spinner"), aiProgressMessage, waitingActions);
+          const stepActions = node("div", "comparison-choices ai-step-actions");
+          const backStep = node("button", "secondary-button", "Retour"); backStep.type = "button";
+          const nextStep = node("button", "primary-button", "Valider et continuer"); nextStep.type = "button";
+          const aiControls = node("div", "ai-generation-controls");
+          aiControls.hidden=true;
+          const visualSelect = node("select", ""); visualSelect.setAttribute("aria-label", "Référence visuelle");
+          const textSelect = node("select", ""); textSelect.setAttribute("aria-label", "Référence de texte");
+          const fillReferenceSelect = (select, label, language) => { const first = node("option", "", label); first.value = ""; select.append(first); for (const item of options.filter(value => language === "fr" ? value.language === "fr" || value.text_reference_only || value.local_original_reference : !value.text_reference_only || value.local_original_reference)) { const origin = item.local_original_reference ? " · image originale intégrée" : item.text_reference_only ? " · même nom, autre édition" : ""; const option = node("option", "", `${item.language.toUpperCase()}${origin} · ${item.width} × ${item.height} px`); option.value = String(item.index); select.append(option); } };
+          fillReferenceSelect(visualSelect, "Choisir une référence visuelle", null); fillReferenceSelect(textSelect, "Choisir une image française", "fr");
+          const correction = node("textarea", "ai-correction-prompt"); correction.rows = 2; correction.maxLength = 4000; correction.placeholder = "Correction ou précision (facultatif)"; correction.setAttribute("aria-label", "Précision pour la génération IA");
+          const generateButton = node("button", "secondary-button", "Générer avec ces deux références"); generateButton.type = "button";
+          generateButton.hidden = true;
+          const onlineTextButton = node("button", "primary-button", "Utiliser le texte français officiel de la base locale"); onlineTextButton.type = "button"; onlineTextButton.hidden = true;
+          stepActions.append(backStep, nextStep, onlineTextButton);
+          const aiStatus = node("p", "muted ai-status", "Choisissez une image visuelle et une référence française de la même impression ou d’une carte au même nom.");
+          const aiActions = node("div", "comparison-choices ai-actions");
+          aiActions.hidden=true;
+          const reviewFooter = node("div", "review-footer");
+          const reviewCorrection = node("div", "review-correction"); reviewCorrection.hidden = true;
+          const retrySubmit = node("button", "primary-button", "Générer avec cette correction"); retrySubmit.type = "button";
+          const retryCancel = node("button", "secondary-button", "Annuler la correction"); retryCancel.type = "button";
+          reviewCorrection.append(correction, retrySubmit, retryCancel);
+          const errorPane = node("div", "ai-generation-error"); errorPane.hidden = true;
+          const errorTitle = node("h3", "", "Génération impossible");
+          const errorMessage = node("p", "error-state");
+          const acknowledgeError = node("button", "primary-button", "Compris, revenir aux images"); acknowledgeError.type = "button";
+          errorPane.append(errorTitle, errorMessage, acknowledgeError);
+          const acceptAI = node("button", "primary-button", "Valider et remplacer l’image"); acceptAI.type = "button"; acceptAI.disabled = true;
+          const cancelAI = node("button", "secondary-button", "Annuler"); cancelAI.type = "button";
+          const retryAI = node("button", "secondary-button", "Réessayer"); retryAI.type = "button"; retryAI.disabled = true;
+          let aiId = null;
+          let aiTaskId = null;
+          let textMode = "image";
+          const alignReferenceOptions = () => {
+            const visual = options.find(item => String(item.index) === visualSelect.value);
+            for (const option of textSelect.options) {
+              if (!option.value) continue;
+              const text = options.find(item => String(item.index) === option.value);
+            option.disabled = !visual || !text || !(text.printing_id === visual.printing_id && text.face_index === visual.face_index || text.text_reference_only || text.local_original_reference);
+            }
+            if (textSelect.selectedOptions[0]?.disabled) textSelect.value = "";
+            updateReferenceStages();
+            const validLocalText = Boolean(visual && options.some(item=>String(item.index)===textSelect.value&&(item.language==="fr"&&item.printing_id===visual.printing_id&&item.face_index===visual.face_index||item.text_reference_only||item.local_original_reference)));
+            generateButton.disabled = !validLocalText;
+            nextStep.disabled = wizardStep === "visual" ? !visualSelect.value : !validLocalText;
+            onlineTextButton.disabled = !visual;
+            if (wizardStep === "text") renderThumbnails("fr");
+          };
+          const updateReferenceStages = () => {
+            const visual=options.find(item=>String(item.index)===visualSelect.value),text=options.find(item=>String(item.index)===textSelect.value);
+            if(visual)showPreview(visual.preview_url,`Référence visuelle ${visual.language.toUpperCase()}`,visualStage);else visualStage.replaceChildren(node("p","muted","Choisir une référence visuelle"));
+            if(textMode === "online") textStage.replaceChildren(node("p","muted","Le texte français exact sera recherché et sa source sera affichée pour vérification."));
+            else if(textMode === "translate") textStage.replaceChildren(node("p","muted","Aucune traduction officielle disponible : le modèle traduira le texte visible de cette référence."));
+            else if(text)showPreview(text.preview_url,text.local_original_reference ? "Image originale intégrée · vérifiez le texte" : text.text_reference_only ? "Image française du même nom" : "Référence textuelle française",textStage);else textStage.replaceChildren(node("p","muted","Choisissez une image française ou utilisez les champs officiels de la base locale."));
+          };
+          visualSelect.addEventListener("change", alignReferenceOptions);
+          textSelect.addEventListener("change",alignReferenceOptions);
+          const cancelSetup=node("button","secondary-button","Annuler");cancelSetup.type="button";
+          let wizardStep = "compare";
+          const setWizardStep = step => {
+            wizardStep = step;
+            comparison.dataset.step = step;
+            const choosing = step === "visual" || step === "text";
+            thumbs.hidden = !["compare", "visual", "text"].includes(step);
+            choices.hidden = step !== "compare";
+            comparePanel.hidden = step !== "compare";
+            selectionPreview.hidden = !choosing;
+            createVersionButton.hidden = step !== "compare";
+            stepDescription.hidden = !choosing;
+            aiProgress.hidden = step !== "generating";
+            stepActions.hidden = !choosing;
+            onlineTextButton.hidden = step !== "text";
+            generateButton.hidden = step !== "text";
+            columns.hidden = step !== "review";
+            onlineTextPanel.hidden = step !== "review" || textMode !== "online";
+            aiControls.hidden = step !== "review";
+            aiActions.hidden = step !== "review" || !aiId;
+            selectionPane.hidden = step === "review" || step === "generating" || step === "error";
+            reviewFooter.hidden = step !== "review";
+            errorPane.hidden = step !== "error";
+            if (step === "compare") {
+              comparison.querySelector(".comparison-title").textContent = "Choisir une image existante";
+              renderThumbnails();
+            } else if (step === "visual") {
+              comparison.querySelector(".comparison-title").textContent = "Étape 1 sur 2 · Référence visuelle";
+              stepDescription.textContent = "Choisissez l’image dont vous voulez conserver le graphisme et la composition. Toutes les langues peuvent servir de référence.";
+              renderThumbnails();
+              const choice = options.find(item => String(item.index) === visualSelect.value);
+              if (choice) showPreview(choice.preview_url, `Référence visuelle ${choice.language.toUpperCase()}`, selectionPreview);
+              else selectionPreview.replaceChildren(node("p", "muted", "Sélectionnez une carte à gauche."));
+            } else if (step === "text") {
+              comparison.querySelector(".comparison-title").textContent = "Étape 2 sur 2 · Référence de texte";
+              stepDescription.textContent = "Choisissez l’original intégré, une image française du même nom (y compris d’une autre édition), ou le texte officiel de la base locale.";
+              renderThumbnails("fr");
+              const choice = options.find(item => String(item.index) === textSelect.value);
+              if (choice) showPreview(choice.preview_url, "Référence textuelle française", selectionPreview);
+              else selectionPreview.replaceChildren(node("p", "muted", "Sélectionnez une carte à gauche."));
+            } else if (step === "generating") {
+              comparison.querySelector(".comparison-title").textContent = "Étape 3 sur 3 · Génération en cours";
+            } else if (step === "error") {
+              comparison.querySelector(".comparison-title").textContent = "La génération a échoué";
+            } else {
+              comparison.querySelector(".comparison-title").textContent = "Comparer la carte générée";
+            }
+            if (choosing) nextStep.disabled = !(step === "visual" ? visualSelect.value : textSelect.value && options.some(item=>String(item.index)===textSelect.value&&(item.language==="fr"||item.text_reference_only||item.local_original_reference)));
+            nextStep.textContent = step === "visual" ? "Continuer" : "Générer avec cette référence de texte";
+          };
+          createVersionButton.addEventListener("click",()=>{ textMode = "image"; setWizardStep("visual"); });
+          backStep.addEventListener("click",()=>{ textMode = "image"; setWizardStep(wizardStep === "text" ? "visual" : "compare"); });
+          nextStep.addEventListener("click",()=>{
+            if (wizardStep === "visual" && visualSelect.value) setWizardStep("text");
+            else if (wizardStep === "text" && textSelect.value) { textMode = "image"; void runAIGeneration(); }
+          });
+          onlineTextButton.addEventListener("click", () => { textMode = "online"; updateReferenceStages(); void runAIGeneration(); });
+          translationCancel.onclick = () => { translationDialog.close(); textMode = "image"; setWizardStep("text"); if (!choiceDialog.open) choiceDialog.showModal(); };
+          translationDialog.oncancel = event => { event.preventDefault(); translationCancel.click(); };
+          translationSend.onclick = () => {
+            const prompt = translationPrompt.value.trim();
+            translationDialog.close(); textMode = "translate"; correction.value = prompt; updateReferenceStages();
+            if (!choiceDialog.open) choiceDialog.showModal();
+            void runAIGeneration(prompt);
+          };
+          cancelSetup.addEventListener("click",()=>choiceDialog.close());
+          leaveWaiting.addEventListener("click", () => { choiceDialog.close(); dialog.close(); });
+          cancelWaiting.addEventListener("click", async () => {
+            if (!aiTaskId) return;
+            cancelWaiting.disabled = true;
+            try { await postJSON("/api/v2/image/task/cancel", { task_id: aiTaskId }); setText(aiProgressMessage, "Annulation demandée…"); }
+            catch (error) { setText(aiProgressMessage, `Annulation impossible : ${error.message}`); cancelWaiting.disabled = false; }
+          });
+          const runAIGeneration = async (promptOverride = null) => {
+            const visual=options.find(item=>String(item.index)===visualSelect.value),text=options.find(item=>String(item.index)===textSelect.value);
+            if (!visual || textMode === "image" && (!text || !(text.language === "fr" || text.text_reference_only || text.local_original_reference) || !(visual.printing_id===text.printing_id&&visual.face_index===text.face_index || text.text_reference_only || text.local_original_reference))) { setText(aiStatus, "Choisissez une référence visuelle, puis une image française, l’original intégré ou une image du même nom."); return; }
+            setWizardStep("generating"); generateButton.disabled = retryAI.disabled = true; acceptAI.disabled = true; aiStage.replaceChildren(node("div", "card-loading-spinner")); setText(aiStatus, "Génération de la carte… cela peut prendre quelques minutes.");
+            if (textMode === "online") textStage.replaceChildren(node("p", "muted", "Recherche du texte français vérifié…"));
+            try {
+              const requestedCorrection = promptOverride === null ? correction.value.trim() : promptOverride;
+              const result = await postJSON("/api/v2/image/ai/generate", { candidate_id: candidate.candidate_id, visual_index: Number(visualSelect.value), ...(textMode === "image" ? { text_index: Number(textSelect.value) } : { text_mode: textMode }), correction_prompt: requestedCorrection, ...(aiId ? { previous_id: aiId } : {}) });
+              if (result.status === "translation_unavailable") {
+                setWizardStep("text");
+                if (choiceDialog.open) choiceDialog.close();
+                translationPrompt.value = "";
+                translationDialog.showModal();
+                return;
+              }
+              if (!result.task_id) throw new Error("Le serveur n’a pas retourné l’identifiant de la tâche.");
+              aiTaskId = result.task_id;
+              const openTask = async () => {
+                if (choiceDialog.open) choiceDialog.close();
+                await openCard(card.provider_card_id, context, selectedFace);
+                $("image-choice-content").replaceChildren(comparison);
+                choiceDialog.showModal();
+                document.getElementById("notification-panel").hidden = true;
+              };
+              imageTaskHandlers.set(aiTaskId, { open: openTask });
+              setText(aiProgressMessage, "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications.");
+              cancelWaiting.hidden = false; leaveWaiting.hidden = false;
+              void refreshNotifications();
+              const poll = async () => {
+                if (!aiTaskId) return;
+                try {
+                  const task = await getJSON("/api/v2/image/task", { task_id: aiTaskId });
+              if (["queued", "running", "cancelling"].includes(task.status)) { setText(aiProgressMessage, task.status === "cancelling" ? "Annulation demandée…" : task.detail || "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications."); void refreshNotifications(); setTimeout(poll, 1200); return; }
+                  if (task.status === "needs_review" || task.status === "ready") {
+                    const value = task.result || task;
+                    aiId = value.id || value.candidate_id;
+                    if (!aiId) throw new Error("La tâche est terminée, mais sa candidate est introuvable.");
+                    showPreview(value.preview_url || `/api/v2/image/ai/candidate?id=${encodeURIComponent(aiId)}`, "Illustration générée par IA", aiStage);
+                    if (textMode === "online" || textMode === "translate") {
+                      columns.classList.add("ai-online-review"); columns.children[0].querySelector("h3").textContent = "Image originale";
+                      columns.children[1].hidden = true;
+                      if (textMode === "online") { columns.children[1].querySelector("h3").textContent = "Texte français vérifié"; onlineTextPanel.hidden = false; renderVerifiedFrenchText(onlineTextPanel, value.french_text || task.french_text, value.text_provenance || task.text_provenance); }
+                    }
+                    setText(aiStatus, "Comparez le texte français et le graphisme avant de valider."); acceptAI.disabled = false; retryAI.disabled = false; setWizardStep("review");
+                    cancelWaiting.hidden = true; void refreshNotifications(); return;
+                  }
+                  if (["cancelled", "canceled"].includes(task.status)) { setText(errorMessage, "La génération a été annulée."); setWizardStep("error"); cancelWaiting.hidden = true; void refreshNotifications(); return; }
+                  throw new Error(task.detail || task.error || "La génération n’a pas abouti.");
+                } catch (error) {
+                  setText(errorMessage, error.message || "La génération n’a pas abouti."); setWizardStep("error"); cancelWaiting.hidden = true; void refreshNotifications();
+                }
+              };
+              void poll();
+            } catch (error) { setText(errorMessage, error.message || "La génération n’a pas abouti."); setWizardStep("error"); }
+            finally { alignReferenceOptions(); }
+          };
+          generateButton.addEventListener("click", runAIGeneration);
+          retryAI.addEventListener("click", () => { reviewCorrection.hidden = false; retryAI.disabled = true; correction.focus(); });
+          retryCancel.addEventListener("click", () => { reviewCorrection.hidden = true; retryAI.disabled = false; });
+          retrySubmit.addEventListener("click", () => { reviewCorrection.hidden = true; void runAIGeneration(); });
+          acknowledgeError.addEventListener("click", () => { aiId = null; textMode = "image"; correction.value = ""; reviewCorrection.hidden = true; setWizardStep("compare"); });
+          const finishAI = async choice => { if (demoThisCard) { choiceDialog.close(); return; } acceptAI.disabled = cancelAI.disabled = retryAI.disabled = true; try { await postJSON("/api/v2/image/ai/choose", { id: aiId, choice }); choiceDialog.close(); if (aiTaskId) imageTaskHandlers.delete(aiTaskId); if (choice === "new" && previewTaskId) { imageTaskHandlers.delete(previewTaskId); choiceDialog.removeAttribute("data-preview-task-id"); } void refreshNotifications(); if (choice === "new") { refreshCurrentCollection(); await openCard(card.provider_card_id, context, selectedFace); } } catch (error) { setText(aiStatus, `Choix impossible : ${error.message}`); acceptAI.disabled = !aiId; cancelAI.disabled = false; retryAI.disabled = !aiId; } };
+          acceptAI.addEventListener("click", () => { if (aiId) void finishAI("new"); });
+          cancelAI.textContent = "Retour à la sélection des images";
+          cancelAI.addEventListener("click", async () => { if (aiId && !demoThisCard) { try { await postJSON("/api/v2/image/ai/choose", { id: aiId, choice: "old" }); } catch {} } aiId = null; reviewCorrection.hidden = true; setWizardStep("compare"); });
+          aiActions.append(acceptAI, retryAI, cancelAI);
+          aiControls.append(visualSelect, textSelect, cancelSetup, aiStatus);
+          reviewFooter.append(aiActions, reviewCorrection);
+          selectionPane.append(thumbs, choices, createVersionButton, stepActions, aiControls);
+          previewPane.append(comparePanel, selectionPreview, columns, onlineTextPanel, aiProgress, errorPane);
+          comparison.append(stepDescription, selectionPane, previewPane, reviewFooter);
+          if (demoThisCard) {
+            comparison.prepend(node("p", "eyebrow", "Simulation · aucune image ne sera remplacée"));
+            createVersionButton.hidden = true;
+          }
+          createVersionButton.disabled = options.length === 0;
+          setText(aiStatus, "Choisissez une référence visuelle, puis une image française ou les champs officiels de la base locale.");
+          alignReferenceOptions(); setWizardStep("compare");
+          if (demoThisCard && imageDemoMode === "existing") createVersionButton.hidden = true;
+          const firstPublishable = options.find(item => !item.visual_only);
+          if (firstPublishable) { selected = firstPublishable.index; thumbs.querySelector(`.comparison-option`)?.classList.add("selected"); showPreview(firstPublishable.preview_url, "Image proposée", proposedImageStage); chooseNew.disabled = false; }
+          if (demoThisCard && imageDemoMode === "ai") {
+            visualSelect.value = String(options[0].index);
+            textSelect.value = String(options[1].index);
+            updateReferenceStages();
+            showPreview("/api/v2/demo-ai-image", "Exemple local de version IA", aiStage);
+            aiId = "simulation";
+            acceptAI.disabled = false;
+            retryAI.disabled = true;
+            setWizardStep("review");
+          }
+          const openComparison = () => {
+            $("image-choice-content").replaceChildren(comparison);
+            choiceDialog.dataset.previewTaskId = previewTaskId || "";
+            if (!choiceDialog.open) choiceDialog.showModal();
+          };
+          if (previewTaskId) imageTaskHandlers.set(previewTaskId, { open: openComparison });
+          const stillWaitingHere = dialog.open && request === state.cardRequest;
+          const otherModalOpen = [...document.querySelectorAll("dialog[open]")].some(item => item !== dialog);
+          if (stillWaitingHere && !otherModalOpen) openComparison();
+          void refreshNotifications();
+        } catch (error) {
+          if (dialog.open && request === state.cardRequest) {
+            if (downloadedOtherFaces) { refreshCurrentCollection(); await openCard(card.provider_card_id, context, selectedFace); target.querySelector(".card-image-actions")?.append(node("p", "error-state", error.message)); }
+            else { imageArea.replaceChildren(imageWrap, controls); await renderFace(); controls.append(node("p", "error-state", error.message)); }
+          }
+          if (previewTaskId) { imageTaskHandlers.delete(previewTaskId); void refreshNotifications(); }
+        } finally { controls.classList.remove("image-search-pending"); controls.querySelector(".image-search-cancel")?.remove(); }
+      });
+      controls.append(action);
+      {
+        const fileInput = node("input", "image-import-input");
+        fileInput.type = "file"; fileInput.accept = "image/*"; fileInput.hidden = true;
+        const importButton = node("button", "secondary-button card-image-icon image-import-button"); importButton.append(cardActionIcon("upload"));
+        importButton.type = "button";
+        importButton.setAttribute("aria-label", "Importer une image locale");
+        importButton.addEventListener("click", () => fileInput.click());
+        fileInput.addEventListener("change", async () => {
+          const file = fileInput.files?.[0]; fileInput.value = "";
+          if (!file) return;
+          if (file.size > 20 * 1024 * 1024) { controls.append(node("p", "error-state", "Le fichier dépasse la limite de 20 Mio.")); return; }
+          importButton.disabled = true;
+          try {
+            const query = params({ provider_card_id: card.provider_card_id, face_index: selectedFace });
+            const response = await fetch(`/api/v2/image/import?${query}`, { method: "POST", headers: { Accept: "application/json", "Content-Type": file.type || "application/octet-stream" }, body: file });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+            refreshCurrentCollection();
+            await openCard(card.provider_card_id, context, selectedFace);
+          } catch (error) { controls.append(node("p", "error-state", `Import impossible : ${error.message}`)); importButton.disabled = false; }
+        });
+        controls.append(importButton, fileInput);
+      }
+      {
+        const exportButton = node("button", "secondary-button card-image-icon image-export-button"); exportButton.append(cardActionIcon("download"));
+        exportButton.type = "button";
+        exportButton.setAttribute("aria-label", "Télécharger l’image sur le Bureau");
+        exportButton.disabled = slot?.status !== "ready";
+        exportButton.addEventListener("click", async () => {
+          exportButton.disabled = true;
+          try {
+            const result = await postJSON("/api/v2/image/export", { provider_card_id: card.provider_card_id, face_index: selectedFace });
+            const status = node("p", "card-export-status", `Image enregistrée : ${result.path}`);
+            controls.querySelector(".card-export-status")?.remove();
+            controls.append(status);
+            setTimeout(() => status.remove(), 4000);
+          } catch (error) {
+            controls.append(node("p", "error-state", `Export impossible : ${error.message}`));
+          } finally { exportButton.disabled = false; }
+        });
+        controls.append(exportButton);
+      }
+      const addPersonal = node("button", "secondary-button card-image-icon personal-add-button"); addPersonal.append(cardActionIcon("addDeck"));
+      addPersonal.type = "button"; addPersonal.setAttribute("aria-label", "Ajouter cette carte à un deck personnel");
+      addPersonal.addEventListener("click", () => void choosePersonalDeck(card));
+      controls.append(addPersonal);
+      if (slots.length > 1) {
+        const nextFace = slots[(slots.findIndex(x => x.face_index === selectedFace) + 1) % slots.length];
+        const flipButton = node("button", "secondary-button card-image-icon card-face-flip"); flipButton.append(cardActionIcon("flip"));
+        flipButton.type = "button";
+        flipButton.setAttribute("aria-label", `Afficher ${nextFace.face_index === 0 ? "le recto" : "le verso"}`);
+        flipButton.addEventListener("click", () => { selectedFace = nextFace.face_index; void renderFace(); });
+        controls.append(flipButton);
+      }
+    };
+    await renderFace();
+    if (request !== state.cardRequest || !dialog.open) return;
+    imageArea.append(imageWrap, controls);
+    shell.append(header, imageArea); target.replaceChildren(shell); target.classList.remove("card-detail-loading");
+    if (resumedPreview) controls.querySelector(".card-image-search")?.click();
+  } catch (error) { if (request === state.cardRequest) { showError(target,error.message); target.classList.remove("card-detail-loading"); } }
+}
+async function openAIReviewTask(taskId, summary = {}) {
+  const content = $("image-choice-content"), reviewDialog = $("image-choice-dialog");
+  try {
+    const task = await getJSON("/api/v2/image/task", { task_id: taskId });
+    const result = task.result || {};
+    const providerId = task.provider_card_id || summary.provider_card_id;
+    const faceIndex = task.face_index ?? summary.face_index ?? 0;
+    if (["queued", "running", "cancelling"].includes(task.status)) {
+      const waiting = node("section", "image-comparison");
+      const waitingMessage = node("p", "muted", task.status === "cancelling" ? "Annulation demandée…" : "Vous pouvez quitter cette page; résultat dans notifications.");
+      waiting.append(node("h2", "comparison-title", "Génération en cours"), node("div", "card-loading-spinner"), waitingMessage);
+      const actions = node("div", "comparison-choices ai-waiting-actions");
+      const home = node("button", "secondary-button", "Reprendre la consultation"); home.type = "button"; home.addEventListener("click", () => { reviewDialog.close(); if ($("card-dialog").open) $("card-dialog").close(); });
+      const cancel = node("button", "secondary-button", "Annuler"); cancel.type = "button"; cancel.addEventListener("click", async () => { cancel.disabled = true; try { await postJSON("/api/v2/image/task/cancel", { task_id: taskId }); } catch (error) { setText(waiting.querySelector("p"), `Annulation impossible : ${error.message}`); cancel.disabled = false; } });
+      actions.append(cancel, home); waiting.append(actions); content.replaceChildren(waiting);
+      if (!reviewDialog.open) reviewDialog.showModal(); $("notification-panel").hidden = true;
+      const poll = async () => {
+        try {
+          const current = await getJSON("/api/v2/image/task", { task_id: taskId });
+          if (["queued", "running", "cancelling"].includes(current.status)) { setText(waitingMessage, current.status === "cancelling" ? "Annulation demandée…" : "Vous pouvez quitter cette page; résultat dans notifications."); void refreshNotifications(); setTimeout(poll, 1200); return; }
+          void refreshNotifications();
+          if (reviewDialog.open) void openAIReviewTask(taskId, summary);
+        } catch { setTimeout(poll, 2500); }
+      };
+      setTimeout(poll, 1200); return;
+    }
+    if (["error", "cancelled"].includes(task.status)) {
+      const failed = node("section", "image-comparison"); failed.append(node("h2", "comparison-title", task.status === "cancelled" ? "Génération annulée" : "Génération impossible"), node("p", "error-state", task.detail || "La génération n’a pas abouti."));
+      const close = node("button", "secondary-button", providerId ? "Revenir à la sélection d’images" : "Fermer"); close.type = "button"; close.addEventListener("click", async () => { reviewDialog.close(); if (providerId) { await openCard(providerId, null, faceIndex); $("card-detail").querySelector(".card-image-search")?.click(); } }); failed.append(close); content.replaceChildren(failed);
+      if (!reviewDialog.open) reviewDialog.showModal(); $("notification-panel").hidden = true; return;
+    }
+    let currentAiId = result.id || result.candidate_id || summary.candidate_id;
+    let currentTaskId = taskId;
+    const sourceCandidateId = task.source_candidate_id || result.source_candidate_id;
+    const visualIndex = task.visual_index ?? result.visual_index;
+    const textIndex = task.text_index ?? result.text_index;
+    if (!providerId || !currentAiId) throw new Error("Le contexte de cette candidate n’est plus disponible.");
+    if (reviewDialog.open) reviewDialog.close();
+    await openCard(providerId, null, faceIndex);
+    const comparison = node("section", "image-comparison");
+    comparison.dataset.step = "review";
+    comparison.append(node("h2", "comparison-title", "Comparer la carte générée"));
+    const columns = node("div", "comparison-columns");
+    const frenchTextPanel = node("section", "ai-french-text-panel");
+    const addColumn = (title, imageUrl, alt) => {
+      const column = node("section", "comparison-column"), stage = node("div", "comparison-column-stage");
+      column.append(node("h3", "", title));
+      if (imageUrl) { const image = node("img", "comparison-preview"); image.src = imageUrl; image.alt = alt; stage.append(image); }
+      else stage.append(node("p", "muted", "Image absente"));
+      column.append(stage); columns.append(column); return stage;
+    };
+    const visualUrl = result.visual_preview_url || task.visual_preview_url || summary.visual_preview_url || "";
+    const textUrl = result.text_preview_url || task.text_preview_url || summary.text_preview_url || "";
+    const textMode = result.text_mode || task.text_mode || "image";
+    addColumn(textMode === "online" ? "Image originale" : "Référence visuelle", visualUrl, "Référence visuelle sélectionnée");
+    if (textMode === "online" || textMode === "translate") {
+      columns.classList.add("ai-online-review");
+      if (textMode === "online") renderVerifiedFrenchText(frenchTextPanel, result.french_text || task.french_text, result.text_provenance || task.text_provenance);
+    } else addColumn("Référence française", textUrl, "Référence textuelle française");
+    const aiStage = addColumn("Version IA", result.preview_url || task.preview_url || `/api/v2/image/ai/candidate?id=${encodeURIComponent(currentAiId)}`, "Illustration générée par IA");
+    const actions = node("div", "comparison-choices");
+    const chooseOld = node("button", "secondary-button", "Conserver l’image actuelle"); chooseOld.type = "button";
+    const chooseNew = node("button", "primary-button", "Utiliser l’image générée"); chooseNew.type = "button";
+    const status = node("p", "muted", "Vérifiez le texte français avant de choisir.");
+    const correction = node("textarea", "ai-correction-prompt"); correction.rows = 2; correction.maxLength = 4000; correction.placeholder = "Précision pour la correction (facultatif)"; correction.setAttribute("aria-label", "Précision pour la correction IA");
+    correction.value = result.correction_prompt || task.correction_prompt || "";
+    const retry = node("button", "secondary-button", "Générer une correction"); retry.type = "button";
+    const cancelRetry = node("button", "secondary-button", "Annuler"); cancelRetry.type = "button"; cancelRetry.hidden = true;
+    const retryPane = node("div", "review-correction"); retryPane.append(correction, retry);
+    const canRetry = Boolean(sourceCandidateId && Number.isInteger(visualIndex) && (textMode !== "image" || Number.isInteger(textIndex)));
+    retryPane.hidden = !canRetry;
+    retry.addEventListener("click", async () => {
+      retry.disabled = chooseOld.disabled = chooseNew.disabled = true; setText(status, "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications.");
+      try {
+        const started = await postJSON("/api/v2/image/ai/generate", { candidate_id: sourceCandidateId, visual_index: visualIndex, ...(textMode === "image" ? { text_index: textIndex } : { text_mode: textMode }), correction_prompt: correction.value.trim(), previous_id: currentAiId });
+        if (!started.task_id) throw new Error("Le serveur n’a pas retourné l’identifiant de la tâche.");
+        imageTaskHandlers.delete(currentTaskId); currentTaskId = started.task_id;
+        cancelRetry.hidden = false;
+        const openRetry = async () => { if (reviewDialog.open) reviewDialog.close(); await openCard(providerId, null, faceIndex); content.replaceChildren(comparison); reviewDialog.showModal(); $("notification-panel").hidden = true; };
+        imageTaskHandlers.set(currentTaskId, { open: openRetry });
+        cancelRetry.onclick = async () => { cancelRetry.disabled = true; try { await postJSON("/api/v2/image/task/cancel", { task_id: currentTaskId }); setText(status, "Annulation demandée…"); } catch (error) { setText(status, `Annulation impossible : ${error.message}`); cancelRetry.disabled = false; } };
+        const pollRetry = async () => {
+          try {
+            const nextTask = await getJSON("/api/v2/image/task", { task_id: currentTaskId });
+            if (["queued", "running", "cancelling"].includes(nextTask.status)) { setText(status, nextTask.status === "cancelling" ? "Annulation demandée…" : "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications."); void refreshNotifications(); setTimeout(pollRetry, 1200); return; }
+            if (nextTask.status === "needs_review") {
+              const nextResult = nextTask.result || {};
+              currentAiId = nextResult.id || nextResult.candidate_id; if (!currentAiId) throw new Error("La candidate générée est introuvable.");
+              const image = node("img", "comparison-preview"); image.src = nextResult.preview_url || `/api/v2/image/ai/candidate?id=${encodeURIComponent(currentAiId)}`; image.alt = "Nouvelle candidate générée par IA"; aiStage.replaceChildren(image);
+              if (textMode === "online") renderVerifiedFrenchText(frenchTextPanel, nextResult.french_text || nextTask.french_text, nextResult.text_provenance || nextTask.text_provenance);
+              cancelRetry.hidden = true; setText(status, "Vérifiez le texte français avant de choisir."); retry.disabled = chooseOld.disabled = chooseNew.disabled = false; void refreshNotifications(); return;
+            }
+            cancelRetry.hidden = true;
+            throw new Error(nextTask.detail || "La génération n’a pas abouti.");
+          } catch (error) { cancelRetry.hidden = true; setText(status, `Génération impossible : ${error.message}`); retry.disabled = chooseOld.disabled = chooseNew.disabled = false; void refreshNotifications(); }
+        };
+        void refreshNotifications(); void pollRetry();
+      } catch (error) { cancelRetry.hidden = true; setText(status, `Génération impossible : ${error.message}`); retry.disabled = chooseOld.disabled = chooseNew.disabled = false; }
+    });
+    const choose = async choice => {
+      chooseOld.disabled = chooseNew.disabled = true;
+      try {
+        await postJSON("/api/v2/image/ai/choose", { id: currentAiId, choice });
+        reviewDialog.close();
+        if (choice === "new") { refreshCurrentCollection(); await openCard(providerId, state.cardGallery, faceIndex); }
+        imageTaskHandlers.delete(currentTaskId); void refreshNotifications();
+      } catch (error) { setText(status, `Choix impossible : ${error.message}`); chooseOld.disabled = chooseNew.disabled = false; }
+    };
+    chooseOld.addEventListener("click", () => void choose("old")); chooseNew.addEventListener("click", () => void choose("new"));
+    actions.append(chooseOld, chooseNew, cancelRetry); comparison.append(columns, ...(textMode === "online" ? [frenchTextPanel] : []), actions, retryPane, status); content.replaceChildren(comparison);
+    if (!reviewDialog.open) reviewDialog.showModal();
+    $("notification-panel").hidden = true;
+  } catch (error) {
+    content.replaceChildren(node("p", "error-state", `Impossible de rouvrir la vérification : ${error.message}`));
+    if (!reviewDialog.open) reviewDialog.showModal();
+    $("notification-panel").hidden = true;
+  }
+}
+function refreshCurrentCollection() {
+  if (state.view === "editions") void renderEditionPage();
+  else if (state.view === "recherche") void refreshSearchImages();
+  else if (state.view === "decks") {
+    void renderDeckPage();
+    if (state.selectedDeck?.id) void openDeck(state.selectedDeck.id);
+  } else if (state.view === "info") void loadHome();
+}
+function renderVerifiedFrenchText(container, frenchText, provenance = null) {
+  container.replaceChildren();
+  if (!frenchText) { container.append(node("p", "muted", "Le texte français n’a pas été fourni par la recherche.")); return; }
+  const block = node("div", "ai-french-text");
+  block.append(node("strong", "", provenance?.verified ? "Texte français vérifié" : "Texte français proposé — à vérifier"));
+  const labels = { name: "Nom", mana_cost: "Coût de mana", type_line: "Type", oracle_text: "Texte", power: "Force", toughness: "Endurance", loyalty: "Loyauté", defense: "Défense", flavor_text: "Texte d’ambiance" };
+  const appendFace = (fields, faceLabel = "") => {
+    if (!fields || typeof fields !== "object" || Array.isArray(fields)) return;
+    if (faceLabel) block.append(node("h4", "", faceLabel));
+    for (const [key, label] of Object.entries(labels)) {
+      const value = fields[key];
+      if (typeof value !== "string" || !value.trim()) continue;
+      const row = node("div", "ai-french-text-field"); row.append(node("span", "", label), node("p", "", value)); block.append(row);
+    }
+  };
+  if (typeof frenchText === "string") block.append(node("p", "", frenchText));
+  else if (Array.isArray(frenchText.card_faces)) frenchText.card_faces.forEach((face, index) => appendFace(face, `Face ${index + 1}`));
+  else appendFace(frenchText);
+  if (block.querySelectorAll(".ai-french-text-field").length === 0 && !block.querySelector("p")) block.append(node("p", "muted", "Aucun champ de texte imprimé n’a été fourni."));
+  const sourceLabel = provenance?.source === "scryfall_api" ? "Scryfall · API" : provenance?.source === "catalogue_fr" ? "Catalogue français vérifié" : provenance?.source === "catalogue_oracle_fr" ? "Traduction française d’une autre édition (même carte)" : provenance?.source;
+  if (provenance?.source_url) {
+    const link = node("a", "", sourceLabel || "Voir la source"); link.href = provenance.source_url; link.target = "_blank"; link.rel = "noopener noreferrer"; block.append(link);
+  } else if (sourceLabel) block.append(node("span", "muted", sourceLabel));
+  container.append(block);
+}
+async function refreshDeckResults() {
+  const button = $("refresh-deck-results"), status = $("deck-batch-status");
+  button.disabled = true;
+  setText(status, "Vérification des decks de la recherche active…");
+  try {
+    const result = await postJSON("/api/v2/decks/recalculate", deckResultFilters());
+    await renderDeckPage();
+    if (state.selectedDeck?.id) await openDeck(state.selectedDeck.id);
+    setText(status, `${formatNumber(result.total || 0)} decks vérifiés.`);
+  } catch (error) {
+    setText(status, `Rafraîchissement impossible : ${error.message}`);
+  } finally { button.disabled = false; }
+}
+function deckPageQuery() {
+  return { ...deckResultFilters(), limit: PAGE_SIZE, offset: state.deckPage * PAGE_SIZE };
+}
+function ensureDeckPage() {
+  if (state.deckListKey !== params(deckPageQuery())) return renderDeckPage();
+}
+async function renderDeckPage() {
+  if (state.openDeckId) return;
+  if (state.view === "decks") syncRoute();
+  const query = deckPageQuery();
+  state.deckListKey = params(query);
+  const request = ++state.deckRequest;
+  $("download-deck-results").disabled = true;
+  const container = $("deck-list");
+  container.replaceChildren(node("p", "muted", "Chargement des decks…"));
+  try {
+    const data = await getJSON("/api/v2/decks", query);
+    if (request !== state.deckRequest) return;
+    state.deckTotal = data.total;
+    updateBatchButtons();
+    container.replaceChildren();
+    if (!data.items.length) container.append(node("p", "empty-state", "Aucun deck préconstruit trouvé."));
+    for (const deck of data.items) {
+      const name = deckNameLabel(deck);
+      const tile = deckCoverTile(name, deck.colors, { name, image_path: deck.cover_image_path }, () => void openDeck(deck.id));
+      const edition = node("span", "deck-tile-edition");
+      if (deck.edition_icon_url) {
+        const icon = node("img");
+        icon.src = deck.edition_icon_url;
+        icon.alt = "";
+        icon.loading = "lazy";
+        icon.addEventListener("error", () => icon.remove(), { once: true });
+        edition.append(icon);
+      }
+      edition.append(deck.set_name_fr || deck.set_name || deck.set_code || "Édition inconnue");
+      tile.append(edition);
+      container.append(tile);
+    }
+    const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    setText($("deck-page-status"), `Page ${state.deckPage + 1} sur ${pages} · ${formatNumber(data.total)} decks`);
+    $("deck-pager").hidden = pages <= 1;
+    $("deck-prev").disabled = state.deckPage === 0;
+    $("deck-next").disabled = (state.deckPage + 1) * PAGE_SIZE >= data.total;
+  } catch (error) {
+    if (request === state.deckRequest) {
+      state.deckListKey = null;
+      showError(container, error.message);
+    }
+  }
+}
+
+async function loadDeckFacets(force = false) {
+  if (state.deckFacetsLoaded && !force) return;
+  try {
+    const data = await getJSON("/api/v2/decks/filters");
+    const select = $("deck-type"), current = select.value, first = select.options[0];
+    select.replaceChildren(first);
+    for (const type of [...(data.types || [])].sort((a, b) => productTypeLabel(a).localeCompare(productTypeLabel(b), "fr"))) {
+      const option = document.createElement("option"); option.value = type; option.textContent = productTypeLabel(type); select.append(option);
+    }
+    select.value = current;
+    const editionSelect = $("deck-edition"), selectedEdition = editionSelect.value, firstEdition = editionSelect.options[0];
+    editionSelect.replaceChildren(firstEdition);
+    for (const edition of data.editions || []) {
+      const option = document.createElement("option");
+      option.value = edition.code;
+      option.textContent = `${edition.name_fr || edition.name_en || edition.code} (${edition.code})`;
+      option.dataset.searchTerms = [edition.name_fr, edition.name_en, edition.code].map(editionSearchKey).filter(Boolean).join("|");
+      editionSelect.append(option);
+    }
+    editionSelect.value = selectedEdition;
+    const coverage = Number(data.color_indexed || 0), total = Number(data.total || 0);
+    const incomplete = coverage < total;
+    document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button => { button.disabled = incomplete; });
+    setText($("deck-color-coverage"), incomplete ? `Préparation du filtre de couleurs : ${formatNumber(coverage)} decks sur ${formatNumber(total)}.` : "");
+    state.deckFacetsLoaded = true;
+    if (incomplete && !state.deckColorAttempted) {
+      state.deckColorAttempted = true;
+      startDeckColorIndex();
+    }
+  } catch (error) { setText($("deck-color-coverage"), `Filtres indisponibles : ${error.message}`); }
+}
+
+async function startDeckColorIndex() {
+  try {
+    await postJSON("/api/v2/decks/colors/index", {});
+    pollDeckColorIndex();
+  } catch (error) {
+    setText($("deck-color-coverage"), `Indexation des couleurs impossible : ${error.message}. Utilisez « Actualiser la liste » pour réessayer.`);
+  }
+}
+
+async function pollDeckColorIndex() {
+  clearTimeout(state.deckColorPollTimer);
+  try {
+    const task = await getJSON("/api/v2/decks/colors/status");
+    if (task.status === "complete") {
+      await loadDeckFacets(true);
+      await renderDeckPage();
+      if (Number(task.unmatched || 0) || Number(task.failed || 0)) {
+        setText($("deck-color-coverage"), `Couleurs indexées pour ${formatNumber(task.indexed)} decks. ${formatNumber(task.unmatched || 0)} sans correspondance, ${formatNumber(task.failed || 0)} en échec.`);
+      }
+      return;
+    }
+    if (task.status === "failed") {
+      setText($("deck-color-coverage"), `Indexation des couleurs impossible : ${task.error || "erreur inconnue"}. Utilisez « Actualiser la liste » pour réessayer.`);
+      return;
+    }
+    const progress = `${formatNumber(task.completed || 0)} sur ${formatNumber(task.total || 0)}`;
+    const phase = task.phase === "catalog" ? `Correspondance avec le catalogue local : ${progress} lots de cartes…`
+      : task.phase === "fallback" ? `Vérification des decks récents : ${progress}…`
+      : `Lecture des listes préconstruites : ${progress} decks…`;
+    setText($("deck-color-coverage"), phase);
+    state.deckColorPollTimer = setTimeout(pollDeckColorIndex, 800);
+  } catch (error) {
+    setText($("deck-color-coverage"), `Suivi de l’indexation impossible : ${error.message}`);
+  }
+}
+
+function scrollToDeckList() {
+  window.scrollTo({ top: state.deckListScroll, behavior: "instant" });
+}
+function closeDeck(urlMode = "push") {
+  const wasOpen = Boolean(state.openDeckId);
+  ++state.deckDetailRequest;
+  state.openDeckId = null;
+  state.selectedDeck = null;
+  $("deck-open-panel").hidden = true;
+  $("deck-browser").hidden = false;
+  $("deck-detail").replaceChildren();
+  $("deck-detail-actions").replaceChildren($("back-to-deck-list"));
+  if (urlMode && state.view === "decks") {
+    syncRoute(urlMode);
+    if (!state.deckListKey) void ensureDeckPage();
+    if (wasOpen) {
+      state.deckListOpener?.focus({ preventScroll: true });
+      scrollToDeckList();
+    }
+  }
+}
+async function openDeck(deckId, urlMode = "push") {
+  const target = $("deck-detail");
+  const request = ++state.deckDetailRequest;
+  const changed = deckId !== state.openDeckId;
+  if (!state.openDeckId && !$("deck-browser").hidden && state.view === "decks") {
+    state.deckListScroll = window.scrollY;
+    const opener = document.activeElement;
+    state.deckListOpener = $("deck-browser").contains(opener) ? opener : null;
+  }
+  state.openDeckId = deckId;
+  if (changed) state.selectedDeck = null;
+  hoverPreview.hidden = true;
+  $("deck-browser").hidden = true;
+  $("deck-open-panel").hidden = false;
+  if (changed) {
+    $("deck-open-heading").hidden = true;
+    $("deck-detail-actions").replaceChildren($("back-to-deck-list"));
+    target.replaceChildren(node("p", "muted", "Chargement de la composition…"));
+    if (state.view === "decks") window.scrollTo({ top: 0, behavior: "instant" });
+  }
+  if (urlMode && state.view === "decks") syncRoute(urlMode);
+  try {
+    const data = await getJSON("/api/v2/deck", { id: deckId });
+    if (request !== state.deckDetailRequest) return;
+    if (!data.found) { target.replaceChildren(node("p", "empty-state", "Deck introuvable.")); return; }
+    const deck = data.deck;
+    state.selectedDeck = deck;
+    if (state.view === "decks") syncRoute();
+    const header = $("deck-open-heading");
+    const eyebrow = [editionLabel(deck), productTypeLabel(deck.type)].filter(Boolean).join(" · ");
+    header.replaceChildren(...deckTitleContent(eyebrow, deckNameLabel(deck), deck.colors));
+    header.hidden = false;
+    target.replaceChildren();
+    const sections = Object.entries(deck.sections || {});
+    const matched = sections.some(([, cards]) => cards.some(card => card.provider_card_id));
+    if (!matched) target.append(node("p", "empty-state", "Aucune impression de ce deck n'est disponible dans le catalogue actuel. Actualisez le catalogue de la Bibliothèque Magic, puis rouvrez ce deck pour télécharger ses images."));
+    const summary = deck.media_summary || {total: 0, ready: 0, missing: 0};
+    const actions = $("deck-detail-actions");
+    const start = node("button", "secondary-button", summary.missing > 0 ? "Télécharger les images manquantes" : "Exporter le deck sur le Bureau");
+    start.type = "button";
+    start.disabled = Boolean(state.deckTaskId) || !matched || summary.total === 0;
+    start.addEventListener("click", () => summary.missing > 0 ? startDeckDownload(deck.id) : exportDeck(deck.id));
+    start.id = "deck-output";
+    const copyPersonal = personalButton("Créer un deck perso", () => void importPersonalDeck(deck.id, copyPersonal), true);
+    actions.replaceChildren($("back-to-deck-list"), start, copyPersonal);
+    const progress = node("div", "deck-progress"); progress.id = "deck-progress"; target.append(progress);
+    const labels = {commander:"Commandants", mainboard:"Deck principal", sideboard:"Réserve", display_commander:"Commandants de présentation", planar_deck:"Planechase", scheme_deck:"Machinations", tokens:"Jetons"};
+    const orderedSections = sections.slice().sort(([a], [b]) => a === "commander" ? -1 : b === "commander" ? 1 : a === "tokens" ? 1 : b === "tokens" ? -1 : 0);
+    for (const [key, cards] of orderedSections) {
+      if (!cards.length) continue;
+      const section = node("section", "deck-section");
+      section.append(deckSectionTitle(labels[key] || key, cards));
+      const list = node("div", `deck-cards${key === "tokens" ? " deck-token-cards" : ""}`);
+      for (const card of cards) {
+        const tile = node(card.provider_card_id ? "button" : "article", `deck-card-tile${card.provider_card_id ? " deck-card-open" : ""}`);
+        if (card.provider_card_id) { tile.type = "button"; tile.addEventListener("click", () => openCard(card.provider_card_id)); }
+        const img = card.image_path ? node("img", "deck-card-image") : node("div", "deck-card-image deck-card-image-empty", "Image absente");
+        if (card.image_path) { img.src = `/assets?${params({path: card.image_path})}`; img.alt = card.printed_name || card.name_fr || card.name || "Carte"; img.loading = "lazy"; img.onerror = () => img.replaceWith(node("div", "deck-card-image deck-card-image-empty", "Image indisponible")); }
+        tile.append(img, node("span", "deck-card-name", `${card.count || 1} × ${card.printed_name || card.name_fr || card.name}`));
+        list.append(tile);
+      }
+      section.append(list); target.append(section);
+    }
+    if (state.deckTaskId) pollDeckTask();
+    loadDeckFacets(true);
+  } catch (error) { if (request === state.deckDetailRequest) showError(target, error.message); }
+}
+
+async function startDeckDownload(deckId) {
+  const progress = $("deck-progress");
+  progress.replaceChildren(node("p", "muted", "Préparation du téléchargement…"));
+  try {
+    const task = await postJSON("/api/v2/deck/download", { deck_id: deckId });
+    state.deckTaskId = task.task_id;
+    const button = $("deck-output");
+    if (button && state.openDeckId === deckId) button.disabled = true;
+    pollDeckTask();
+  } catch (error) { showError(progress, error.message); }
+}
+
+async function exportDeck(deckId) {
+  const progress = $("deck-progress"), button = $("deck-output");
+  if (button) { button.disabled = true; button.textContent = "Export en cours…"; }
+  progress.replaceChildren(node("p", "muted", "Préparation de l’export…"));
+  try {
+    const result = await postJSON("/api/v2/deck/export", {deck_id: deckId});
+    const fileCount = Array.isArray(result.files) ? result.files.length : Number(result.files || 0);
+    progress.replaceChildren(node("p", "", `Export terminé dans ${result.folder} · ${formatNumber(fileCount)} fichiers (${formatNumber(result.total)} cartes au total).`));
+  } catch (error) { showError(progress, error.message); }
+  finally { if (button) { button.disabled = false; button.textContent = "Exporter le deck sur le Bureau"; } }
+}
+
+async function pollDeckTask() {
+  if (!state.deckTaskId) return;
+  if (state.deckPollTimer) clearTimeout(state.deckPollTimer);
+  try {
+    const task = await getJSON("/api/v2/deck/task", { task_id: state.deckTaskId });
+    const progress = $("deck-progress");
+    if (progress) {
+      progress.replaceChildren(node("p", "", `${task.completed || 0}/${task.total || 0} cartes traitées · ${task.ready || 0} images prêtes · ${task.unavailable || 0} impressions non indexées · ${task.failed || 0} échecs${task.current ? ` · ${task.current}` : ""}`));
+      if ((task.unavailable_cards || []).length) {
+        const details = node("details", "deck-errors");
+        details.append(node("summary", "muted", `${task.unavailable_cards.length} impression(s) absente(s) du catalogue`));
+        const list = node("ul");
+        for (const name of task.unavailable_cards) list.append(node("li", "", name));
+        details.append(list); progress.append(details);
+      }
+      if ((task.errors || []).length) {
+        const details = node("details", "deck-errors");
+        details.append(node("summary", "error-state", `${task.errors.length} carte(s) à vérifier`));
+        const list = node("ul");
+        for (const message of task.errors) list.append(node("li", "", message));
+        details.append(list); progress.append(details);
+      }
+      if (["queued", "running"].includes(task.status)) {
+        const cancel = node("button", "secondary-button", "Annuler");
+        cancel.type = "button";
+        cancel.addEventListener("click", async () => { cancel.disabled = true; try { await postJSON("/api/v2/deck/cancel", { task_id: state.deckTaskId }); } catch (error) { showError(progress, error.message); } });
+        progress.append(cancel);
+      }
+    }
+    if (["queued", "running"].includes(task.status)) state.deckPollTimer = setTimeout(pollDeckTask, 1500);
+    else {
+      state.deckTaskId = null;
+      const deckId = state.selectedDeck?.id;
+      if (deckId) await openDeck(deckId);
+    }
+  } catch (error) { const progress = $("deck-progress"); if (progress) showError(progress, error.message); }
+}
+
+const archiveOcrViews = new Map();
+let archiveRequest = 0;
+const archiveResolvedByPage = new Map();
+function archiveResolvedCount(beforePage = Infinity) {
+  let count = 0;
+  for (const [page, resolved] of archiveResolvedByPage) if (page < beforePage) count += resolved;
+  return count;
+}
+const hoverPreview=node("img","archive-hover-preview");
+hoverPreview.hidden=true;hoverPreview.alt="";document.body.append(hoverPreview);
+function attachHoverPreview(thumbnail, focusTarget=thumbnail, enlarged=hoverPreview){
+  const position=(x,y)=>{
+    const width=Math.min(350,window.innerWidth-24),height=Math.min(window.innerHeight*.82,width*738/531);
+    const left=x+18+width>window.innerWidth?x-width-18:x+18;
+    enlarged.style.left=`${Math.max(12,Math.min(left,window.innerWidth-width-12))}px`;
+    enlarged.style.top=`${Math.max(12,Math.min(y-height/2,window.innerHeight-height-12))}px`;
+  };
+  const show=event=>{if(!thumbnail.complete||!thumbnail.naturalWidth)return;
+    enlarged.src=thumbnail.src;enlarged.alt=thumbnail.alt;
+    enlarged.hidden=false;position(event.clientX||thumbnail.getBoundingClientRect().right,event.clientY||thumbnail.getBoundingClientRect().top);
+  };
+  if (focusTarget === thumbnail) thumbnail.tabIndex=0;
+  thumbnail.addEventListener("mouseenter",show);
+  thumbnail.addEventListener("mousemove",event=>{if(!enlarged.hidden)position(event.clientX,event.clientY);});
+  focusTarget.addEventListener("focus",event=>{if(focusTarget.matches(":focus-visible"))show(event);});
+  thumbnail.addEventListener("mouseleave",()=>{enlarged.hidden=true;});
+  focusTarget.addEventListener("blur",()=>{enlarged.hidden=true;});
+}
+function archiveCardName(fileName) {
+  return fileName.replace(/\.[^.]+$/, "").replace(/^\d+\s*-\s*/, "").trim() || fileName;
+}
+async function openArchiveInGoogleLens(path, button, status) {
+  const target=`magic-lens-${Date.now()}`;
+  const tab=window.open("about:blank",target);
+  if(!tab){setText(status,"Autorisez l’ouverture du nouvel onglet pour Google Lens.");return;}
+  button.disabled=true;
+  try{
+    const result=await postJSON("/api/v2/archive/lens",{path});
+    if(!/^[0-9a-f]{32}$/.test(result.ticket||""))throw new Error("Ticket Google invalide.");
+    tab.opener=null;
+    tab.location.replace(`/api/v2/archive-lens-bridge?${params({ticket:result.ticket})}`);
+    setText(status,"");
+  }catch(error){tab.close();setText(status,`Recherche Google impossible : ${error.message}`);}
+  finally{button.disabled=false;}
+}
+let archiveOcrBatch = null;
+async function runArchiveOcrBatch() {
+  if(archiveOcrBatch||archiveAutoNameBatch)return;
+  const task={stop:false};archiveOcrBatch=task;
+  const start=$("archive-ocr-all"),autoStart=$("archive-auto-name-all"),stop=$("archive-ocr-stop"),status=$("archive-ocr-batch-status");
+  start.disabled=true;autoStart.disabled=true;stop.hidden=false;
+  let done=0,total=0,cached=0,imported=0,review=0,failed=0;const errors=[];
+  try{
+    const first=await getJSON("/api/v2/archive",{limit:100,offset:0});total=first.total||0;
+    setText(status,`Préparation de l’OCR : ${formatNumber(total)} archive(s) à analyser.`);
+    const items=[...(first.items||[])];
+    for(let offset=100;offset<total&&!task.stop;offset+=100){
+      const page=offset===0?first:await getJSON("/api/v2/archive",{limit:100,offset});
+      items.push(...(page.items||[]));
+    }
+    const missing = items.filter(entry => !entry.ocr_result);
+    const already = items.length - missing.length;
+    setText(status,`${already} archive(s) déjà analysée(s), ${missing.length} à analyser.`);
+    let next=0;
+    const worker=async()=>{
+      while(!task.stop&&next<missing.length){
+        const entry=missing[next++];
+        try{
+          const result=await postJSON("/api/v2/archive/ocr",{path:entry.relative_path});
+          if(result.cached)cached++;
+          if(result.automation?.status==="imported")imported++;else review++;
+          archiveOcrViews.get(entry.relative_path)?.(result);
+        }catch(error){failed++;if(errors.length<8)errors.push(`${entry.file_name} : ${error.message}`);}
+        done++;
+        setText(status,`${done}/${missing.length} à analyser · ${already} déjà lue(s) · ${imported} importée(s) · ${review} à revoir · ${failed} erreur(s)`);
+      }
+    };
+    await Promise.all(Array.from({length:Math.min(10,missing.length)},()=>worker()));
+    const summary=task.stop?`OCR arrêté après ${done}/${missing.length} fichier(s) · ${imported} importée(s). Résultats conservés.`:`OCR terminé : ${done} analysée(s), ${already} déjà lue(s), ${imported} importée(s), ${review} à revoir, ${failed} erreur(s).`;
+    status.replaceChildren(node("span","",summary));
+    if(errors.length){const details=node("details","deck-errors");details.append(node("summary","error-state","Fichiers en erreur"));const list=node("ul");for(const error of errors)list.append(node("li","",error));details.append(list);status.append(details);}
+    if(state.view==="archives"){archiveResolvedByPage.clear();await renderArchivePage();}
+  }catch(error){setText(status,`Analyse interrompue : ${error.message}`);}
+  finally{archiveOcrBatch=null;start.disabled=false;autoStart.disabled=false;stop.hidden=true;}
+}
+let archiveAutoNameBatch = null;
+async function runArchiveAutoNameBatch() {
+  if(archiveAutoNameBatch||archiveOcrBatch)return;
+  const task={stop:false};archiveAutoNameBatch=task;
+  const start=$("archive-auto-name-all"),ocrStart=$("archive-ocr-all"),stop=$("archive-ocr-stop"),status=$("archive-ocr-batch-status");
+  start.disabled=true;ocrStart.disabled=true;stop.hidden=false;
+  let done=0,total=0,renamed=0,kept=0,unnamed=0,failed=0;const errors=[];
+  try{
+    const first=await getJSON("/api/v2/archive",{limit:100,offset:0});total=first.total||0;
+    setText(status,`Préparation du nommage : ${formatNumber(total)} archive(s) à traiter.`);
+    const items=[...(first.items||[])];
+    for(let offset=100;offset<total&&!task.stop;offset+=100){
+      const page=offset===0?first:await getJSON("/api/v2/archive",{limit:100,offset});
+      items.push(...(page.items||[]));
+    }
+    setText(status,`Nommage de ${formatNumber(items.length)} archive(s) en cours.`);
+    let next=0;
+    const worker=async()=>{
+      while(!task.stop&&next<items.length){
+        const entry=items[next++];
+        try{
+          const decision=await postJSON("/api/v2/archive/auto-name",{path:entry.relative_path});
+          if(decision.status==="renamed")renamed++;else if(decision.status==="kept")kept++;else unnamed++;
+          archiveOcrViews.get(entry.relative_path)?.({display_name:decision});
+        }catch(error){failed++;if(errors.length<8)errors.push(`${entry.file_name} : ${error.message}`);}
+        done++;
+        setText(status,`${done}/${items.length} traitée(s) · ${renamed} renommée(s) · ${kept} nom(s) conservé(s) · ${unnamed} sans titre · ${failed} erreur(s)`);
+      }
+    };
+    await Promise.all(Array.from({length:Math.min(10,items.length)},()=>worker()));
+    const summary=task.stop?`Nommage arrêté après ${done}/${items.length} fichier(s). Les noms déjà enregistrés sont conservés.`:`Nommage terminé : ${done} traitée(s), ${renamed} renommée(s), ${kept} nom(s) conservé(s), ${unnamed} sans titre lisible, ${failed} erreur(s).`;
+    status.replaceChildren(node("span","",summary));
+    if(errors.length){const details=node("details","deck-errors");details.append(node("summary","error-state","Fichiers en erreur"));const list=node("ul");for(const error of errors)list.append(node("li","",error));details.append(list);status.append(details);}
+    if(state.view==="archives"){archiveResolvedByPage.clear();await renderArchivePage();}
+  }catch(error){setText(status,`Nommage interrompu : ${error.message}`);}
+  finally{archiveAutoNameBatch=null;start.disabled=false;ocrStart.disabled=false;stop.hidden=true;}
+}
+let archivePageKey = null;
+function archiveSelectionKey() {
+  return JSON.stringify([$("archive-status").value, state.archivePage]);
+}
+function ensureArchivePage() {
+  if (archivePageKey !== archiveSelectionKey()) return renderArchivePage();
+}
+async function renderArchivePage() {
+  archivePageKey = archiveSelectionKey();
+  if (state.view === "archives") syncRoute();
+  const request = ++archiveRequest;
+  const pageIndex = state.archivePage;
+  const container = $("archive-list"), offset = Math.max(0, pageIndex * PAGE_SIZE - archiveResolvedCount(pageIndex)); hoverPreview.hidden=true;archiveOcrViews.clear();container.replaceChildren(node("p", "muted", "Chargement des archives…"));
+  try {
+    const data = await getJSON("/api/v2/archive", { limit: PAGE_SIZE, offset, status: $("archive-status").value });
+    if (request !== archiveRequest) return;
+    state.archiveTotal = data.total;
+    container.replaceChildren();
+    if (!data.items.length) container.append(node("p", "empty-state", "Aucune archive sur cette page."));
+    for (const entry of data.items) {
+      const article=node("article","archive-card"), img=node("img"); img.alt=`Archive ${entry.file_name}`;img.loading="eager";img.src=`/api/v2/archive-image?${params({path:entry.relative_path})}`;img.onerror=()=>img.replaceWith(node("div","missing-image","Aperçu indisponible"));attachHoverPreview(img);
+      const body=node("div","archive-card-body");const initialName=typeof entry.display_name==="string"&&entry.display_name.trim()?entry.display_name.trim():archiveCardName(entry.file_name);const cardName=node("h3","",initialName);body.append(cardName,node("p","archive-file-name",entry.file_name));
+      const review=node("div","archive-review");
+      const ocrButton=node("button","secondary-button","Lire le texte avec OCR");ocrButton.type="button";
+      const lensButton=node("button","secondary-button","Recherche Google image inversée");lensButton.type="button";lensButton.hidden=true;
+      const status=node("p","muted archive-review-status");
+      const searchForm=node("form","archive-search-form");
+      const query=node("input","");query.type="search";query.minLength=2;query.placeholder="Nom de la carte";query.value=initialName;query.setAttribute("aria-label","Nom de la carte à rechercher");
+      const language=node("select","");language.setAttribute("aria-label","Langue de la carte");language.append(new Option("Langue de l’image", ""),new Option("Français","fr"),new Option("Anglais","en"));
+      const setCode=node("input","");setCode.type="text";setCode.maxLength=12;setCode.placeholder="Code d’édition";setCode.setAttribute("aria-label","Code d’édition lu sur l’image");
+      const searchButton=node("button","secondary-button","Rechercher dans la bibliothèque");searchButton.type="submit";
+      const nameLabel=node("label","archive-name-label","Nom de la carte");nameLabel.append(query);
+      searchForm.append(nameLabel,language,setCode,searchButton);
+      const results=node("div","archive-match-results");
+      searchForm.hidden=true;
+      const importControls=node("div","archive-import-controls");importControls.hidden=true;
+      const faceSelect=node("select","");faceSelect.setAttribute("aria-label","Face de la carte");
+      const importButton=node("button","primary-button","Importer l’image d’archive");importButton.type="button";
+      importControls.append(faceSelect,importButton);
+      let selected=null, sha256=null, sourceLanguage="";
+      const updateImportButton=()=>{
+        const slot=(selected?.image_slots||[]).find(item=>item.face_index===Number(faceSelect.value));
+        importButton.textContent=slot?.status==="ready"?"Remplacer par l’image d’archive":"Importer l’image d’archive";
+      };
+      faceSelect.addEventListener("change",updateImportButton);
+      const markImported=()=>{
+        if(article.classList.contains("archive-card-imported"))return;
+        article.classList.add("archive-card-imported");
+        hoverPreview.hidden=true;archiveOcrViews.delete(entry.relative_path);
+        article.querySelector(".archive-auto-name")?.remove();article.querySelector(".archive-delete")?.remove();
+        review.replaceChildren(node("p","archive-imported-message","✓ Image importée dans la base"));
+        archiveResolvedByPage.set(pageIndex,(archiveResolvedByPage.get(pageIndex)||0)+1);
+        state.archiveTotal=Math.max(0,state.archiveTotal-1);
+        setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);
+      };
+      const applyOcrResult=data=>{
+        if(article.classList.contains("archive-card-imported"))return;
+        if(data.automation?.status==="imported"){
+          markImported();
+          return;
+        }
+        sha256=data.sha256;ocrButton.hidden=true;lensButton.hidden=false;
+        const identity=data.identity_proposal||{};
+        const target=identity.target||identity.candidates?.[0];
+        const evidence=identity.evidence||{};
+        const catalogueName=[target?.title,target?.catalogue_name,target?.printed_name,target?.name]
+          .find(value=>typeof value==="string"&&value.trim().length>=2);
+        const displayDecision=data.display_name;
+        if(displayDecision&&displayDecision.status==="renamed"&&typeof displayDecision.name==="string"&&displayDecision.name.trim().length>=2){
+          query.value=displayDecision.name.trim();
+          setText(status,`Nom remplacé : « ${displayDecision.previous} » → « ${displayDecision.name} ».`);
+        }else if(!displayDecision&&catalogueName){
+          query.value=catalogueName.trim();
+        }
+        if(target){language.value=target.language||"";setCode.value=target.set_code||target.code||"";}
+        if(query.value.trim().length>=2)cardName.textContent=query.value.trim();
+        searchForm.hidden=false;if(!status.textContent)setText(status,"");
+      };
+      const renderMatches=items=>{
+        results.replaceChildren();selected=null;
+        if(!items.length){results.append(node("p","muted","Aucune impression proposée. Essayez une autre recherche."));return;}
+        for(const item of items){
+          const match=node("article","archive-match");
+          const slot=(item.image_slots||[]).find(value=>value.face_index===0&&value.status==="ready");
+          if(slot?.relative_path){const preview=node("img","archive-match-image");preview.src=`/assets?${params({path:slot.relative_path})}`;preview.alt=`Illustration de ${item.printed_name||item.name||"la carte"}`;preview.loading="lazy";attachHoverPreview(preview);match.append(preview);}
+          else if(item.edition_icon_url){const icon=node("img","archive-match-symbol");icon.src=item.edition_icon_url;icon.alt="";icon.loading="lazy";match.append(icon);}
+          else match.classList.add("archive-match-no-visual");
+          const details=node("div","archive-match-details");const matchTitle=node("strong","",item.printed_name||item.name||"Nom inconnu");matchTitle.title=matchTitle.textContent;details.append(matchTitle);
+          const edition=node("p","archive-match-edition");
+          if(slot?.relative_path&&item.edition_icon_url){const icon=node("img","archive-edition-icon");icon.src=item.edition_icon_url;icon.alt="";icon.loading="lazy";edition.append(icon);}
+          edition.append(node("span","",`${item.set_code||"—"} · ${item.collector_number||"—"} · ${(item.lang||"").toUpperCase()}`));
+          details.append(edition);
+          const pick=node("button","secondary-button","Choisir cette impression");pick.type="button";
+          pick.addEventListener("click",()=>{
+            selected=item;sourceLanguage=item.lang||language.value||"fr";results.querySelectorAll(".archive-match").forEach(el=>el.classList.remove("selected"));match.classList.add("selected");
+            faceSelect.replaceChildren();for(const imageSlot of (item.image_slots||[])){const faceOption=node("option","",imageSlot.face_index===0?"Recto":`Face ${imageSlot.face_index+1}`);faceOption.value=String(imageSlot.face_index);faceSelect.append(faceOption);}
+            if(!faceSelect.options.length){faceSelect.append(new Option("Recto","0"));}
+            const slots=item.image_slots||[];
+            const faceZeroReady=slots.find(slot=>String(slot.face_index)==="0")?.status==="ready";
+            const firstMissingFace=Array.from(faceSelect.options).find(option=>slots.find(slot=>String(slot.face_index)===option.value)?.status!=="ready");
+            faceSelect.value=faceZeroReady&&firstMissingFace?firstMissingFace.value:(faceSelect.options[0]?.value||"0");
+            updateImportButton();
+            importControls.hidden=false;setText(status,"");
+          });
+          details.append(pick);match.append(details);results.append(match);
+        }
+      };
+      ocrButton.addEventListener("click",async()=>{
+        ocrButton.disabled=true;setText(status,"Lecture locale de l’image…");
+        try{
+          const data=await postJSON("/api/v2/archive/ocr",{path:entry.relative_path});applyOcrResult(data);
+        }catch(error){setText(status,`OCR impossible : ${error.message}`);}
+        finally{ocrButton.disabled=false;}
+      });
+      lensButton.addEventListener("click",()=>void openArchiveInGoogleLens(entry.relative_path,lensButton,status));
+      searchForm.addEventListener("submit",async event=>{
+        event.preventDefault();if(query.value.trim().length<2){setText(status,"Saisissez au moins deux caractères.");return;}
+        searchButton.disabled=true;setText(status,"Recherche de correspondances…");
+        try{const data=await postJSON("/api/v2/archive/search",{query:query.value.trim(),set_code:setCode.value.trim()||undefined,language:language.value||undefined,limit:30});renderMatches(data.items||[]);setText(status,"");}
+        catch(error){results.replaceChildren(node("p","error-state",`Recherche impossible : ${error.message}`));}
+        finally{searchButton.disabled=false;}
+      });
+      importButton.addEventListener("click",async()=>{
+        if(!selected)return;
+        const faceIndex=Number(faceSelect.value),selectedLanguage=sourceLanguage||selected.lang||"fr";
+        importButton.disabled=true;setText(status,"Vérification de l’impression et de la face…");
+        try{
+          if(!sha256){const source=await postJSON("/api/v2/archive/hash",{path:entry.relative_path});sha256=source.sha256;}
+          const targetResponse=await postJSON("/api/v2/archive/target",{provider_card_id:selected.provider_card_id,printing_id:selected.printing_id,face_index:faceIndex,language:selectedLanguage});
+          const target=targetResponse.target||targetResponse;
+          const action=target.image_status==="ready"?"replace_indexed":"archive";
+          const detail=`${target.title||selected.printed_name||selected.name} · ${target.set_code||selected.set_code} #${target.collector_number||selected.collector_number} · face ${faceIndex+1} · ${selectedLanguage.toUpperCase()}`;
+          const actionText=action==="replace_indexed"?"remplacer l’image actuelle par cette archive":"importer l’image d’archive";
+          if(!window.confirm(`Confirmer cette identification et ${actionText} ?\n\n${detail}\n\nAprès vérification de l’image prête, l’original pourra être retiré des archives.`)){setText(status,"Import annulé. Aucune modification effectuée.");return;}
+          const imported=await postJSON("/api/v2/archive/import",{path:entry.relative_path,sha256,provider_card_id:selected.provider_card_id,printing_id:selected.printing_id,face_index:faceIndex,language:selectedLanguage,action});
+          if(["imported","already_indexed","replaced_indexed"].includes(imported.status))markImported();
+          else setText(status,`Import terminé : ${imported.status||"résultat inconnu"}.`);
+        }catch(error){setText(status,`Import refusé : ${error.message}`);}
+        finally{importButton.disabled=false;}
+      });
+      archiveOcrViews.set(entry.relative_path,applyOcrResult);
+      const autoNameButton=node("button","archive-auto-name","🔎");autoNameButton.type="button";
+      autoNameButton.title="Rechercher le nom de la carte automatiquement";autoNameButton.setAttribute("aria-label",`Rechercher automatiquement le nom de ${entry.file_name}`);
+      autoNameButton.addEventListener("click",async()=>{
+        autoNameButton.disabled=true;setText(status,"Recherche automatique du nom…");
+        try{
+          const decision=await postJSON("/api/v2/archive/auto-name",{path:entry.relative_path});
+          if(typeof decision.name==="string"&&decision.name.trim().length>=2){query.value=decision.name.trim();cardName.textContent=decision.name.trim();}
+          applyOcrResult({display_name:decision});
+          if(decision.status==="kept")setText(status,`« ${decision.name} » est déjà trouvable dans la base : nom conservé. Recherchez puis intégrez la carte ci-dessous.`);
+          else if(decision.status!=="renamed")setText(status,`Nom automatique indisponible : ${decision.reason||"aucun titre lisible par l’OCR"}. La zone d’intégration reste disponible.`);
+        }catch(error){setText(status,`Recherche du nom impossible : ${error.message}`);}
+        finally{autoNameButton.disabled=false;}
+      });
+      const deleteButton=node("button","archive-delete","🗑");deleteButton.type="button";
+      deleteButton.title="Supprimer cette image de l’archive";deleteButton.setAttribute("aria-label",`Supprimer ${entry.file_name} de l’archive`);
+      deleteButton.addEventListener("click",async()=>{
+        if(!window.confirm(`Supprimer « ${entry.file_name} » de l’archive ?\n\nLe fichier sera définitivement retiré, sans import dans le catalogue.`))return;
+        deleteButton.disabled=true;
+        try{
+          await postJSON("/api/v2/archive/delete",{path:entry.relative_path});
+          article.remove();archiveOcrViews.delete(entry.relative_path);
+          archiveResolvedByPage.set(pageIndex,(archiveResolvedByPage.get(pageIndex)||0)+1);
+          state.archiveTotal=Math.max(0,state.archiveTotal-1);
+          setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);
+        }catch(error){deleteButton.disabled=false;setText(status,`Suppression impossible : ${error.message}`);}
+      });
+      review.append(ocrButton,lensButton,searchForm,status,results,importControls);body.append(review);
+      article.append(autoNameButton,deleteButton,img,body);container.append(article);
+      if(entry.ocr_result)applyOcrResult(entry.ocr_result);
+    }
+    setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);const visibleTotal=data.total+archiveResolvedCount();const pages=Math.max(1,Math.ceil(visibleTotal/PAGE_SIZE));$("archive-pager").hidden=pages<=1;setText($("archive-page-status"),`Page ${state.archivePage+1} sur ${pages}`);$("archive-prev").disabled=state.archivePage===0;$("archive-next").disabled=(state.archivePage+1)*PAGE_SIZE>=visibleTotal;
+  } catch (error) {
+    if (request === archiveRequest) {
+      archivePageKey = null;
+      showError(container, error.message);
+    }
+  }
+}
+
+document.querySelectorAll("[data-view]").forEach((button)=>button.addEventListener("click",()=>setView(button.dataset.view)));
+document.querySelector(".brand").addEventListener("click", event => { event.preventDefault(); setView("info"); });
+window.addEventListener("popstate", restoreRoute);
+window.addEventListener("hashchange", restoreRoute);
+$("search-form").addEventListener("input", event => {
+  searchDraftTouched = true;
+  persistSearchDraft();
+  setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche.");
+  if (event.target === $("query")) {
+    renderRecentSearches();
+  }
+});
+$("search-form").addEventListener("change", () => { searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); });
+window.addEventListener("pagehide", persistSearchDraft);
+$("search-form").addEventListener("submit", event => { event.preventDefault(); });
+$("search-submit").addEventListener("click", () => {
+  rememberSearchTerm($("query").value);
+  state.searchBaseFilters = mainSearchFilters();
+  state.refineFilters = refineSearchFilters();
+  state.searchPage = 0;
+  void runSearch();
+});
+$("download-search-results").addEventListener("click", () => void startBatchDownload("search"));
+$("download-edition-results").addEventListener("click", () => void startBatchDownload("edition"));
+$("download-deck-results").addEventListener("click", () => void startBatchDownload("decks"));
+$("refresh-search-results").addEventListener("click", () => void refreshSearchImages());
+$("refresh-edition-results").addEventListener("click", () => void renderEditionPage());
+$("refresh-deck-results").addEventListener("click", () => void refreshDeckResults());
+$("clear-search").addEventListener("click", () => { $("search-form").reset(); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
+$("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
+$("query").addEventListener("focus", renderRecentSearches);
+$("query").addEventListener("click", renderRecentSearches);
+$("query").addEventListener("blur", event => {
+  if (!$("search-suggestions").contains(event.relatedTarget)) hideRecentSearches();
+});
+$("search-suggestions").addEventListener("focusout", event => {
+  if (event.relatedTarget !== $("query") && !$("search-suggestions").contains(event.relatedTarget)) hideRecentSearches();
+});
+window.addEventListener("blur", hideRecentSearches);
+document.addEventListener("visibilitychange", () => { if (document.hidden) hideRecentSearches(); });
+$("query").addEventListener("keydown", event => {
+  if (event.key === "Escape") { hideRecentSearches(); return; }
+  if (event.key === "ArrowDown" && !$("search-suggestions").hidden) {
+    const first = $("search-suggestions").querySelector('[role="option"]');
+    if (first) { event.preventDefault(); first.focus(); }
+  }
+});
+$("search-suggestions").addEventListener("keydown", event => {
+  if (!["ArrowDown", "ArrowUp", "Escape"].includes(event.key)) return;
+  if (event.key === "Escape") { event.preventDefault(); hideRecentSearches(); $("query").focus(); return; }
+  const options = [...$("search-suggestions").querySelectorAll('[role="option"]')];
+  const index = options.indexOf(document.activeElement);
+  const next = event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1) : Math.max(0, index - 1);
+  if (options[next]) { event.preventDefault(); options[next].focus(); }
+});
+document.addEventListener("pointerdown", event => { if (!event.target.closest(".search-main")) hideRecentSearches(); });
+$("previous-page").addEventListener("click",()=>{state.searchPage=Math.max(0,state.searchPage-1);runSearch();});
+$("next-page").addEventListener("click",()=>{state.searchPage++;runSearch();});
+$("edition-select").addEventListener("change",()=>{state.editionPage=0;hideEditionSuggestions();renderEditionPage();});
+$("edition-query").addEventListener("input",()=>{renderEditionSuggestions();if (state.view === "editions") syncRoute();});
+$("edition-query").addEventListener("keydown", event => {
+  if (event.key === "Escape") { hideEditionSuggestions(); return; }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (!editionSuggestionCodes.length || $("edition-suggestions").hidden) return;
+    event.preventDefault();
+    highlightEditionSuggestion(activeEditionSuggestion + (event.key === "ArrowDown" ? 1 : -1));
+  } else if (event.key === "Enter" && activeEditionSuggestion >= 0) {
+    event.preventDefault(); chooseEditionSuggestion(editionSuggestionCodes[activeEditionSuggestion]);
+  }
+});
+document.addEventListener("pointerdown", event => { if (!event.target.closest(".edition-search")) hideEditionSuggestions(); });
+$("edition-prev").addEventListener("click",()=>{state.editionPage=Math.max(0,state.editionPage-1);renderEditionPage();});
+$("edition-next").addEventListener("click",()=>{state.editionPage++;renderEditionPage();});
+attachEditionSuggestions("search-edition-query", "search-edition-suggestions", "filter-set", () => { setText($("search-status"), "Édition choisie. Cliquez sur Rechercher."); });
+attachEditionSuggestions("deck-edition-query", "deck-edition-suggestions", "deck-edition", () => { state.deckPage = 0; renderDeckPage(); });
+$("deck-query").addEventListener("input", () => { clearTimeout(deckSuggestionTimer); deckSuggestionTimer = setTimeout(() => { if (state.openDeckId) return; renderDeckSuggestions(); state.deckPage = 0; renderDeckPage(); }, 180); if (state.view === "decks") syncRoute(); });
+$("deck-query").addEventListener("keydown", event => {
+  if (event.key === "Escape") { hideDeckSuggestions(); return; }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    const options = $("deck-suggestions").querySelectorAll('[role="option"]');
+    if (!options.length || $("deck-suggestions").hidden) return;
+    event.preventDefault(); highlightDeckSuggestion(activeDeckSuggestion + (event.key === "ArrowDown" ? 1 : -1));
+  } else if (event.key === "Enter" && activeDeckSuggestion >= 0) {
+    const id = deckSuggestionIds[activeDeckSuggestion];
+    if (id) { event.preventDefault(); hideDeckSuggestions(); void openDeck(id); }
+  }
+});
+document.addEventListener("pointerdown", event => { if (!event.target.closest(".deck-search")) hideDeckSuggestions(); });
+for (const id of ["deck-format", "deck-type", "deck-edition", "deck-sort", "deck-order", "deck-image-filter"]) $(id).addEventListener("change",()=>{state.deckPage=0;renderDeckPage();});
+document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button=>button.addEventListener("click",()=>{toggleMana(button, document.querySelector(".deck-color-filter"));state.deckPage=0;renderDeckPage();}));
+$("deck-color-mode").addEventListener("change",()=>{state.deckPage=0;renderDeckPage();});
+$("deck-prev").addEventListener("click",()=>{state.deckPage=Math.max(0,state.deckPage-1);renderDeckPage();});
+$("deck-next").addEventListener("click",()=>{state.deckPage++;renderDeckPage();});
+$("archive-status").addEventListener("change",()=>{archiveResolvedByPage.clear();state.archivePage=0;renderArchivePage();});
+$("archive-prev").addEventListener("click",()=>{archiveResolvedByPage.clear();state.archivePage=Math.max(0,state.archivePage-1);renderArchivePage();});
+$("archive-next").addEventListener("click",()=>{state.archivePage++;renderArchivePage();});
+$("archive-ocr-all").addEventListener("click",()=>void runArchiveOcrBatch());
+$("archive-auto-name-all").addEventListener("click",()=>void runArchiveAutoNameBatch());
+$("archive-ocr-stop").addEventListener("click",()=>{if(archiveOcrBatch)archiveOcrBatch.stop=true;if(archiveAutoNameBatch)archiveAutoNameBatch.stop=true;setText($("archive-ocr-batch-status"),"Arrêt demandé. Les lectures déjà lancées se termineront avant l’arrêt.");});
+$("update-library").addEventListener("click",()=>{ void toggleLibraryUpdate(); });
+async function pollListImport() {
+  try {
+    const task = await getJSON("/api/v2/list-import");
+    const active = ["queued", "running"].includes(task.status);
+    $("list-import-start").disabled = active;
+    $("list-import-export").disabled = task.status !== "complete" || !(task.items || []).length;
+    setText($("list-import-status"), task.status === "idle" ? "" :
+      task.status === "failed" ? `Import interrompu : ${task.error}` :
+      `${task.completed || 0} / ${task.total || 0} cartes traitées${active ? "…" : "."}`);
+    const results = $("list-import-results");
+    results.replaceChildren();
+    for (const item of task.items || []) {
+      const label = item.status === "ready" ? "Image prête" : item.status === "not_found" ? "Introuvable" : "Échec";
+      const imageLanguage = item.download?.results?.find(face => face.language)?.language;
+      if (item.provider_card_id) {
+        const tile = editionTile(item);
+        tile.append(node("span", "list-import-result-label", `${label} · ${item.set_code} #${item.collector_number} · ${(imageLanguage || item.lang).toUpperCase()}`));
+        results.append(tile);
+      } else {
+        const tile = node("article", "deck-card-tile edition-card-tile list-import-unmatched");
+        tile.append(node("div", "deck-card-image deck-card-image-empty", "Image absente"), node("span", "deck-card-name", item.input), node("span", "list-import-result-label", label));
+        results.append(tile);
+      }
+    }
+    if (active) setTimeout(pollListImport, 1500);
+    else if (task.status === "complete") void loadHome();
+  } catch (error) { setText($("list-import-status"), `Suivi impossible : ${error.message}`); $("list-import-start").disabled = false; }
+}
+$("list-import-start").addEventListener("click", async () => {
+  $("list-import-start").disabled = true;
+  try { await postJSON("/api/v2/list-import", {cards: $("list-import-cards").value}); await pollListImport(); }
+  catch (error) { setText($("list-import-status"), `Import impossible : ${error.message}`); $("list-import-start").disabled = false; }
+});
+$("list-import-export").addEventListener("click", async () => {
+  const button = $("list-import-export");
+  button.disabled = true;
+  setText($("list-import-export-status"), "Création du dossier sur le Bureau…");
+  try {
+    const result = await postJSON("/api/v2/list-import/export", {});
+    setText($("list-import-export-status"), `${result.folder} · ${result.total} image(s), dont ${result.blank} blanche(s).`);
+  } catch (error) { setText($("list-import-export-status"), `Export impossible : ${error.message}`); }
+  finally { button.disabled = false; }
+});
+void pollListImport();
+$("close-dialog").addEventListener("click",()=>$("card-dialog").close());
+$("card-dialog").addEventListener("click",(event)=>{if(event.target===$("card-dialog"))$("card-dialog").close();});
+$("card-dialog").addEventListener("close",()=>{hoverPreview.hidden=true;requestAnimationFrame(()=>{hoverPreview.hidden=true;});});
+document.addEventListener("keydown", event => {
+  if (!$("card-dialog").open || $("image-choice-dialog").open || event.target.closest?.(".personal-picker") || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  const target = event.target;
+  if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "") || event.defaultPrevented) return;
+  event.preventDefault(); galleryNeighbor(event.key === "ArrowLeft" ? -1 : 1);
+});
+$("image-choice-dialog").querySelector(".comparison-dialog-close").addEventListener("click",() => $("image-choice-dialog").close());
+$("image-choice-dialog").addEventListener("close", () => {
+  if (!imageDemoMode) return;
+  imageDemoMode = null;
+  imageDemoCandidate = null;
+  imageDemoCardId = null;
+  history.replaceState(null, "", "/" + location.hash);
+});
+$("back-to-deck-list").addEventListener("click", () => closeDeck());
+const initialView = location.hash.slice(1).split("?", 1)[0];
+activateView(ROUTE_VIEWS.has(initialView) ? initialView : "info");
+initialInfo = loadHome();
+initialEditions = ensureEditions();
+void (initialView === "perso" ? Promise.resolve() : Promise.all([initialInfo, initialEditions])).then(restoreRoute);
+if (imageDemoMode) {
+  void (async () => {
+    try {
+      const demo = await getJSON("/api/v2/demo-images", { mode: imageDemoMode });
+      imageDemoCandidate = demo.candidate;
+      imageDemoCardId = demo.provider_card_id;
+      await openCard(demo.provider_card_id);
+      $("card-detail").querySelector(".card-image-search")?.click();
+    } catch (error) {
+      $("stats-error").textContent = `Aperçu indisponible : ${error.message}`;
+    }
+  })();
+}
+
+// Personal compositions live outside the versioned catalogue. Drafts survive navigation/reload.
+const personalState = { editing: false, deck: null, change: 0, saved: 0, saving: null, error: null, timer: null, listRequest: 0, drag: null };
+const PERSONAL_CURRENT_KEY = "database-magic-personal-current-v1";
+function personalButton(label, action, primary = false) {
+    const b = node("button", primary ? "primary-button" : "secondary-button", label);
+    b.type = "button";
+    b.addEventListener("click", action);
+    return b;
+}
+function personalRead(key) {
+    try {
+        return JSON.parse(localStorage.getItem(key));
+    }
+    catch {
+        return null;
+    }
+}
+function personalStore(key, value) {
+    try {
+        if (value === null)
+            localStorage.removeItem(key);
+        else
+            localStorage.setItem(key, JSON.stringify(value));
+    }
+    catch { /* The server remains the durable store when browser storage is unavailable. */
+    }
+}
+function personalStatus(message, error = false) {
+    const el = $("personal-save-status");
+    el.textContent = message;
+    el.className = error ? "error-state" : "muted";
+}
+function personalDraft() {
+    if (personalState.deck)
+        personalStore(`personal-draft-${personalState.deck.id}`, personalState.deck);
+}
+function personalChanged() {
+    personalState.change++;
+    personalState.error = null;
+    personalDraft();
+    personalStatus("Modifications en attente…");
+    clearTimeout(personalState.timer);
+    personalState.timer = setTimeout(() => void flushPersonal(), 350);
+}
+async function flushPersonal() {
+    clearTimeout(personalState.timer);
+    if (personalState.saving) {
+        await personalState.saving;
+        if (personalState.error)
+            return false;
+    }
+    if (!personalState.deck || personalState.saved === personalState.change)
+        return !personalState.error;
+    const work = async () => {
+        while (personalState.saved < personalState.change) {
+            const version = personalState.change, snapshot = JSON.parse(JSON.stringify(personalState.deck));
+            personalStatus("Enregistrement…");
+            try {
+                const result = await postJSON("/api/v2/personal-decks/save", { deck: snapshot });
+                personalState.deck.revision = result.deck.revision;
+                personalState.saved = version;
+                personalState.error = null;
+                if (personalState.change === version) {
+                    personalStore(`personal-draft-${snapshot.id}`, null);
+                }
+                else
+                    personalDraft();
+            }
+            catch (error) {
+                personalState.error = error;
+                personalDraft();
+                personalStatus(`Non enregistré : ${error.message}. Votre brouillon est conservé sur cet appareil.`, true);
+                const retry = personalButton("Réessayer", () => void flushPersonal());
+                const reload = personalButton("Recharger le deck enregistré", async () => {
+                    if (!window.confirm("Recharger la version enregistrée sur le serveur ? Le brouillon courant sera conservé séparément sur cet appareil, mais ne sera plus restauré automatiquement.")) return;
+                    clearTimeout(personalState.timer);
+                    if (personalState.saving) await personalState.saving;
+                    const current = personalState.deck;
+                    if (!current) return;
+                    try {
+                        localStorage.setItem(`personal-recovery-${current.id}-${Date.now()}`, JSON.stringify(current));
+                        localStorage.removeItem(`personal-draft-${current.id}`);
+                    } catch (storageError) {
+                        personalStatus(`Le brouillon n’a pas pu être mis de côté : ${storageError.message}. Le deck courant est conservé.`, true);
+                        $("personal-save-status").append(retry, reload);
+                        return;
+                    }
+                    personalState.deck = null;
+                    personalState.change = 0;
+                    personalState.saved = 0;
+                    personalState.error = null;
+                    await openPersonalDeck(current.id);
+                });
+                $("personal-save-status").append(retry, reload);
+                return;
+            }
+        }
+        personalStatus("Enregistré");
+    };
+    personalState.saving = work();
+    await personalState.saving;
+    personalState.saving = null;
+    return !personalState.error;
+}
+function personalColors(values, onChange) {
+    const group = node("div", "personal-colors mana-filter");
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-label", "Couleurs du deck (aucune : incolore)");
+    for (const color of ["W", "U", "B", "R", "G", "C"]) {
+        const b = personalButton(COLOR_NAMES[color], () => {
+            toggleMana(b, group);
+            onChange([...group.querySelectorAll('[aria-pressed="true"]')].map(x => x.dataset.color));
+        });
+        b.className = `mana-toggle mana-${color.toLowerCase()}`;
+        b.dataset.color = color;
+        b.setAttribute("aria-label", COLOR_NAMES[color]);
+        setManaPressed(b, values.includes(color));
+        const symbols = colorSymbols([color]);
+        b.replaceChildren(...symbols.firstChild.childNodes);
+        group.append(b);
+    }
+    return group;
+}
+function personalImage(card, className = "deck-card-image") {
+    const path = card?.image_path || card?.image_slots?.find(s => s.status === "ready" && s.face_index === 0)?.relative_path;
+    if (!path)
+        return node("div", `${className} deck-card-image-empty`, card ? "Image absente" : "Deck vide");
+    const img = node("img", className);
+    img.draggable = false;
+    img.src = `/assets?${params({ path })}`;
+    img.alt = card.printed_name || card.name || "Carte";
+    img.loading = "lazy";
+    img.onerror = () => img.replaceWith(node("div", `${className} deck-card-image-empty`, "Image indisponible"));
+    return img;
+}
+async function showPersonalDecks() {
+    if (personalState.deck) {
+        renderPersonalEditor();
+        return;
+    }
+    const remembered = personalRead(PERSONAL_CURRENT_KEY);
+    if (remembered) {
+        await openPersonalDeck(remembered);
+        return;
+    }
+    renderPersonalList();
+}
+function personalColorField(values, onChange) {
+    const field = node("div", "personal-color-field");
+    field.append(node("span", "", "Couleurs du deck"), personalColors(values.length ? values : ["C"],
+        colors => onChange(colors.filter(color => color !== "C"))));
+    return field;
+}
+function deckCoverTile(name, colors, cover, open) {
+    const tile = personalButton("", open);
+    tile.className = "personal-deck-tile";
+    tile.append(personalImage(cover, "personal-cover"), node("h2", "", name));
+    const symbols = colorSymbols(colors);
+    if (symbols) tile.append(symbols);
+    return tile;
+}
+function renderPersonalList(initialDecks = null) {
+    updatePersonalHeading();
+    const root = $("personal-content");
+    let decks = initialDecks;
+    const create = personalButton("Créer un deck", () => renderPersonalCreate(() => decks), true);
+    const actions = node("div", "personal-toolbar");
+    actions.append(create);
+    const form = node("form", "search-form"), row = node("div", "search-primary-row personal-filter-row");
+    const nameLabel = node("label", "", "Nom du deck"), name = node("input");
+    name.type = "search";
+    name.placeholder = "Rechercher par nom";
+    nameLabel.append(name);
+    const field = node("fieldset", "search-color-filter"), mana = node("div", "mana-filter-controls");
+    let colors = [];
+    const colorFilter = personalColors([], value => { colors = value; render(); });
+    const modeLabel = node("label", "color-mode", "Mode de couleur"), mode = node("select");
+    mode.append(new Option("Normal", "contains"), new Option("Couleurs exactes", "exact"));
+    modeLabel.append(mode);
+    mana.append(colorFilter, modeLabel);
+    field.append(node("legend", "", "Couleurs du deck"), mana);
+    row.append(nameLabel, field);
+    const refine = node("div", "catalogue-refine"), orderFields = node("div", "catalogue-refine-fields");
+    const sortLabel = node("label", "", "Trier par"), sort = node("select");
+    sort.append(new Option("Ajout récent", "recent"), new Option("Nom du deck", "name"));
+    sortLabel.append(sort);
+    const orderLabel = node("label", "", "Ordre"), order = node("select");
+    order.append(new Option("Décroissant", "desc"), new Option("Croissant", "asc"));
+    orderLabel.append(order);
+    orderFields.append(sortLabel, orderLabel);
+    refine.append(orderFields);
+    const controls = node("div", "form-actions");
+    const search = node("button", "primary-button", "Rechercher");
+    search.type = "submit";
+    controls.append(search, personalButton("Effacer les filtres", () => {
+        form.reset();
+        colors = [];
+        colorFilter.querySelectorAll("button").forEach(button => setManaPressed(button, false));
+        render();
+    }));
+    form.append(row, refine, controls);
+    const list = node("div", "personal-deck-grid");
+    root.replaceChildren(actions, form, list);
+    personalStatus("");
+    const normalize = value => value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("fr").trim();
+    function render() {
+        if (!decks) return;
+        const query = normalize(name.value);
+        const items = decks.filter(deck => {
+            if (!normalize(deck.name).includes(query)) return false;
+            const current = deck.colors || [];
+            if (colors.includes("C")) return !current.length;
+            return colors.every(color => current.includes(color))
+                && (!colors.length || mode.value !== "exact" || colors.length === current.length);
+        });
+        if (sort.value === "name") {
+            items.sort((a, b) => a.name.localeCompare(b.name, "fr") * (order.value === "asc" ? 1 : -1));
+        } else if (order.value === "asc") {
+            items.reverse();
+        }
+        list.replaceChildren();
+        for (const deck of items) {
+            const entry = node("article", "personal-list-entry");
+            const tile = deckCoverTile(deck.name, deck.colors || [], deck.cover_card, () => void openPersonalDeck(deck.id));
+            const remove = personalButton("Supprimer", async () => {
+                if (!window.confirm(`Supprimer le deck « ${deck.name} » ?`)) return;
+                remove.disabled = true;
+                try {
+                    await postJSON("/api/v2/personal-decks/delete", { deck_id: deck.id, revision: deck.revision });
+                    decks = decks.filter(item => item.id !== deck.id);
+                    personalStatus(`Deck « ${deck.name} » supprimé.`);
+                    render();
+                } catch (error) {
+                    personalStatus(error.message, true);
+                    remove.disabled = false;
+                }
+            });
+            remove.setAttribute("aria-label", `Supprimer le deck ${deck.name}`);
+            entry.append(tile, remove);
+            list.append(entry);
+        }
+        if (!items.length) list.append(node("p", "empty-state", "Aucun deck personnel pour cette sélection."));
+    }
+    async function load() {
+        list.replaceChildren(node("p", "muted", "Chargement…"));
+        try {
+            const response = await getJSON("/api/v2/personal-decks");
+            decks = response.items;
+            render();
+        } catch (error) {
+            showError(list, error.message);
+            list.append(personalButton("Réessayer", () => void load()));
+        }
+    }
+    form.addEventListener("submit", event => { event.preventDefault(); render(); });
+    for (const select of [mode, sort, order]) select.addEventListener("change", render);
+    name.addEventListener("input", render);
+    if (decks) render();
+    else void load();
+}
+function renderPersonalCreate(previousDecks) {
+    const root = $("personal-content"), form = node("form", "panel personal-create"), label = node("label", "", "Nom du deck"), name = node("input");
+    name.required = true;
+    name.maxLength = 200;
+    label.append(name);
+    let colors = [];
+    const submit = node("button", "primary-button", "Créer le deck"), errorBox = node("p", "error-state");
+    submit.type = "submit";
+    const back = personalButton("Retour à la liste", () => renderPersonalList(previousDecks()));
+    errorBox.hidden = true;
+    errorBox.setAttribute("role", "alert");
+    form.append(label, personalColorField([], value => {
+        colors = value;
+    }), errorBox, submit, back);
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        back.disabled = true;
+        errorBox.hidden = true;
+        try {
+            const result = await postJSON("/api/v2/personal-decks/create", { name: name.value.trim(), colors, commander: true });
+            const decks = previousDecks();
+            renderPersonalList(decks ? [result.deck, ...decks.filter(deck => deck.id !== result.deck.id)] : null);
+        }
+        catch (error) {
+            errorBox.textContent = error.message;
+            errorBox.hidden = false;
+            submit.disabled = false;
+            back.disabled = false;
+        }
+    });
+    root.replaceChildren(form);
+    name.focus();
+}
+function adoptPersonalDeck(deck) {
+    personalState.editing = false;
+    personalState.deck = deck;
+    personalState.change = 0;
+    personalState.saved = 0;
+    personalState.error = null;
+    personalStore(PERSONAL_CURRENT_KEY, deck.id);
+    renderPersonalEditor();
+    personalStatus("Enregistré");
+}
+async function openPersonalDeck(id) {
+    const root = $("personal-content");
+    root.replaceChildren(node("p", "muted", "Chargement du deck…"));
+    try {
+        const result = await getJSON("/api/v2/personal-deck", { id });
+        const draft = personalRead(`personal-draft-${id}`);
+        adoptPersonalDeck(result.deck);
+        if (draft) {
+            personalState.deck = draft;
+            personalState.change = 1;
+            renderPersonalEditor();
+            personalStatus("Brouillon local restauré, en attente d’enregistrement.");
+            void flushPersonal();
+        }
+    }
+    catch (error) {
+        showError(root, error.message);
+        root.append(personalButton("Retour à la liste", () => {
+            personalStore(PERSONAL_CURRENT_KEY, null);
+            renderPersonalList();
+        }));
+    }
+}
+let personalDragFrame = 0;
+let personalDragSpeed = 0;
+function showPersonalDropIndex(drag, index) {
+    if (index === drag.index) return;
+    const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const previous = reduceMotion ? [] : drag.tiles.map(tile => tile.getBoundingClientRect());
+    drag.animations.forEach(animation => animation.cancel());
+    const order = drag.tiles.filter(tile => tile !== drag.tile);
+    order.splice(index, 0, drag.tile);
+    order.forEach((tile, position) => { tile.style.order = position; });
+    drag.index = index;
+    drag.animations = [];
+    if (reduceMotion) return;
+    drag.tiles.forEach((tile, position) => {
+        if (tile === drag.tile) return;
+        const next = tile.getBoundingClientRect();
+        const x = previous[position].left - next.left;
+        const y = previous[position].top - next.top;
+        if (x || y) drag.animations.push(tile.animate(
+            [{ transform: `translate(${x}px, ${y}px)` }, { transform: "none" }],
+            { duration: 150, easing: "ease-out" },
+        ));
+    });
+}
+function previewPersonalDrop(drag, event) {
+    const bounds = drag.grid.getBoundingClientRect();
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    // Hit-test layout slots rather than cards that are still animating.
+    const hovered = drag.tiles.find(tile => x >= tile.offsetLeft && x < tile.offsetLeft + tile.offsetWidth
+        && y >= tile.offsetTop && y < tile.offsetTop + tile.offsetHeight);
+    if (!hovered || hovered === drag.tile) return;
+    const stationary = drag.tiles.filter(tile => tile !== drag.tile);
+    const target = stationary.indexOf(hovered);
+    const after = x >= hovered.offsetLeft + hovered.offsetWidth / 2;
+    showPersonalDropIndex(drag, target + Number(after));
+}
+function endPersonalDrag() {
+    const drag = personalState.drag;
+    if (drag) {
+        drag.animations.forEach(animation => animation.cancel());
+        drag.tiles.forEach(tile => { tile.style.order = ""; });
+        drag.tile.classList.remove("personal-card-placeholder");
+    }
+    personalState.drag = null;
+    cancelAnimationFrame(personalDragFrame);
+    personalDragFrame = 0;
+    personalDragSpeed = 0;
+    document.querySelectorAll(".personal-drop-target").forEach(node => node.classList.remove("personal-drop-target"));
+}
+function scrollPersonalDrag() {
+    personalDragFrame = 0;
+    if (!personalState.drag || !personalDragSpeed) return;
+    window.scrollBy({ top: personalDragSpeed, behavior: "instant" });
+    personalDragFrame = requestAnimationFrame(scrollPersonalDrag);
+}
+document.addEventListener("dragover", event => {
+    const drag = personalState.drag;
+    if (!drag) return;
+    if (!drag.grid.closest(".personal-section").contains(event.target)) {
+        showPersonalDropIndex(drag, drag.originalIndex);
+    }
+    const top = document.querySelector(".topbar").getBoundingClientRect().bottom;
+    const edge = 85;
+    const up = Math.max(0, 1 - (event.clientY - top) / edge);
+    const down = Math.max(0, 1 - (innerHeight - event.clientY) / edge);
+    personalDragSpeed = 20 * (Math.min(1, down) - Math.min(1, up));
+    if (personalDragSpeed && !personalDragFrame) personalDragFrame = requestAnimationFrame(scrollPersonalDrag);
+});
+document.addEventListener("drop", endPersonalDrag);
+window.addEventListener("blur", endPersonalDrag);
+function personalMove(sourceId, cardId, targetId, beforeId = null) {
+    const deck = personalState.deck, source = deck.sections.find(s => s.id === sourceId), target = deck.sections.find(s => s.id === targetId);
+    if (!source || !target || cardId === beforeId)
+        return;
+    const index = source.cards.findIndex(c => c.id === cardId);
+    if (index < 0)
+        return;
+    const [card] = source.cards.splice(index, 1), before = target.cards.findIndex(c => c.id === beforeId);
+    target.cards.splice(before < 0 ? target.cards.length : before, 0, card);
+    personalChanged();
+    renderPersonalEditor();
+}
+function updatePersonalHeading(deck = null) {
+    $("personal-heading-content").replaceChildren(...deckTitleContent(
+        deck ? "Deck personnel" : "Votre collection de compositions",
+        deck?.name || "Decks personnels",
+        deck ? deck.colors || [] : null,
+        "personal-title",
+    ));
+}
+function renderPersonalEditor() {
+    const deck = personalState.deck, root = $("personal-content"), editing = personalState.editing;
+    root.classList.toggle("personal-editing", editing);
+    hoverPreview.hidden = true;
+    if (!deck)
+        return;
+    updatePersonalHeading(deck);
+    root.replaceChildren();
+    const actions = node("div", "personal-toolbar"), back = personalButton("Retour à la liste", async () => {
+        back.disabled = true;
+        if (await flushPersonal()) {
+            personalState.deck = null;
+            personalStore(PERSONAL_CURRENT_KEY, null);
+            renderPersonalList();
+        }
+        else
+            back.disabled = false;
+    });
+    const exportButton = personalButton("Exporter le deck sur le Bureau", async () => {
+        exportButton.disabled = true;
+        try {
+            if (!await flushPersonal())
+                return;
+            const result = await postJSON("/api/v2/personal-decks/export", { deck_id: deck.id });
+            personalStatus(`Export terminé : ${result.folder || result.path || "Bureau"}`);
+        }
+        catch (error) {
+            personalStatus(`Export impossible : ${error.message}`, true);
+        }
+        finally {
+            exportButton.disabled = false;
+        }
+    });
+    actions.append(back, exportButton);
+    const editButton = personalButton(editing ? "Terminer" : "Modifier", async () => {
+        if (editing) {
+            editButton.disabled = true;
+            if (!await flushPersonal()) {
+                editButton.disabled = false;
+                return;
+            }
+        }
+        personalState.editing = !editing;
+        renderPersonalEditor();
+    }, true);
+    const refresh = personalButton("", async () => {
+        refresh.disabled = true;
+        try {
+            if (!await flushPersonal()) return;
+            const { deck: fresh } = await getJSON("/api/v2/personal-deck", { id: deck.id });
+            if (personalState.deck !== deck || personalState.saved !== personalState.change) return;
+            personalState.deck = fresh;
+            renderPersonalEditor();
+            personalStatus("Deck actualisé.");
+        } catch (error) {
+            personalStatus(error.message, true);
+        } finally {
+            refresh.disabled = false;
+        }
+    });
+    refresh.classList.add("search-header-button", "search-header-icon-button");
+    refresh.setAttribute("aria-label", "Actualiser le deck");
+    refresh.title = "Actualiser le deck";
+    refresh.innerHTML = '<svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg>';
+    const editActions = node("div", "search-header-actions personal-edit-actions");
+    editActions.append(editButton, refresh);
+    actions.append(editActions);
+    root.append(actions);
+    if (editing) {
+        const fields = node("div", "panel personal-toolbar personal-deck-fields"), label = node("label", "", "Nom du deck"), name = node("input");
+        name.value = deck.name;
+        name.maxLength = 200;
+        name.addEventListener("input", () => {
+            deck.name = name.value;
+            $("personal-title").textContent = deck.name || "Deck sans nom";
+            personalChanged();
+        });
+        label.append(name);
+        fields.append(label, personalColorField(deck.colors || [], colors => {
+            deck.colors = colors;
+            updatePersonalHeading(deck);
+            personalChanged();
+        }));
+        root.append(fields);
+    }
+    if (editing) {
+        root.append(node("p", "muted", "Glissez une carte avant une autre, ou dans une section. La première carte de la zone de commandement représente le commandant."));
+    }
+    if (!editing && !deck.sections.some(section => section.cards.length)) {
+        root.append(node("p", "empty-state", "Ajoutez des cartes depuis Recherche."));
+    }
+    for (const section of deck.sections) {
+        if (!editing && !section.cards.length) continue;
+        const container = node("section", editing ? "panel personal-section" : "deck-section");
+        const sectionCount = node("span", "personal-section-count");
+        const updateSectionCount = () => {
+            sectionCount.textContent = `(${deckSectionCount(section.cards)})`;
+        };
+        if (editing) {
+            const heading = node("div", "personal-toolbar"), title = node("input");
+            title.value = section.name;
+            title.setAttribute("aria-label", "Nom de la section");
+            title.addEventListener("input", () => {
+                section.name = title.value;
+                personalChanged();
+            });
+            updateSectionCount();
+            heading.append(title, sectionCount);
+            const remove = personalButton("Supprimer la section", () => {
+                const target = deck.sections.find(s => s.id !== section.id);
+                if (!target)
+                    return;
+                if (section.cards.length && !window.confirm(`Déplacer les ${section.cards.length} références vers « ${target.name} » et supprimer « ${section.name} » ?`))
+                    return;
+                target.cards.push(...section.cards);
+                deck.sections = deck.sections.filter(s => s.id !== section.id);
+                personalChanged();
+                renderPersonalEditor();
+            });
+            remove.disabled = deck.sections.length < 2;
+            heading.append(remove);
+            container.append(heading);
+        } else {
+            container.append(deckSectionTitle(section.name, section.cards));
+        }
+        const cards = node("div", editing ? "deck-cards personal-cards-edit" : "deck-cards");
+        container.addEventListener("dragover", e => {
+            if (editing && personalState.drag) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                container.classList.add("personal-drop-target");
+                if (personalState.drag.sectionId === section.id) previewPersonalDrop(personalState.drag, e);
+            }
+        });
+        container.addEventListener("dragleave", e => {
+            if (!container.contains(e.relatedTarget))
+                container.classList.remove("personal-drop-target");
+        });
+        container.addEventListener("drop", e => {
+            e.preventDefault();
+            container.classList.remove("personal-drop-target");
+            if (editing && personalState.drag) {
+                const drag = personalState.drag;
+                const sameSection = drag.sectionId === section.id;
+                const beforeId = sameSection
+                    ? drag.tiles.filter(tile => tile !== drag.tile)[drag.index]?.dataset.personalCard
+                    : e.target.closest("[data-personal-card]")?.dataset.personalCard;
+                endPersonalDrag();
+                if (!sameSection || drag.index !== drag.originalIndex) {
+                    personalMove(drag.sectionId, drag.cardId, section.id, beforeId);
+                }
+            }
+        });
+        for (const card of section.cards) {
+            const cardName = card.printed_name || card.name_fr || card.name || "Carte non résolue";
+            const preview = personalImage(card);
+            if (!editing) {
+                const tile = card.provider_card_id
+                    ? personalButton("", () => void openCard(card.provider_card_id))
+                    : node("article");
+                tile.className = card.provider_card_id ? "deck-card-tile deck-card-open" : "deck-card-tile";
+                tile.append(preview, node("span", "deck-card-name", `${card.count} × ${cardName}`));
+                cards.append(tile);
+                continue;
+            }
+            const tile = node("article", "deck-card-tile personal-card-edit");
+            tile.draggable = true;
+            tile.dataset.personalCard = card.id;
+            tile.addEventListener("dragstart", e => {
+                if (!editing || e.target.closest("input,select")) {
+                    e.preventDefault();
+                    return;
+                }
+                const tiles = [...cards.children];
+                const index = tiles.indexOf(tile);
+                const drag = { sectionId: section.id, cardId: card.id, grid: cards, tile, tiles,
+                    index, originalIndex: index, animations: [] };
+                personalState.drag = drag;
+                e.dataTransfer.setData("text/plain", card.id);
+                e.dataTransfer.effectAllowed = "move";
+                requestAnimationFrame(() => {
+                    if (personalState.drag === drag) tile.classList.add("personal-card-placeholder");
+                });
+            });
+            tile.addEventListener("dragend", endPersonalDrag);
+            const open = personalButton("", () => void openCard(card.provider_card_id));
+            open.className = "personal-card-open";
+            open.setAttribute("aria-label", cardName);
+            open.draggable = true;
+            open.disabled = !card.provider_card_id;
+            open.append(preview);
+            if (preview.tagName !== "IMG") open.append(node("span", "deck-card-name", cardName));
+            tile.append(open);
+            const countLabel = node("label", "personal-quantity", "Quantité"), count = node("input");
+            count.type = "number";
+            count.min = "1";
+            count.max = "9999";
+            count.value = card.count;
+            count.setAttribute("aria-label", `Quantité de ${card.name}`);
+            count.required = true;
+            count.step = "1";
+            const storeCount = () => {
+                const value = Number(count.value);
+                if (!count.checkValidity() || !Number.isInteger(value) || value < 1)
+                    return false;
+                if (card.count !== value) {
+                    card.count = value;
+                    personalChanged();
+                    updateSectionCount();
+                }
+                return true;
+            };
+            count.addEventListener("input", storeCount);
+            count.addEventListener("change", () => {
+                if (!storeCount()) {
+                    count.reportValidity();
+                    count.value = card.count;
+                }
+            });
+            countLabel.append(count);
+            if (editing)
+                tile.append(countLabel);
+            const tools = node("div", "personal-card-tools");
+            tools.append(personalButton("Retirer", () => {
+                if (!window.confirm(`Retirer « ${cardName} » de « ${section.name} » ? Tous les exemplaires de cette ligne seront retirés.`)) return;
+                section.cards.splice(section.cards.findIndex(c => c.id === card.id), 1);
+                personalChanged();
+                renderPersonalEditor();
+            }));
+            if (editing)
+                tile.append(tools);
+            cards.append(tile);
+        }
+        if (!section.cards.length)
+            cards.append(node("p", "muted", editing ? "Section vide · Déposez une carte ici." : "Section vide"));
+        container.append(cards);
+        root.append(container);
+    }
+    if (editing)
+        root.append(personalButton("Ajouter une section", () => {
+            deck.sections.push({ id: crypto.randomUUID(), name: "Nouvelle section", cards: [] });
+            personalChanged();
+            renderPersonalEditor();
+        }));
+}
+async function importPersonalDeck(id, button) {
+    button.disabled = true;
+    try {
+        if (!await flushPersonal())
+            throw new Error("Enregistrez d’abord le deck personnel ouvert.");
+        const result = await postJSON("/api/v2/personal-decks/import", { deck_id: id });
+        adoptPersonalDeck(result.deck);
+        setView("perso");
+    }
+    catch (error) {
+        $("deck-progress").append(node("p", "error-state", `Copie impossible : ${error.message}`));
+    }
+    finally {
+        button.disabled = false;
+    }
+}
+async function choosePersonalDeck(card) {
+    const dialog = node("dialog", "personal-picker"), heading = node("h2", "", "Ajouter à un deck personnel"), status = node("p", "muted", "Chargement…"), list = node("div", "personal-picker-list");
+    const footer = node("div", "personal-picker-footer");
+    footer.append(personalButton("Fermer", () => dialog.close()));
+    const body = node("div", "personal-picker-body");
+    body.append(status, list);
+    dialog.append(heading, body, footer);
+    dialog.setAttribute("aria-label", heading.textContent);
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.showModal();
+    try {
+        const response = await getJSON("/api/v2/personal-decks");
+        status.textContent = response.items.length ? "Choisissez le deck de destination." : "Créez un deck dans l’onglet Perso pour y ajouter cette carte.";
+        for (const deck of response.items) {
+            const b = personalButton(deck.name, async () => {
+                list.querySelectorAll("button").forEach(x => {
+                    x.disabled = true;
+                });
+                try {
+                    if (!await flushPersonal())
+                        throw new Error("Le deck ouvert contient un brouillon non enregistré.");
+                    const result = await postJSON("/api/v2/personal-decks/add", { deck_id: deck.id, provider_card_id: card.provider_card_id, printing_id: card.printing_id });
+                    if (personalState.deck?.id === deck.id)
+                        adoptPersonalDeck(result.deck);
+                    dialog.close();
+                    const viewer = $("card-dialog");
+                    if (viewer.open) {
+                        viewer.querySelector(".personal-add-toast")?.remove();
+                        const toast = node("p", "personal-add-toast", `Carte ajoutée à « ${deck.name} ».`);
+                        toast.setAttribute("role", "status");
+                        viewer.append(toast);
+                        setTimeout(() => toast.remove(), 2200);
+                    }
+                }
+                catch (error) {
+                    status.textContent = `Ajout impossible : ${error.message}`;
+                    status.className = "error-state";
+                }
+                finally {
+                    list.querySelectorAll("button").forEach(x => {
+                        x.disabled = false;
+                    });
+                }
+            });
+            list.append(b);
+        }
+    }
+    catch (error) {
+        status.textContent = `Chargement impossible : ${error.message}`;
+        status.className = "error-state";
+    }
+}
+window.addEventListener("beforeunload", event => {
+    if (personalState.saved < personalState.change) {
+        personalDraft();
+        event.preventDefault();
+        event.returnValue = "";
+    }
+});

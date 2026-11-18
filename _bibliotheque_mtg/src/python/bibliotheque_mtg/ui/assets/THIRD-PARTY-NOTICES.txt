@@ -1,0 +1,13 @@
+Mana symbol artwork (W, U, B, R, G, C)
+
+Source: andrewgioia/mana, SVG glyphs in svg/{w,u,b,r,g,c}.svg
+https://github.com/andrewgioia/mana
+
+The upstream README identifies all mana, tap, and card type symbol images as
+copyright Wizards of the Coast (https://magic.wizards.com/). The glyphs are used
+here as locally embedded visual symbols. The upstream Mana font is licensed
+under SIL Open Font License 1.1; upstream CSS, LESS, and Sass are MIT licensed.
+The source project states attribution is appreciated but not required.
+
+Magic: The Gathering and its symbols are trademarks and/or copyrighted materials
+of Wizards of the Coast LLC and its affiliates.

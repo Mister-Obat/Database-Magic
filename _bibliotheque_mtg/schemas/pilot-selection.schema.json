@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/magic/pilot-selection.schema.json",
+  "title": "Selection immuable du pilote d'images Magic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "selection_id", "generated_at_utc", "catalogue_sha256", "max_faces", "max_image_downloads", "sets", "faces"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "selection_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$"},
+    "generated_at_utc": {"type": "string", "format": "date-time"},
+    "catalogue_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "max_faces": {"type": "integer", "minimum": 1, "maximum": 20},
+    "max_image_downloads": {"type": "integer", "minimum": 0, "maximum": 120},
+    "sets": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "object", "additionalProperties": false,
+        "required": ["set_id", "code", "name", "local_folder_present", "publication_status"],
+        "properties": {
+          "set_id": {"type": "string"}, "code": {"type": "string"}, "name": {"type": "string"},
+          "local_folder_present": {"type": "boolean"},
+          "publication_status": {"enum": ["existing_partial", "new_edition_partial_pilot"]}
+        }}
+    },
+    "faces": {
+      "type": "array", "minItems": 1, "maxItems": 20,
+      "items": {"type": "object", "additionalProperties": false,
+        "required": ["set_id", "printing_id", "face_index", "purpose", "expected"],
+        "properties": {
+          "set_id": {"type": "string"}, "printing_id": {"type": "string"},
+          "face_index": {"type": "integer", "minimum": 0},
+          "purpose": {"enum": ["existing_low_resolution", "recent_french", "english_without_french_proven", "two_face_front", "two_face_back", "visual_variant"]},
+          "expected": {"type": "object", "additionalProperties": false,
+            "required": ["set_code", "collector_number", "layout", "provider_ids", "language_codes", "oracle_id", "face_names", "illustration_id", "artist"],
+            "properties": {
+              "set_code": {"type": "string"}, "collector_number": {"type": "string"}, "layout": {"type": "string"},
+              "provider_ids": {"type": "object", "additionalProperties": {"type": "string"}},
+              "language_codes": {"type": "array", "uniqueItems": true, "items": {"enum": ["fr", "en"]}},
+              "oracle_id": {"type": ["string", "null"]},
+              "face_names": {"type": "object", "additionalProperties": false, "required": ["fr", "en"],
+                "properties": {"fr": {"type": ["string", "null"]}, "en": {"type": ["string", "null"]}}},
+              "illustration_id": {"type": ["string", "null"]},
+              "artist": {"type": "array", "items": {"type": "string"}},
+              "local_asset": {"type": ["object", "null"], "additionalProperties": false,
+                "required": ["path", "sha256", "width", "height"],
+                "properties": {"path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                  "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}}}
+            }}
+        }}
+    }
+  }
+}

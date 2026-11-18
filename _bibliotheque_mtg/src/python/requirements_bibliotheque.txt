@@ -1,0 +1,15 @@
+# Dépendances du nouveau parcours, directes et transitives figées
+attrs==26.1.0
+beautifulsoup4==4.15.0
+certifi==2026.10.19
+charset-normalizer==3.5.2
+idna==3.20
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+Pillow==13.0.0
+referencing==0.37.0
+requests==2.34.2
+rpds-py==2026.9.1
+soupsieve==3.0.3
+typing_extensions==4.16.0
+urllib3==2.8.0

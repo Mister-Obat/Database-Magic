@@ -1,0 +1,100 @@
+# Module — catalogue et identités
+
+## Responsabilité
+
+Importer les métadonnées des fournisseurs, décider quelles éditions sont
+éligibles, conserver chaque ligne source et construire les impressions,
+traductions, faces et exports du catalogue V2. C’est la source de vérité textuelle
+de l’application locale.
+
+## Emplacements
+
+- `sources.py` : client HTTP, cache, validation gzip JSONL, pages Scryfall et
+  galeries Wizards, base source `_bibliotheque_mtg/catalogue.sqlite`.
+- `v2/build_catalogue.py` : reconstruction complète depuis All Cards et les
+  séries, création de la base V2 et des exports d’édition.
+- `v2/catalogue.py` : règles d’identité, faces physiques, migration V2 et alias
+  historiques ; `v2/schema.sql` définit les tables et FTS5.
+- `tests_v2/test_catalogue_v2.py`, `tests_v2/test_builder_atomic_v23.py` et
+  `tests_v2/test_query_v2.py` couvrent identité, construction et lecture.
+- `sources.py` écrit `reports/french-text-coverage.json` à chaque actualisation,
+  y compris lorsqu'aucun nombre d'édition ne change. Le rapport distingue les
+  lignes Scryfall françaises des champs imprimés effectivement présents; le
+  compteur de complétude exige nom, type et texte FR lorsque la carte a du texte
+  de règles anglais. Une lacune reste explicitement `incomplete`.
+- `bibliotheque_mtg/data/official_french_text_overrides.json` contient les
+  traductions officielles françaises vérifiées qui manquent aux archives
+  automatiques. Elles sont importées de manière idempotente dans la table source
+  `official_french_text`, séparée des IDs et enregistrements Scryfall. Chaque
+  entrée exige un ID fournisseur exact, un Oracle, un code et numéro, des champs
+  FR, une URL de preuve, une image officielle et une date de revue.
+
+La [carte des fichiers](../modules.map.md) donne les liens directs. La version
+active se résout par `v3-staging/current.json`.
+
+## Entrées, sorties et interfaces
+
+`printing_added` conserve la première date d'apparition locale de chaque
+`printing_id` dans les nouveaux catalogues. La maintenance reprend cette date
+par identité exacte entre publications ; les impressions absentes de la
+version précédente reçoivent la date de construction.
+
+1. `run_sources(config_path, refresh=True, metadata_only=True)` relève le
+   descripteur All Cards, l’archive, les séries et les galeries ; il écrit les
+   sources locales et `reports/sources.json`.
+   Pour le bouton Info, le mode `additions_only` compare les IDs et nombres de
+   cartes des séries à la version publiée, récupère uniquement les séries ayant
+   des ajouts, puis construit un catalogue limité à ces séries avant fusion dans
+   une copie validée de la version publiée.
+2. `build_catalogue(...)` vérifie le SHA-256 de l’archive, filtre les séries
+   éligibles et construit SQLite avec un enregistrement par ID fournisseur.
+3. Les groupes d’impression sont confirmés seulement avec série, numéro de
+   collection, oracle ou illustration, layout et forme des faces. Une collision
+   reste `unresolved_identity`.
+4. Chaque série éligible reçoit `index.json`, `index.md` et `images.json`. La
+   racine `editions/` reçoit aussi ses deux index.
+5. `v2/query.py` lit ensuite la base créée ; ce module ne décide pas de
+   l’affichage de la fiche ni du téléchargement d’image.
+
+## Invariants
+
+- L’ID Scryfall d’une ligne éligible doit apparaître une fois dans
+  `source_records` ou dans une exception documentée ; l’export et SQLite doivent
+  représenter le même ensemble.
+- Une paire FR/EN n’est fusionnée que lorsque l’identité est démontrée. Les lignes
+  sans preuve restent séparées et traçables par `provider_card_id`.
+- `card_faces` suit la disposition physique : les layouts `transform`,
+  `modal_dfc`, `double_faced_token` et `reversible_card` peuvent avoir plusieurs
+  images ; d’autres cartes à textes multiples ne créent qu’un slot.
+- Le nombre de slots `missing` est créé lors du build sans requête d’image.
+  `ready` ne doit provenir que d’un asset vérifié.
+- Le build n’expose pas sa base cible avant `PRAGMA integrity_check=ok` et le
+  remplacement atomique du fichier temporaire.
+
+## Dépendances et risques
+
+- [Scryfall](../infra/scryfall.manifest.md) pour le texte ;
+  [Wizards](../infra/wizards-gallery.manifest.md) pour le relevé de galeries ;
+  [stockage local](../infra/stockage-local.manifest.md) pour les archives et
+  versions.
+- [Maintenance](maintenance-publication.manifest.md) décide quand reconstruire et
+  publier ; [interface](interface-recherche.manifest.md) consomme les tables ;
+  [historique](historique.manifest.md) fournit les alias prouvés.
+- L’import est volumineux. Une archive tronquée, un changement de schéma
+  fournisseur ou un manque d’espace doit échouer avant changement de
+  `current.json`.
+
+## Points à vérifier lors d’une intervention
+
+- Comparer les IDs des éditions éligibles entre archive, SQLite et exports ;
+  vérifier zéro omission ou doublon.
+- Relire `identity_exceptions` avant d’améliorer une association de langues ou de
+  variantes.
+- Tester les layouts recto/verso et les cartes à plusieurs textes pour préserver
+  le nombre de faces physiques.
+- Vérifier le rapport de source, les empreintes et les éditions différées du
+  snapshot actif avant d’interpréter un compteur de couverture.
+- Ne jamais présenter la couverture Scryfall ou la couverture combinée comme
+  complète si le rapport indique des Oracle sans champs officiels FR. Le fichier
+  MTGJSON par édition peut être consulté pour un gap ciblé; `40K.json.bz2` ne
+  contient pas de `foreignData` français pour 40K/176.

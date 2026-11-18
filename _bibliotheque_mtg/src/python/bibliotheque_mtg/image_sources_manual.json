@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "candidates": [
+    {
+      "set_code": "who",
+      "collector_number": "77",
+      "face_index": 0,
+      "language": "fr",
+      "url": "https://www.lotusnoir.info/cartes/magic_hq/WHO/WHO77.jpg",
+      "allow_host": "www.lotusnoir.info",
+      "source": "Lotus Noir",
+      "evidence": "Entrée WHO/77 vérifiée manuellement depuis l’index Doctor Who fourni; scan FR annoncé 299×433 px."
+    },
+    {
+      "set_code": "who",
+      "collector_number": "131",
+      "face_index": 0,
+      "language": "fr",
+      "url": "https://www.lotusnoir.info/cartes/magic_hq/WHO/WHO131.jpg",
+      "allow_host": "www.lotusnoir.info",
+      "source": "Lotus Noir",
+      "evidence": "Entrée WHO/131 vérifiée manuellement depuis l’index Doctor Who fourni; scan FR annoncé 299×433 px."
+    },
+    {
+      "set_code": "who",
+      "collector_number": "585",
+      "face_index": 0,
+      "language": "fr",
+      "url": "https://media.wizards.com/2023/who_j8Ey2y77EWDz/fr_924fe6396c.png",
+      "allow_host": "media.wizards.com",
+      "source": "Wizards of the Coast",
+      "evidence": "Visuel officiel FR WHO/585; identité de la série et du numéro vérifiée manuellement depuis l’index Doctor Who fourni."
+    },
+    {
+      "set_code": "who",
+      "collector_number": "603",
+      "face_index": 0,
+      "language": "fr",
+      "url": "https://media.wizards.com/2023/who_j8Ey2y77EWDz/fr_5f1a12c9ce.png",
+      "allow_host": "media.wizards.com",
+      "source": "Wizards of the Coast",
+      "evidence": "Visuel officiel FR WHO/603; identité de la série et du numéro vérifiée manuellement depuis l’index Doctor Who fourni."
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/magic/collection-batch.schema.json",
+  "title": "Plan immuable d'un lot de collecte Magic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "batch_id", "mode", "generated_at_utc", "catalogue_sha256", "source_hashes", "max_faces", "max_image_downloads", "max_sets", "sets", "tasks", "base_library_generation_id", "faces_planned", "candidate_get_upper_bound", "max_gets_per_language", "max_redirects_per_get", "disk_free_bytes_before", "disk_reserve_required_bytes"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "batch_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,80}$"},
+    "mode": {"enum": ["pending_existing", "missing_sets"]},
+    "generated_at_utc": {"type": "string", "format": "date-time"},
+    "catalogue_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+    "max_faces": {"type": "integer", "minimum": 1, "maximum": 100},
+    "max_image_downloads": {"type": "integer", "minimum": 1, "maximum": 600},
+    "max_sets": {"type": "integer", "minimum": 1, "maximum": 5},
+    "base_library_generation_id": {"type": ["string", "null"]},
+    "faces_planned": {"type": "integer", "minimum": 1, "maximum": 100},
+    "candidate_get_upper_bound": {"type": "integer", "minimum": 1, "maximum": 600},
+    "max_gets_per_language": {"type": "integer", "minimum": 1, "maximum": 3},
+    "max_redirects_per_get": {"type": "integer", "minimum": 0, "maximum": 10},
+    "disk_free_bytes_before": {"type": "integer", "minimum": 0},
+    "disk_reserve_required_bytes": {"type": "integer", "minimum": 0},
+    "selected_set_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "sets": {"type": "array", "maxItems": 5, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["set_id", "code", "name", "released_at", "face_count"],
+      "properties": {"set_id": {"type": "string"}, "code": {"type": "string"},
+        "name": {"type": "string"}, "released_at": {"type": ["string", "null"]},
+        "face_count": {"type": "integer", "minimum": 0},
+        "tasks_selected": {"type": "integer", "minimum": 0, "maximum": 100},
+        "set_complete_in_this_plan": {"type": "boolean"}}
+    }},
+    "tasks": {"type": "array", "maxItems": 100, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["set_id", "set_code", "set_folder", "printing_id", "face_index", "purpose", "expected", "candidates"],
+      "properties": {"set_id": {"type": "string"}, "set_code": {"type": "string"},
+        "set_folder": {"type": "string"}, "printing_id": {"type": "string"},
+        "face_index": {"type": "integer", "minimum": 0},
+        "collector_number": {"type": "string"},
+        "purpose": {"type": "string"},
+        "expected": {"type": "object"},
+        "candidates": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["printing_id", "face_index", "language", "provider", "url", "local_path", "exact_identity", "candidate_key"],
+          "properties": {"printing_id": {"type": "string"}, "face_index": {"type": "integer"},
+            "language": {"type": ["string", "null"], "enum": ["fr", "en", null]},
+            "provider": {"type": "string"}, "url": {"type": ["string", "null"]},
+            "local_path": {"type": ["string", "null"]}, "declared_quality": {"type": ["string", "null"]},
+            "declared_status": {"type": ["string", "null"]}, "exact_identity": {"type": "boolean"},
+            "expected_set_id": {"type": ["string", "null"]}, "source_set_id": {"type": ["string", "null"]},
+            "expected_collector_number": {"type": ["string", "null"]}, "source_collector_number": {"type": ["string", "null"]},
+            "source_priority": {"type": ["integer", "null"]}, "identity_evidence": {"type": ["string", "null"]},
+            "candidate_key": {"type": "string"}}
+        }}
+      }
+    }}
+  }
+}

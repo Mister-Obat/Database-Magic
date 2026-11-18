@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "provider_card_id": "c9dbba5a-fb9a-422e-87a1-a29d2c17a04e",
+      "oracle_id": "ead75ea4-025f-443a-824f-26fef9e424db",
+      "set_code": "40k",
+      "collector_number": "176",
+      "fields": {
+        "printed_name": "Le Maître des Essaims",
+        "printed_type_line": "Créature légendaire : tyranide",
+        "mana_cost": "{3}{G}{U}{R}",
+        "printed_text": "Régénération rapide — Le Maître des Essaims arrive sur le champ de bataille avec deux marqueurs +1/+1 sur lui pour chaque fois que vous avez lancé votre commandant depuis la zone de commandement pendant cette partie.\n\nRuse Xenos — À chaque fois qu’une créature que vous contrôlez avec un marqueur sur elle meurt, piochez une carte.",
+        "power": "5",
+        "toughness": "5"
+      },
+      "source": "wizards_official_manual_review",
+      "source_url": "https://magic.wizards.com/fr/news/card-image-gallery/warhammer-40000-commander-decks",
+      "source_image_url": "https://media.wizards.com/2022/40k/fr_QjfUnmccbR.png",
+      "reviewed_at": "2026-11-16"
+    }
+  ]
+}

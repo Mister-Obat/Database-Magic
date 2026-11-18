@@ -1,0 +1,78 @@
+# Python runtime
+**/__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Local card collection and image assets (never publish card scans)
+/Cartes Magic/
+/_bibliotheque_mtg/Images/
+/Magic/Prog/
+/Magic/Cartes.md
+/Magic/*.png
+/Magic/*.jpg
+/Magic/*.jpeg
+/Magic/*.webp
+/Magic/*.gif
+/Magic/*.bmp
+/Magic/*.tif
+/Magic/*.tiff
+/Magic/*.lnk
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.webp
+**/*.gif
+**/*.bmp
+**/*.tif
+**/*.tiff
+!/Logo.png
+
+# Local configuration and generated collection data
+/_bibliotheque_mtg/config.json
+/_bibliotheque_mtg/catalogue.sqlite*
+/_bibliotheque_mtg/sources/
+/_bibliotheque_mtg/reports/
+/_bibliotheque_mtg/backups/
+/_bibliotheque_mtg/snapshots/
+/_bibliotheque_mtg/staging/
+/_bibliotheque_mtg/work/
+/_bibliotheque_mtg/v3-staging/
+
+# Scratch files, databases, logs, and editor state
+/work/
+*.sqlite
+*.sqlite3
+*.db
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.part
+*.lock
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+Thumbs.db
+
+# Local-only pilot configs, fixtures, generated plans, and temporary state
+/_bibliotheque_mtg/config*.json
+!/_bibliotheque_mtg/config.example.json
+/_bibliotheque_mtg/overrides.json
+/_bibliotheque_mtg/pilot_selection.json
+/_bibliotheque_mtg/fixtures/
+/_bibliotheque_mtg/plans/
+/_bibliotheque_mtg/state/
+/_bibliotheque_mtg/locks/
+/_bibliotheque_mtg/Cartes.md
+/_bibliotheque_mtg/staging-*/
+/_bibliotheque_mtg/snapshot_id.txt
+/_bibliotheque_mtg/schemas/README.md
+/_bibliotheque_mtg/schemas/examples/
+
+# Project knowledge is maintained with the source
+/protocole.md
+/Protocole_Bibliotheque_Magic_Indexation_JSON_Images_PNG.md
+/Magic/README_Bibliotheque_Magic.md

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/magic/folder.schema.json",
+  "title": "Index JSON d’un groupe historique ou d’un sous-dossier langue",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "generation_id", "generated_at_utc", "folder", "completeness", "edition_links", "assets"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"}, "generation_id": {"type": "string"}, "generated_at_utc": {"type": "string", "format": "date-time"},
+    "folder": {"type": "object", "additionalProperties": false, "required": ["folder_id", "kind", "display_name", "path"], "properties": {"folder_id": {"type": "string"}, "kind": {"enum": ["historical_group", "language"]}, "display_name": {"type": "string"}, "path": {"type": "string"}, "language": {"enum": ["fr", "en", null]}}},
+    "completeness": {"type": "object", "additionalProperties": false, "required": ["state", "files_expected", "files_indexed", "unresolved", "reason"], "properties": {"state": {"enum": ["complete", "incomplete", "unknown"]}, "files_expected": {"type": "integer", "minimum": 0}, "files_indexed": {"type": "integer", "minimum": 0}, "unresolved": {"type": "integer", "minimum": 0}, "reason": {"type": ["string", "null"]}}},
+    "edition_links": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["edition_id", "code", "index_json", "index_md"], "properties": {"edition_id": {"type": "string"}, "code": {"type": "string"}, "index_json": {"type": "string"}, "index_md": {"type": "string"}}}},
+    "assets": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes", "kind", "identity_status", "printing_id", "face_index", "language", "evidence"], "properties": {"path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "bytes": {"type": "integer", "minimum": 0}, "kind": {"enum": ["card_image", "non_card", "unknown", "corrupt"]}, "identity_status": {"enum": ["matched", "ambiguous", "unresolved", "not_applicable"]}, "printing_id": {"type": ["string", "null"]}, "face_index": {"type": ["integer", "null"], "minimum": 0}, "language": {"enum": ["fr", "en", "unknown", null]}, "evidence": {"type": "array", "items": {"type": "string"}}}}}
+  }
+}
