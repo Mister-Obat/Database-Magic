@@ -196,11 +196,11 @@ def migrate(source_db: str | Path, target_db: str | Path, *, archive_sha256: str
                 vals = _record_values(row, printing_id)
                 out.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", vals)
                 out.execute("INSERT INTO printing_languages VALUES(?,?,?)", (printing_id, row["lang"], row["id"]))
-                out.execute("INSERT INTO source_search(provider_card_id,set_code,lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text) "
-                            "VALUES(?,?,?,?,?,?,?,?,?)", (row["id"], row.get("set_code") or "", row["lang"], row.get("name") or raw.get("name") or "",
+                out.execute("INSERT INTO source_search(provider_card_id,set_code,lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text,artist) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?)", (row["id"], row.get("set_code") or "", row["lang"], row.get("name") or raw.get("name") or "",
                             _json(row.get("raw_json"), {}).get("printed_name") or "", row.get("type_line") or "",
                             _json(row.get("raw_json"), {}).get("printed_type_line") or "",
-                            row.get("oracle_text") or "", row.get("printed_text") or ""))
+                            row.get("oracle_text") or "", row.get("printed_text") or "", raw.get("artist") or ""))
                 if group.get("exception"):
                     out.execute("INSERT INTO identity_exceptions VALUES(?,?,?,?)", (
                         row["id"], group["exception"], group["evidence"],

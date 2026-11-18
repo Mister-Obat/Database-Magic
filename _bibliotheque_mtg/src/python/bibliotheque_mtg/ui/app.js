@@ -2534,7 +2534,7 @@ $("search-form").addEventListener("input", event => {
 });
 $("search-form").addEventListener("change", () => { searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); });
 window.addEventListener("pagehide", persistSearchDraft);
-$("search-form").addEventListener("submit", event => { event.preventDefault(); });
+$("search-form").addEventListener("submit", event => { event.preventDefault(); $("search-submit").click(); });
 $("search-submit").addEventListener("click", () => {
   rememberSearchTerm($("query").value);
   state.searchBaseFilters = mainSearchFilters();
@@ -2604,6 +2604,11 @@ $("deck-submit").addEventListener("click", () => {
   state.deckPage = 0;
   void renderDeckPage();
 });
+for (const id of ["deck-query", "deck-edition-query"]) {
+  $(id).addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); $("deck-submit").click(); }
+  });
+}
 $("clear-deck-filters").addEventListener("click", () => {
   for (const id of ["deck-query", "deck-edition-query", "deck-format", "deck-type", "deck-edition", "deck-color-mode", "deck-image-filter", "deck-sort", "deck-order"]) {
     const field = $(id); field.value = field.options ? field.options[0].value : "";

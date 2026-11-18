@@ -303,6 +303,7 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         edition_codes = []
     name_match = None
     if match is not None and not edition_codes:
+        artist_match = match
         if codes:
             scoped = " OR ".join('set_code : "' + code + '"' for code in codes)
             match = "(" + scoped + ") AND " + match
@@ -332,6 +333,12 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         matches_args = list(args)
         matches_sql += f" UNION SELECT DISTINCT p.printing_id FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id) JOIN search_extra x ON x.provider_card_id=sr.provider_card_id WHERE {base_clause}"
         matches_args.extend(args[:-1])
+        with _connection(db) as artist_connection:
+            has_artist_search = artist_connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='artist_search'").fetchone()
+        if has_artist_search:
+            matches_sql += f" UNION SELECT DISTINCT p.printing_id FROM artist_search JOIN source_records sr ON sr.provider_card_id=artist_search.provider_card_id JOIN printings p USING(printing_id) JOIN editions e USING(set_id) WHERE {base_clause} AND artist_search MATCH ?"
+            matches_args.extend(args[:-1])
+            matches_args.append(artist_match)
         if name_expansion:
             expanded_from = "editions e CROSS JOIN printings p ON p.set_id=e.set_id CROSS JOIN source_records sr ON sr.printing_id=p.printing_id"
             matches_sql += f" UNION SELECT DISTINCT p.printing_id FROM {expanded_from} WHERE {base_clause} AND p.oracle_id IN (SELECT oracle_id FROM search_oracles)"

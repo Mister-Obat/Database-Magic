@@ -46,6 +46,8 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   pas un titre lisible.
 - `ui/index.html`, `ui/app.js`, `ui/styles.css` : affichage navigateur et appels à
   l’API.
+- La recherche libre inclut le nom de l'illustrateur. Entrée dans le champ de
+  recherche de cartes ou de decks déclenche la même action que « Rechercher ».
 - Une nouvelle soumission de Recherche ou de Decks annule côté navigateur la
   requête de liste encore en cours avant de lancer la suivante ; ouvrir une autre
   fiche annule de même le chargement précédent. Les réponses obsolètes restent

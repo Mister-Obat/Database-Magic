@@ -136,7 +136,7 @@ def build_catalogue(source_db, archive, target_db, *, archive_sha256, archive_as
                     out.execute('INSERT INTO printing_languages VALUES(?,?,?)',(printing_id,lang,pid))
                     if exception:
                         out.execute('INSERT INTO identity_exceptions VALUES(?,?,?,?)',(pid,exception,evidence,_canonical({'archive_sha256':archive_sha256,'as_of':archive_as_of,'set_id':first[1],'lang':lang}))); exceptions_n+=1
-                    out.execute('INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?)',(pid,str(obj.get('set') or ''),lang,_search_field(obj,'name'),readable_printed_name or '',_search_field(obj,'type_line'),readable_printed_type or '',_search_field(obj,'oracle_text'),readable_printed_text or ''))
+                    out.execute('INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?,?)',(pid,str(obj.get('set') or ''),lang,_search_field(obj,'name'),readable_printed_name or '',_search_field(obj,'type_line'),readable_printed_type or '',_search_field(obj,'oracle_text'),readable_printed_text or '',_search_field(obj,'artist')))
                     records_n+=1
                 printing_n+=1
             processed+=len(rows)

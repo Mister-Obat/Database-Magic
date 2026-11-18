@@ -135,5 +135,6 @@ CREATE VIRTUAL TABLE source_search USING fts5(
     type_line,
     printed_type_line,
     oracle_text,
-    printed_text
+    printed_text,
+    artist
 );

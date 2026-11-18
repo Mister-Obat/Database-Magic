@@ -55,6 +55,9 @@ version précédente reçoivent la date de construction.
    racine `editions/` reçoit aussi ses deux index.
 5. `v2/query.py` lit ensuite la base créée ; ce module ne décide pas de
    l’affichage de la fiche ni du téléchargement d’image.
+6. Le nom fournisseur de l'illustrateur (`artist`) est indexé dans la recherche
+   des nouvelles publications. Le catalogue actif hérité dispose d'un index
+   FTS `artist_search` local construit depuis `raw_json`, sans téléchargement.
 
 ## Invariants
 
