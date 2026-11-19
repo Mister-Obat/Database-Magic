@@ -1,5 +1,23 @@
 # Module — interface et recherche locales
 
+## Cartes proxy
+
+Dans Perso, **Voir les proxies** ouvre une sous-page paginée. La visionneuse
+affiche l’image locale et propose un choix d’impression réelle par nom et
+édition. La sélection associe les caractéristiques de cette impression à la
+carte de l’édition **Proxy**. Les proxies sont également interrogeables dans
+Recherche et l’édition Proxy arrive en tête d’Éditions tant que le dossier
+contient des images. La recherche d’impression à associer exclut les proxies.
+Ses résultats montrent les miniatures disponibles localement avec aperçu au
+survol. Pour un proxy associé, la fiche propose de réassocier la carte,
+remplacer l’image par un fichier local, exporter l’image sur le Bureau,
+ajouter le proxy à un deck personnel et consulter ses occurrences.
+Le téléchargement d’un proxy sur le Bureau produit une copie PNG de 531 × 738
+pixels avec marges transparentes si nécessaire. L’image du dossier reste intacte.
+Les occurrences distinguent l’impression Proxy de l’ensemble de la carte
+Oracle. La visionneuse initialise le chargement de la nouvelle carte avant
+de rendre sa modale visible.
+
 ## Responsabilité
 
 Présenter le catalogue publié sans dépendance distante pendant la consultation :
@@ -404,6 +422,7 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   lorsque la visionneuse ou la comparaison est fermée. Fermer masque la fenêtre
   sans interrompre la recherche ; seul « Annuler » demande l’arrêt. Les actions
   de la visionneuse sont masquées pendant la recherche pour éviter les doublons.
+  La fiche reste visible et « Annuler » se centre sous l’indicateur dans la zone image.
   Une candidate terminée reste accessible dans les notifications jusqu’au choix
   explicite de conservation ou de remplacement. Le message de succès d’export
   vers le Bureau disparaît après quelques secondes.
@@ -600,7 +619,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
    Un terme n'est traité comme édition que s'il égale son code ou son nom : une
    capacité comme « vol » ne doit pas être capturée par « Revolt ». Chaque
    changement de filtre ou de texte prépare seulement la demande ; le bouton
-   « Rechercher » lance explicitement le moteur unifié. Les critères principaux
+   « Rechercher » ou Entrée depuis un champ texte lance explicitement le moteur
+   unifié via la soumission du formulaire. Les critères principaux
    et secondaires sont soumis ensemble, sans recherche préalable ; une séparation
    visuelle distingue une section secondaire toujours visible. Le nom, le
    sélecteur d'édition et la recherche d'édition sont alignés sur une ligne

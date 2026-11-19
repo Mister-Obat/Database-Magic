@@ -12,6 +12,10 @@ La visionneuse de carte, la recherche et la sélection d’images, la générati
 
 ## Palette
 
+La visionneuse et son voile sombre apparaissent et disparaissent ensemble sur
+130 ms. Le voile conserve sa teinte violette sans flou. Avec la préférence
+système de réduction des animations, l’ouverture et la fermeture sont immédiates.
+
 | Élément | Référence |
 | --- | --- |
 | Fond de page | `#0e0d15`, uni |

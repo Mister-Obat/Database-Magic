@@ -140,6 +140,9 @@ setInterval(() => { void refreshNotifications(); }, 2500);
 void refreshNotifications();
 const EDITION_PAGE_SIZE = 300;
 const SEARCH_PAGE_SIZE = 200;
+const PROXY_PAGE_SIZE = SEARCH_PAGE_SIZE;
+const PROXY_SET_CODE = "proxy";
+const proxyImageRevisions = new Map();
 const ROUTE_VIEWS = new Set(["info", "recherche", "editions", "decks", "perso", "archives"]);
 let imageDemoMode = location.pathname === "/1" ? "existing" : location.pathname === "/2" ? "ai" : null;
 let imageDemoCandidate = null;
@@ -393,7 +396,10 @@ function viewRoute(view = state.view) {
   } else if (view === "archives") {
     add("status", $("archive-status").value); add("page", state.archivePage + 1, 1);
   } else if (view === "perso") {
-    add("deck", personalState.deck?.id);
+    if (proxyState.open) {
+      add("proxies", 1);
+      add("page", proxyState.page + 1, 1);
+    } else add("deck", personalState.deck?.id);
   }
   return `#${view}${query.size ? `?${query}` : ""}`;
 }
@@ -465,6 +471,12 @@ async function restoreRoute() {
     state.deckAppliedFilters = state.deckExecuted ? deckResultFilters() : null;
   } else if (view === "archives") {
     $("archive-status").value = query.get("status") || ""; state.archivePage = routePage(query);
+  } else if (view === "perso" && query.get("proxies") === "1") {
+    proxyState.open = true;
+    proxyState.page = routePage(query);
+    void renderPersonalProxies();
+  } else if (view === "perso" && proxyState.open) {
+    renderPersonalList();
   }
   initialRouteRestored = true;
   const restoreDeckScroll = view === "decks" && state.deckExecuted && !query.has("deck") && state.openDeckId
@@ -476,7 +488,7 @@ async function restoreRoute() {
   }
   setView(view, null);
   if (view === "recherche" && query.get("auto") === "1") { void runSearch(); return; }
-  if (view === "perso" && query.get("deck") && personalState.deck?.id !== query.get("deck"))
+  if (view === "perso" && !proxyState.open && query.get("deck") && personalState.deck?.id !== query.get("deck"))
     void openPersonalDeck(query.get("deck"));
   if (restoreDeckScroll) scrollToDeckList();
   if (view === "recherche" && !state.searchItems.length) {
@@ -509,9 +521,14 @@ function setView(view, urlMode = "push") {
   if (view !== previousView) viewScrollPositions.set(previousView, window.scrollY);
   activateView(view);
   if (urlMode) syncRoute(urlMode);
-  if (view === "editions") void ensureEditions().then(ensureEditionPage);
+  if (view === "editions") {
+    if (previousView !== view && $("edition-select").value === PROXY_SET_CODE) editionPageKey = null;
+    void ensureEditions(previousView !== view).then(ensureEditionPage);
+  }
+  if (view === "recherche" && previousView !== view) void ensureEditions(true);
   if (view === "decks" && !state.openDeckId) void loadDeckFacets().then(() => { if (state.deckExecuted) ensureDeckPage(); });
   if (view === "perso" && !$("personal-content").hasChildNodes() && !new URLSearchParams(location.hash.split("?")[1] || "").has("deck")) void showPersonalDecks();
+  if (view === "perso" && urlMode && previousView !== view && proxyState.open) void renderPersonalProxies();
   if (view === "archives") void ensureArchivePage();
   if (view === "info") void loadMaintenanceStatus();
   if (view !== previousView) {
@@ -527,6 +544,13 @@ function imageNode(slot, className = "card-preview") {
   img.src = `/assets?${params({ path: slot.relative_path })}`;
   img.onerror = () => { const missing = node("div", "missing-image", "Image indisponible"); img.replaceWith(missing); };
   return img;
+}
+function currentCardImageUrl(card) {
+  const revision = proxyImageRevisions.get(card?.provider_card_id);
+  if (!card?.image_url || !revision) return card?.image_url;
+  const url = new URL(card.image_url, location.href);
+  url.searchParams.set("revision", revision);
+  return url.href;
 }
 function cardTile(item) {
   const card = node("article", "card-card");
@@ -566,9 +590,10 @@ function editionTile(item) {
     tile.setAttribute("aria-label", `Ouvrir la carte ${item.printed_name || item.name}`);
     tile.addEventListener("click", () => openCard(item.provider_card_id));
     const slot = (item.image_slots || []).find(face => face.face_index === 0 && face.status === "ready");
-    const art = slot?.relative_path ? node("img", "deck-card-image") : node("div", "deck-card-image deck-card-image-empty", "Image absente");
-    if (slot?.relative_path) {
-      art.src = `/assets?${params({ path: slot.relative_path })}`;
+    const artUrl = currentCardImageUrl(item) || (slot?.relative_path ? `/assets?${params({ path: slot.relative_path })}` : "");
+    const art = artUrl ? node("img", "deck-card-image") : node("div", "deck-card-image deck-card-image-empty", "Image absente");
+    if (artUrl) {
+      art.src = artUrl;
       art.alt = "";
       art.loading = "lazy";
       art.onerror = () => art.replaceWith(node("div", "deck-card-image deck-card-image-empty", "Image indisponible"));
@@ -576,9 +601,9 @@ function editionTile(item) {
     tile.append(art, node("span", "deck-card-name", item.printed_name || item.name));
     return tile;
 }
-function renderEditionItems(container, items) {
+function renderEditionItems(container, items, emptyText = "Aucune carte dans cette édition.") {
   container.replaceChildren();
-  if (!items.length) { container.append(node("p", "empty-state", "Aucune carte dans cette édition.")); return; }
+  if (!items.length) { container.append(node("p", "empty-state", emptyText)); return; }
   for (const item of items) container.append(editionTile(item));
 }
 
@@ -781,6 +806,7 @@ $("version-history-toggle").addEventListener("click", () => {
   if (!list.hidden) void loadVersionHistory();
 });
 let editionsPromise = null;
+let exactEditions = [];
 function groupedEditionCode(code) {
   if (!code) return "";
   return state.editions.find(edition => edition.code === code || edition.code.split(",").includes(code))?.code || code;
@@ -812,11 +838,13 @@ function groupEditions(editions) {
     groups.get(key).members.push(edition.code);
   }
   return [...groups.values()].map(group => ({ ...group, code: [group.code, ...group.members.filter(code => code !== group.code)].join(",") }))
-    .sort((a, b) => (b.released_at || "").localeCompare(a.released_at || "") || a.name.localeCompare(b.name));
+    .sort((a, b) => Number(b.code === PROXY_SET_CODE) - Number(a.code === PROXY_SET_CODE)
+      || (b.released_at || "").localeCompare(a.released_at || "") || a.name.localeCompare(b.name));
 }
 async function loadEditions() {
   const all = []; let offset = 0; let total = Infinity;
   while (offset < total) { const page = await getJSON("/api/v2/editions", { limit: 100, offset }); total = page.total; all.push(...page.items); offset += page.items.length; if (!page.items.length) break; }
+  exactEditions = all;
   const grouped = groupEditions(all);
   state.editions = grouped.map(e => ({ ...e, search_fr: editionSearchKey(e.name_fr || e.name), search_en: editionSearchKey(e.name || e.name_fr) }));
   for (const id of ["filter-set", "edition-select"]) {
@@ -829,7 +857,15 @@ async function loadEditions() {
   renderEditionSuggestions();
   setText($("edition-count"), `${formatNumber(grouped.length)} groupes d’éditions · ${formatNumber(all.length)} séries interrogeables.`);
 }
-function ensureEditions() {
+async function ensureEditions(refreshProxies = false) {
+  if (refreshProxies && editionsPromise) {
+    await editionsPromise;
+    try {
+      const page = await getJSON("/api/v2/editions", { limit: 1 });
+      const hasProxies = page.items[0]?.code === PROXY_SET_CODE;
+      if (hasProxies !== state.editions.some(item => item.code === PROXY_SET_CODE)) editionsPromise = null;
+    } catch { /* Keep the loaded edition list when refresh is unavailable. */ }
+  }
   if (!editionsPromise) editionsPromise = loadEditions().catch(error => { editionsPromise = null; setText($("edition-count"), `Éditions indisponibles : ${error.message}`); });
   return editionsPromise;
 }
@@ -1050,10 +1086,10 @@ function searchFilters() {
   const { result_order, ...backendRefined } = refined;
   return { ...(state.searchBaseFilters || mainSearchFilters()), ...backendRefined, result_sort: resultSort, limit: SEARCH_PAGE_SIZE, offset: state.searchPage * SEARCH_PAGE_SIZE };
 }
-async function runSearch() {
+async function runSearch(updateDraft = true) {
   state.searchExecuted = true;
   if (state.view === "recherche") syncRoute();
-  persistSearchDraft();
+  if (updateDraft) persistSearchDraft();
   hideRecentSearches();
   state.searchController?.abort();
   const controller = new AbortController();
@@ -1064,6 +1100,11 @@ async function runSearch() {
   try {
     const data = await getJSON("/api/v2/search", searchFilters(), { signal: controller.signal });
     if (request !== state.searchRequest) return;
+    const lastPage = Math.max(0, Math.ceil(data.total / SEARCH_PAGE_SIZE) - 1);
+    if (!updateDraft && state.searchPage > lastPage) {
+      state.searchPage = lastPage;
+      return runSearch(false);
+    }
     state.searchTotal = data.total;
     state.searchItems = data.items || [];
     renderEditionItems($("results"), state.searchItems);
@@ -1078,7 +1119,8 @@ async function runSearch() {
 }
 async function refreshSearchImages() {
   const button = $("refresh-search-results"), items = state.searchItems, request = state.searchRequest;
-  if (!items.length) return;
+  const printings = [...new Set(items.filter(item => !item.proxy).map(item => item.printing_id).filter(Boolean))];
+  if (!printings.length) return;
   state.searchController?.abort();
   const controller = new AbortController();
   state.searchController = controller;
@@ -1086,10 +1128,10 @@ async function refreshSearchImages() {
   setText($("search-status"), "Actualisation des images locales…");
   try {
     const data = await postJSON("/api/v2/search/image-slots", {
-      printing_ids: [...new Set(items.map(item => item.printing_id).filter(Boolean))],
+      printing_ids: printings,
     }, { signal: controller.signal });
     if (request !== state.searchRequest || items !== state.searchItems) return;
-    for (const item of items) item.image_slots = data.image_slots?.[item.printing_id] || [];
+    for (const item of items) if (!item.proxy) item.image_slots = data.image_slots?.[item.printing_id] || [];
     renderEditionItems($("results"), items);
     setText($("search-status"), `${formatNumber(state.searchTotal)} résultat(s) · images actualisées`);
   } catch (error) {
@@ -1119,8 +1161,9 @@ function batchTimeRemaining(task) {
 function deckResultFilters() { return { q: $("deck-query").value.trim(), deck_format: multiValue("deck-format"), deck_type: multiValue("deck-type"), set_code: multiValue("deck-edition"), colors: selectedManaColors(document.querySelector(".deck-color-filter")), color_mode: $("deck-color-mode").value, sort: $("deck-sort").value, order: $("deck-order").value, image_filter: $("deck-image-filter").value }; }
 function deckHasFilter() { const f = state.deckAppliedFilters || {}; return Boolean(f.q || f.deck_format || f.deck_type || f.set_code || f.colors); }
 function updateBatchButtons() {
-  $("download-search-results").disabled = Boolean(batchTaskId) || !state.searchExecuted || !state.searchTotal;
-  $("download-edition-results").disabled = Boolean(batchTaskId) || !$("edition-select").value || !state.editionCardsTotal;
+  $("download-search-results").disabled = Boolean(batchTaskId) || !state.searchExecuted || !state.searchTotal || state.searchBaseFilters?.set === PROXY_SET_CODE;
+  const edition = $("edition-select").value;
+  $("download-edition-results").disabled = Boolean(batchTaskId) || !edition || edition === PROXY_SET_CODE || !state.editionCardsTotal;
   $("download-deck-results").disabled = Boolean(batchTaskId) || !state.deckExecuted || !deckHasFilter() || !state.deckTotal;
 }
 function batchStatusElement(mode) { return $({ search: "search-batch-status", edition: "edition-batch-status", decks: "deck-batch-status" }[mode]); }
@@ -1267,6 +1310,8 @@ function galleryContextFor(providerId) {
     for (const [, cards] of ordered) for (const card of cards) if (card.provider_card_id) rows.push(card);
     return { kind: "deck", rows: galleryRecords(rows), current: id };
   }
+  if (state.view === "perso" && proxyState.open)
+    return { kind: "proxy", page: proxyState.page, total: proxyState.total, rows: galleryRecords(visible("#personal-proxy-grid .edition-card-tile")), current: id };
   if (state.view === "perso" && personalState.deck) {
     const cards = personalState.deck.sections.flatMap(section => section.cards).filter(card => card.provider_card_id);
     const opened = cards.find(card => String(card.provider_card_id) === id);
@@ -1283,10 +1328,12 @@ function galleryContextFor(providerId) {
 async function galleryNeighbor(direction) {
   const ctx = state.cardGallery; if (!ctx) return;
   let rows = ctx.rows || [], index = rows.findIndex(x => String(x.provider_card_id) === ctx.current);
-  if (ctx.kind === "search" || ctx.kind === "edition") {
+  if (["search", "edition", "proxy"].includes(ctx.kind)) {
+    const pageSize = { search: SEARCH_PAGE_SIZE, edition: EDITION_PAGE_SIZE, proxy: PROXY_PAGE_SIZE }[ctx.kind];
     const getPage = async page => {
-      const values = ctx.kind === "search" ? { ...ctx.query, offset: page * SEARCH_PAGE_SIZE } : { set: ctx.set, limit: EDITION_PAGE_SIZE, offset: page * EDITION_PAGE_SIZE };
-      const data = await getJSON(ctx.kind === "search" ? "/api/v2/search" : "/api/v2/edition", values);
+      const path = { search: "/api/v2/search", edition: "/api/v2/edition", proxy: "/api/v2/proxies" }[ctx.kind];
+      const values = { ...(ctx.kind === "search" ? ctx.query : { set: ctx.set }), limit: pageSize, offset: page * pageSize };
+      const data = await getJSON(path, values);
       return galleryRecords(data.items);
     };
     rows = ctx.rows || await getPage(ctx.page);
@@ -1300,7 +1347,7 @@ async function galleryNeighbor(direction) {
         page--; rows = await getPage(page); target = rows.length - 1;
       } else {
         if (target >= 0 && target < rows.length) { target++; continue; }
-        if ((page + 1) * (ctx.kind === "edition" ? EDITION_PAGE_SIZE : SEARCH_PAGE_SIZE) >= ctx.total) return;
+        if ((page + 1) * pageSize >= ctx.total) return;
         page++; rows = await getPage(page); target = 0;
       }
     }
@@ -1379,10 +1426,11 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
   const controller = new AbortController();
   state.cardController = controller;
   const request = ++state.cardRequest;
-  const context = gallery || galleryContextFor(providerId); context.current = String(providerId); state.cardGallery = context;
+  const id = String(providerId);
+  const context = gallery || galleryContextFor(providerId); context.current = id; state.cardGallery = context;
   hoverPreview.hidden = true;
-  if (!dialog.open) dialog.showModal();
-  let stage = target.querySelector(".card-image-stage");
+  dialog.querySelector(".proxy-association-preview")?.remove();
+  let stage = target.dataset.providerId === id ? target.querySelector(".card-image-stage") : null;
   if (!stage) {
     const shell = node("section", "card-viewer");
     shell.append(node("header", "card-viewer-header"), node("div", "card-viewer-image", ""));
@@ -1390,8 +1438,10 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     target.replaceChildren(shell);
     stage = shell.querySelector(".card-image-stage");
   }
+  target.dataset.providerId = id;
   stage.replaceChildren(node("div", "card-loading-spinner"));
   target.classList.add("card-detail-loading");
+  if (!dialog.open) dialog.showModal();
   try {
     const data = await getJSON("/api/v2/card", { id: providerId }, { signal: controller.signal });
     if (request !== state.cardRequest || !dialog.open) return;
@@ -1399,8 +1449,8 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     const card = data.card; context.currentPrinting = card.printing_id || card.provider_card_id;
     const shell = node("section", "card-viewer");
     const header = node("header", "card-viewer-header");
-    header.append(node("p", "eyebrow", `${card.edition || card.set_code} · n° ${card.collector_number}`));
-    const imageArea = node("div", "card-viewer-image");
+    header.append(node("p", "eyebrow", [card.edition || card.set_code, card.collector_number && `n° ${card.collector_number}`].filter(Boolean).join(" · ")));
+    const imageArea = node("div", `card-viewer-image${card.proxy ? (card.proxy_source_id ? " linked-proxy-image" : " unlinked-proxy-image") : ""}`);
     const slots = (card.image_slots || []).slice().sort((a,b) => a.face_index - b.face_index);
     let selectedFace = preferredFace !== null && slots.some(x => x.face_index === preferredFace)
       ? preferredFace
@@ -1408,6 +1458,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     const imageWrap = node("div", "card-image-stage");
     const controls = node("div", "card-image-actions");
     const details = node("aside", "card-facts");
+    const association = card.proxy ? proxyAssociationPanel(card, context) : null;
     let detailLanguage = "fr";
     let copyTimer;
     const copyNotice = node("div", "card-copy-notice", "Copié dans le presse-papiers");
@@ -1465,6 +1516,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
       row.append(content); return row;
     };
     const renderDetails = () => {
+      if (association && !card.proxy_source_id) { details.replaceChildren(association); return; }
       const french = card.translations?.find(item => item.lang === "fr");
       const english = card.translations?.find(item => item.lang === "en");
       const fallback = english || card;
@@ -1496,6 +1548,18 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
       }
       title.append(node("span", "card-facts-kicker", "FICHE DE CARTE"), languages);
       const rows = [detailRow("Nom", name, true), detailRow("Coût de mana", mana), detailRow("Type", type), detailRow("Texte de la carte", rules || "Aucun texte de règles", Boolean(rules))];
+      if (association && (enData.card_faces?.length || frData.card_faces?.length) > 1) {
+        const faces = enData.card_faces || frData.card_faces;
+        const switcher = node("div", "face-switcher");
+        faces.forEach((entry, index) => {
+          const button = node("button", "secondary-button", entry.name || `Face ${index + 1}`);
+          button.type = "button";
+          button.setAttribute("aria-pressed", String(index === selectedFace));
+          button.addEventListener("click", () => { selectedFace = index; renderDetails(); });
+          switcher.append(button);
+        });
+        rows.unshift(switcher);
+      }
       if (flavor) {
         const flavorRow = detailRow("Texte d’ambiance", flavor);
         flavorRow.classList.add("card-fact-flavor");
@@ -1510,32 +1574,18 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
         combat.classList.add("card-fact-combat"); footer.append(combat);
       }
       details.replaceChildren(title, ...rows.filter(Boolean), footer, copyNotice);
+      if (association) details.prepend(association);
     };
-    let faceRequest = 0;
-    const renderFace = async () => {
-      const faceLoad = ++faceRequest;
-      const slot = slots.find(x => x.face_index === selectedFace);
-      renderDetails();
-      imageWrap.replaceChildren(node("div", "card-loading-spinner"));
-      let visual;
-      if (slot?.status === "ready") {
-        const img = node("img", "card-viewer-art");
-        img.alt = card.printed_name || card.name || "Image de carte";
-        img.loading = "eager";
-        img.src = `/assets?${params({ path: slot.relative_path })}`;
-        try { await img.decode(); visual = img; }
-        catch { visual = node("div", "card-viewer-missing", "Image indisponible"); }
-      } else visual = node("div", "card-viewer-missing", "Image absente");
-      if (faceLoad !== faceRequest || request !== state.cardRequest || !dialog.open) return;
-      imageWrap.replaceChildren(visual);
-      controls.replaceChildren();
-      const ready = slot?.status === "ready";
+    const buildImageSearch = ready => {
       const action = node("button", "secondary-button card-image-search"); action.type = "button"; action.append(cardActionIcon("search"));
       action.setAttribute("aria-label", ready ? "Rechercher une meilleure image" : "Rechercher une image");
       action.addEventListener("click", async () => {
         const demoThisCard = Boolean(imageDemoMode && imageDemoCandidate && card.provider_card_id === imageDemoCardId);
         if (ready && !demoThisCard && !resumedPreview && !window.confirm("Voulez-vous rechercher une meilleure image ?")) return;
-        action.disabled = true; controls.classList.add("image-search-pending"); imageWrap.replaceChildren(node("div", "card-loading-spinner"));
+        action.disabled = true; controls.classList.add("image-search-pending");
+        const loading = node("div", "image-search-loading");
+        loading.append(node("div", "card-loading-spinner"));
+        imageWrap.replaceChildren(loading);
         let downloadedOtherFaces = false;
         let previewTaskId = null;
         try {
@@ -1560,9 +1610,9 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           cancelPreview.addEventListener("click", async () => {
             cancelPreview.disabled = true;
             try { await postJSON("/api/v2/image/task/cancel", { task_id: previewTaskId }); }
-            catch (error) { cancelPreview.disabled = false; controls.append(node("p", "error-state", error.message)); }
+            catch (error) { cancelPreview.disabled = false; loading.append(node("p", "error-state", error.message)); }
           });
-          controls.append(cancelPreview);
+          loading.append(cancelPreview);
           imageTaskHandlers.set(previewTaskId, { open: () => openImagePreviewTask(previewTaskId) });
           void refreshNotifications();
           do {
@@ -1879,15 +1929,37 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
             else { imageArea.replaceChildren(imageWrap, controls); await renderFace(); controls.append(node("p", "error-state", error.message)); }
           }
           if (previewTaskId) { imageTaskHandlers.delete(previewTaskId); void refreshNotifications(); }
-        } finally { controls.classList.remove("image-search-pending"); controls.querySelector(".image-search-cancel")?.remove(); }
+        } finally { controls.classList.remove("image-search-pending"); loading.querySelector(".image-search-cancel")?.remove(); }
       });
-      controls.append(action);
+      return action;
+    };
+    let faceRequest = 0;
+    const renderFace = async () => {
+      const faceLoad = ++faceRequest;
+      const slot = slots.find(x => x.face_index === selectedFace);
+      renderDetails();
+      imageWrap.replaceChildren(node("div", "card-loading-spinner"));
+      let visual;
+      const ready = Boolean(card.image_url || slot?.status === "ready");
+      if (ready) {
+        const img = node("img", "card-viewer-art");
+        img.alt = card.printed_name || card.name || "Image de carte";
+        img.loading = "eager";
+        img.src = currentCardImageUrl(card) || `/assets?${params({ path: slot.relative_path })}`;
+        try { await img.decode(); visual = img; }
+        catch { visual = node("div", "card-viewer-missing", "Image indisponible"); }
+      } else visual = node("div", "card-viewer-missing", "Image absente");
+      if (faceLoad !== faceRequest || request !== state.cardRequest || !dialog.open) return;
+      imageWrap.replaceChildren(visual);
+      controls.replaceChildren();
+      if (card.proxy && !card.proxy_source_id) return;
+      if (!card.proxy) controls.append(buildImageSearch(ready));
       {
         const fileInput = node("input", "image-import-input");
         fileInput.type = "file"; fileInput.accept = "image/*"; fileInput.hidden = true;
         const importButton = node("button", "secondary-button card-image-icon image-import-button"); importButton.append(cardActionIcon("upload"));
         importButton.type = "button";
-        importButton.setAttribute("aria-label", "Importer une image locale");
+        importButton.setAttribute("aria-label", card.proxy ? "Changer l’image du proxy" : "Importer une image locale");
         importButton.addEventListener("click", () => fileInput.click());
         fileInput.addEventListener("change", async () => {
           const file = fileInput.files?.[0]; fileInput.value = "";
@@ -1895,12 +1967,13 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           if (file.size > 20 * 1024 * 1024) { controls.append(node("p", "error-state", "Le fichier dépasse la limite de 20 Mio.")); return; }
           importButton.disabled = true;
           try {
-            const query = params({ provider_card_id: card.provider_card_id, face_index: selectedFace });
+            const query = params({ provider_card_id: card.provider_card_id, face_index: card.proxy ? 0 : selectedFace });
             const response = await fetch(`/api/v2/image/import?${query}`, { method: "POST", headers: { Accept: "application/json", "Content-Type": file.type || "application/octet-stream" }, body: file });
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
-            refreshCurrentCollection();
-            await openCard(card.provider_card_id, context, selectedFace);
+            if (card.proxy) proxyImageRevisions.set(card.provider_card_id, String(Date.now()));
+            refreshCurrentCollection(card.proxy);
+            if (dialog.open && request === state.cardRequest) await openCard(card.provider_card_id, context, selectedFace);
           } catch (error) { controls.append(node("p", "error-state", `Import impossible : ${error.message}`)); importButton.disabled = false; }
         });
         controls.append(importButton, fileInput);
@@ -1909,14 +1982,16 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
         const exportButton = node("button", "secondary-button card-image-icon image-export-button"); exportButton.append(cardActionIcon("download"));
         exportButton.type = "button";
         exportButton.setAttribute("aria-label", "Télécharger l’image sur le Bureau");
-        exportButton.disabled = slot?.status !== "ready";
+        exportButton.disabled = !ready;
         exportButton.addEventListener("click", async () => {
           exportButton.disabled = true;
           try {
-            const result = await postJSON("/api/v2/image/export", { provider_card_id: card.provider_card_id, face_index: selectedFace });
+            const result = await postJSON("/api/v2/image/export", { provider_card_id: card.provider_card_id, face_index: card.proxy ? 0 : selectedFace });
+            if (!exportButton.isConnected) return;
             const status = node("p", "card-export-status", `Image enregistrée : ${result.path}`);
-            controls.querySelector(".card-export-status")?.remove();
-            controls.append(status);
+            status.setAttribute("role", "status");
+            imageWrap.querySelector(".card-export-status")?.remove();
+            imageWrap.append(status);
             setTimeout(() => status.remove(), 4000);
           } catch (error) {
             controls.append(node("p", "error-state", `Export impossible : ${error.message}`));
@@ -2110,13 +2185,21 @@ async function openAIReviewTask(taskId, summary = {}) {
     $("notification-panel").hidden = true;
   }
 }
-function refreshCurrentCollection() {
+function refreshCurrentCollection(proxyImage = false) {
   if (state.view === "editions") void renderEditionPage();
-  else if (state.view === "recherche") void refreshSearchImages();
+  else if (state.view === "recherche") {
+    if (proxyImage) void runSearch(false);
+    else void refreshSearchImages();
+  }
   else if (state.view === "decks") {
     void renderDeckPage();
     if (state.selectedDeck?.id) void openDeck(state.selectedDeck.id);
   } else if (state.view === "info") void loadHome();
+  else if (state.view === "perso" && proxyImage) {
+    if (proxyState.open) void renderPersonalProxies();
+    else if (personalState.deck) renderPersonalEditor();
+    else renderPersonalList();
+  }
 }
 function renderVerifiedFrenchText(container, frenchText, provenance = null) {
   container.replaceChildren();
@@ -2751,8 +2834,8 @@ $("search-form").addEventListener("input", event => {
 });
 $("search-form").addEventListener("change", () => { searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); });
 window.addEventListener("pagehide", persistSearchDraft);
-$("search-form").addEventListener("submit", event => { event.preventDefault(); $("search-submit").click(); });
-$("search-submit").addEventListener("click", () => {
+$("search-form").addEventListener("submit", event => {
+  event.preventDefault();
   rememberSearchTerm($("query").value);
   state.searchBaseFilters = mainSearchFilters();
   state.refineFilters = refineSearchFilters();
@@ -2769,7 +2852,10 @@ $("download-search-results").addEventListener("click", () => void startBatchDown
 $("download-edition-results").addEventListener("click", () => void startBatchDownload("edition"));
 $("download-deck-results").addEventListener("click", () => void startBatchDownload("decks"));
 $("refresh-search-results").addEventListener("click", () => void refreshSearchImages());
-$("refresh-edition-results").addEventListener("click", () => void renderEditionPage());
+$("refresh-edition-results").addEventListener("click", async () => {
+  await ensureEditions(true);
+  if (state.view === "editions") void renderEditionPage();
+});
 $("refresh-deck-results").addEventListener("click", () => void refreshDeckResults());
 $("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("refresh-search-results").disabled = false; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
 $("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
@@ -2919,7 +3005,7 @@ $("close-dialog").addEventListener("click",()=>$("card-dialog").close());
 $("card-dialog").addEventListener("click",(event)=>{if(event.target===$("card-dialog"))$("card-dialog").close();});
 $("card-dialog").addEventListener("close",()=>{hoverPreview.hidden=true;requestAnimationFrame(()=>{hoverPreview.hidden=true;});});
 document.addEventListener("keydown", event => {
-  if (!$("card-dialog").open || $("image-choice-dialog").open || event.target.closest?.(".personal-picker") || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  if (!$("card-dialog").open || $("image-choice-dialog").open || event.target.closest?.(".personal-picker, .proxy-association") || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
   const target = event.target;
   if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "") || event.defaultPrevented) return;
   event.preventDefault(); galleryNeighbor(event.key === "ArrowLeft" ? -1 : 1);
@@ -2938,7 +3024,6 @@ setupMultiFilters();
 activateView(ROUTE_VIEWS.has(initialView) ? initialView : "info");
 initialInfo = loadHome();
 initialEditions = ensureEditions();
-void restoreRoute();
 if (imageDemoMode) {
   void (async () => {
     try {
@@ -2955,12 +3040,203 @@ if (imageDemoMode) {
 
 // Personal compositions live outside the versioned catalogue. Drafts survive navigation/reload.
 const personalState = { editing: false, deck: null, change: 0, saved: 0, saving: null, error: null, timer: null, listRequest: 0, drag: null };
+const proxyState = { open: false, page: 0, total: 0, request: 0 };
 const PERSONAL_CURRENT_KEY = "database-magic-personal-current-v1";
 function personalButton(label, action, primary = false) {
     const b = node("button", primary ? "primary-button" : "secondary-button", label);
     b.type = "button";
     b.addEventListener("click", action);
     return b;
+}
+async function renderPersonalProxies() {
+    const request = ++proxyState.request;
+    const root = $("personal-content");
+    $("personal-heading-content").replaceChildren(node("h1", "", "Proxies"));
+    $("personal-heading-content").firstElementChild.id = "personal-title";
+    personalStatus("");
+    const toolbar = node("div", "personal-toolbar");
+    toolbar.append(personalButton("Retour aux decks personnels", () => {
+        renderPersonalList();
+        syncRoute("push");
+    }));
+    const grid = node("div", "results-grid");
+    grid.id = "personal-proxy-grid";
+    grid.setAttribute("aria-live", "polite");
+    const pager = node("div", "pager");
+    const changePage = delta => {
+        proxyState.page += delta;
+        syncRoute();
+        void renderPersonalProxies();
+    };
+    const prev = personalButton("Précédent", () => changePage(-1));
+    const next = personalButton("Suivant", () => changePage(1));
+    const pageLabel = node("span", "muted");
+    pager.hidden = true;
+    pager.append(prev, pageLabel, next);
+    grid.append(node("p", "muted", "Chargement…"));
+    root.replaceChildren(toolbar, grid, pager);
+    try {
+        const data = await getJSON("/api/v2/proxies", { limit: PROXY_PAGE_SIZE, offset: proxyState.page * PROXY_PAGE_SIZE });
+        if (request !== proxyState.request || !grid.isConnected) return;
+        proxyState.total = data.total;
+        const pages = Math.max(1, Math.ceil(data.total / PROXY_PAGE_SIZE));
+        if (proxyState.page >= pages) {
+            proxyState.page = pages - 1;
+            if (state.view === "perso") syncRoute();
+            await renderPersonalProxies();
+            return;
+        }
+        renderEditionItems(grid, data.items, "Aucun proxy dans la collection.");
+        pager.hidden = pages <= 1;
+        prev.disabled = proxyState.page === 0;
+        next.disabled = proxyState.page + 1 >= pages;
+        setText(pageLabel, `Page ${proxyState.page + 1} sur ${pages} · ${formatNumber(data.total)} proxies`);
+    } catch (error) {
+        if (request !== proxyState.request || !grid.isConnected) return;
+        showError(grid, error.message);
+        toolbar.append(personalButton("Réessayer", () => void renderPersonalProxies()));
+    }
+}
+
+function proxyAssociationPanel(card, gallery) {
+    const panel = node("section", "proxy-association");
+    const body = node("div", "proxy-association-body");
+    body.id = "proxy-association-body";
+    const title = node("h2", "", "Associer à une carte officielle");
+    const name = card.printed_name || card.name;
+    const association = node("p", "muted", card.proxy_source_id ? `Associé à ${name}` : `${name} · Aucune carte associée`);
+    const enlarged = node("img", "archive-hover-preview proxy-association-preview");
+    enlarged.hidden = true;
+    enlarged.setAttribute("aria-hidden", "true");
+    $("card-dialog").append(enlarged);
+    const form = node("form", "proxy-association-form");
+    const nameLabel = node("label", "", "Nom de la carte"), query = node("input");
+    query.type = "search";
+    nameLabel.append(query);
+    const editionLabel = node("label", "", "Édition officielle"), edition = node("select");
+    edition.append(new Option("Toutes les éditions", ""));
+    editionLabel.append(edition);
+    const search = node("button", "primary-button", "Rechercher");
+    search.type = "submit";
+    const status = node("p", "muted");
+    status.setAttribute("role", "status");
+    const results = node("div", "proxy-association-results");
+    const pager = node("div", "pager");
+    pager.hidden = true;
+    const prev = personalButton("Précédent", () => void load(page - 1));
+    const next = personalButton("Suivant", () => void load(page + 1));
+    const pageLabel = node("span", "muted");
+    pager.append(prev, pageLabel, next);
+    form.append(nameLabel, editionLabel, search);
+    body.append(title, association, form, status, results, pager);
+    edition.disabled = true;
+    const loadEditionsOnce = () => ensureEditions().then(() => {
+        if (edition.options.length > 1) return;
+        const options = document.createDocumentFragment();
+        for (const item of exactEditions) {
+            if (item.code !== PROXY_SET_CODE) options.append(new Option(`${item.name_fr || item.name} (${item.code})`, item.code));
+        }
+        edition.append(options);
+        edition.disabled = !exactEditions.length;
+    });
+    if (card.proxy_source_id) {
+        body.hidden = true;
+        const toggle = personalButton("Réassocier", () => {
+            body.hidden = !body.hidden;
+            toggle.setAttribute("aria-expanded", String(!body.hidden));
+            toggle.textContent = body.hidden ? "Réassocier" : "Masquer la recherche";
+            if (body.hidden) enlarged.hidden = true;
+            else {
+                void loadEditionsOnce();
+                query.focus();
+            }
+        });
+        toggle.classList.add("proxy-association-toggle");
+        toggle.setAttribute("aria-expanded", "false");
+        toggle.setAttribute("aria-controls", body.id);
+        panel.append(toggle);
+    } else void loadEditionsOnce();
+    panel.append(body);
+
+    let controller, page = 0, filters;
+    const pageSize = 20;
+    const report = (message, error = false) => {
+        setText(status, message);
+        status.classList.toggle("error-state", error);
+    };
+    const associate = async item => {
+        const buttons = [...results.querySelectorAll("button:not(:disabled)")];
+        const controls = [search, ...buttons];
+        const wasHidden = pager.hidden;
+        pager.hidden = true;
+        controls.forEach(button => { button.disabled = true; });
+        report("Enregistrement de l’association…");
+        try {
+            await postJSON("/api/v2/proxies/associate", { provider_card_id: card.provider_card_id, source_id: item.provider_card_id });
+            editionPageKey = null;
+            if (state.searchExecuted && state.searchBaseFilters) void runSearch(false);
+            if (state.view === "editions") void renderEditionPage();
+            if (proxyState.open && state.view === "perso") void renderPersonalProxies();
+            if (panel.isConnected && $("card-dialog").open && gallery.current === card.provider_card_id) {
+                await openCard(card.provider_card_id, gallery);
+            }
+        } catch (error) {
+            report(`Association impossible : ${error.message}`, true);
+            pager.hidden = wasHidden;
+            controls.forEach(button => { button.disabled = false; });
+        }
+    };
+    async function load(requestedPage) {
+        controller?.abort();
+        const current = new AbortController();
+        controller = current;
+        enlarged.hidden = true;
+        pager.hidden = true;
+        results.replaceChildren();
+        report("Recherche…");
+        try {
+            const data = await getJSON("/api/v2/search", { ...filters, official_only: 1, limit: pageSize, offset: requestedPage * pageSize }, { signal: current.signal });
+            if (!panel.isConnected || controller !== current) return;
+            page = requestedPage;
+            for (const item of data.items) {
+                const itemName = item.printed_name || item.name;
+                const row = node("div", "proxy-association-result");
+                const thumbnail = personalImage(item, "proxy-association-thumbnail");
+                if (thumbnail instanceof HTMLImageElement) attachHoverPreview(thumbnail, thumbnail, enlarged);
+                const description = node("div", "proxy-association-description");
+                const set = exactEditions.find(edition => edition.code === item.set_code);
+                const meta = [set?.name_fr || set?.name || item.set_code, `n° ${item.collector_number}`, item.lang?.toUpperCase()].filter(Boolean).join(" · ");
+                description.append(node("strong", "", itemName), node("span", "muted", meta));
+                const selected = item.provider_card_id === card.proxy_source_id;
+                const button = personalButton(selected ? "Associée" : "Associer", () => void associate(item));
+                button.disabled = selected;
+                button.setAttribute("aria-label", selected ? `${itemName}, impression associée` : `Associer à ${itemName}, ${meta}`);
+                row.append(thumbnail, description, button);
+                results.append(row);
+            }
+            report(data.total ? `${formatNumber(data.total)} résultat(s)` : "Aucune carte trouvée.");
+            const pages = Math.ceil(data.total / pageSize);
+            pager.hidden = pages <= 1;
+            prev.disabled = page === 0;
+            next.disabled = page + 1 >= pages;
+            setText(pageLabel, `Page ${page + 1} sur ${pages}`);
+        } catch (error) {
+            if (controller === current && !current.signal.aborted && panel.isConnected) report(`Recherche impossible : ${error.message}`, true);
+        }
+    }
+    form.addEventListener("submit", event => {
+        event.preventDefault();
+        if (search.disabled) return;
+        const q = query.value.trim(), set = edition.value;
+        if (!q && !set) {
+            report("Saisissez un nom ou choisissez une édition.");
+            query.focus();
+            return;
+        }
+        filters = { q, set };
+        void load(0);
+    });
+    return panel;
 }
 function personalRead(key) {
     try {
@@ -3080,11 +3356,12 @@ function personalColors(values, onChange) {
 }
 function personalImage(card, className = "deck-card-image") {
     const path = card?.image_path || card?.image_slots?.find(s => s.status === "ready" && s.face_index === 0)?.relative_path;
-    if (!path)
+    const imageUrl = currentCardImageUrl(card) || (path ? `/assets?${params({ path })}` : "");
+    if (!imageUrl)
         return node("div", `${className} deck-card-image-empty`, card ? "Image absente" : "Deck vide");
     const img = node("img", className);
     img.draggable = false;
-    img.src = `/assets?${params({ path })}`;
+    img.src = imageUrl;
     img.alt = card.printed_name || card.name || "Carte";
     img.loading = "lazy";
     img.onerror = () => img.replaceWith(node("div", `${className} deck-card-image-empty`, "Image indisponible"));
@@ -3103,7 +3380,7 @@ async function showPersonalDecks() {
     renderPersonalList();
 }
 async function refreshPersonalOnFocus() {
-    if (document.hidden || state.view !== "perso") return;
+    if (document.hidden || state.view !== "perso" || proxyState.open) return;
     const deck = personalState.deck;
     if (!deck) { renderPersonalList(); return; }
     if (personalState.saving || personalState.change !== personalState.saved) return;
@@ -3137,12 +3414,18 @@ function deckCoverTile(name, colors, cover, open) {
     return tile;
 }
 function renderPersonalList(initialDecks = null) {
+    proxyState.open = false;
     updatePersonalHeading();
     const root = $("personal-content");
     let decks = initialDecks;
     const create = personalButton("Créer un deck", () => renderPersonalCreate(() => decks), true);
     const actions = node("div", "personal-toolbar");
-    actions.append(create);
+    actions.append(create, personalButton("Voir les proxies", () => {
+        proxyState.open = true;
+        proxyState.page = 0;
+        syncRoute("push");
+        void renderPersonalProxies();
+    }));
     const form = node("form", "search-form"), row = node("div", "search-primary-row personal-filter-row");
     const nameLabel = node("label", "", "Nom du deck"), name = node("input");
     name.type = "search";
@@ -3270,6 +3553,7 @@ function renderPersonalCreate(previousDecks) {
     name.focus();
 }
 function adoptPersonalDeck(deck) {
+    proxyState.open = false;
     personalState.editing = false;
     personalState.deck = deck;
     personalState.change = 0;
@@ -3282,9 +3566,11 @@ function adoptPersonalDeck(deck) {
 }
 async function openPersonalDeck(id) {
     const root = $("personal-content");
-    root.replaceChildren(node("p", "muted", "Chargement du deck…"));
+    const loading = node("p", "muted", "Chargement du deck…");
+    root.replaceChildren(loading);
     try {
         const result = await getJSON("/api/v2/personal-deck", { id });
+        if (!loading.isConnected) return;
         const draft = personalRead(`personal-draft-${id}`);
         adoptPersonalDeck(result.deck);
         if (draft) {
@@ -3296,6 +3582,7 @@ async function openPersonalDeck(id) {
         }
     }
     catch (error) {
+        if (!loading.isConnected) return;
         showError(root, error.message);
         root.append(personalButton("Retour à la liste", () => {
             personalStore(PERSONAL_CURRENT_KEY, null);
@@ -3719,3 +4006,4 @@ window.addEventListener("beforeunload", event => {
         event.returnValue = "";
     }
 });
+void restoreRoute();

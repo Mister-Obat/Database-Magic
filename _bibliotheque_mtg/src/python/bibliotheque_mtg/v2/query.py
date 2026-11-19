@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unicodedata
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 CONTRACT_VERSION = "2.0.0"
@@ -44,6 +44,11 @@ def _readable_record(row):
 
 def _extra_matches(db, match, name_match):
     """Index alternate names without modifying the published catalogue."""
+    if Path(db).name == "proxies.sqlite":
+        with closing(sqlite3.connect(":memory:")) as index:
+            _build_extra_index(index, db)
+            return tuple([row[0] for row in index.execute(
+                "SELECT provider_card_id FROM extra WHERE extra MATCH ?", (pattern,))] for pattern in (match, name_match))
     global _EXTRA_SEARCH_KEY, _EXTRA_SEARCH_DB
     # Published snapshot paths are unique per version; image-slot writes do not
     # change source text and must not rebuild this index.

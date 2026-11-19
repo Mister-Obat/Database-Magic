@@ -7,6 +7,21 @@ Importer les métadonnées des fournisseurs, décider quelles éditions sont
 traductions, faces et exports du catalogue V2. C’est la source de vérité textuelle
 de l’application locale.
 
+## Édition locale Proxy
+
+Le dossier `proxy/` à la racine contient les images personnelles. Le module
+`proxies.py` produit un index SQLite dans `_bibliotheque_mtg/state/` et
+enregistre séparément les associations fichier → impression réelle. Le nom du
+fichier identifie le proxy. Une association reprend les caractéristiques et
+traductions de l’impression source dans l’index local, avec des identifiants
+propres, le code d’édition `proxy` et l’image du dossier. La base publiée reste
+en lecture seule pour ce parcours. La suppression du fichier retire le proxy
+du catalogue.
+
+Le remplacement depuis la fiche réencode l’image dans le format de son fichier
+local et conserve son identifiant et son association. Les decks personnels
+stockent l’impression Proxy et chargent son image et ses données courantes.
+
 ## Emplacements
 
 - `sources.py` : client HTTP, cache, validation gzip JSONL, pages Scryfall et

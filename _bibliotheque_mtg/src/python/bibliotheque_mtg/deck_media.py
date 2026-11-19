@@ -130,7 +130,7 @@ def _deck_title(deck: dict[str, Any]) -> str:
 
 
 def export_deck_to_desktop(deck: dict[str, Any], catalog_db: Path,
-                           desktop: Path | None = None) -> dict[str, Any]:
+                           desktop: Path | None = None, *, proxy_lookup=None) -> dict[str, Any]:
     """Export all physical faces as PNG, refusing incomplete decks before writing."""
     if desktop is None:
         desktop = Path.home() / "Desktop"
@@ -143,12 +143,21 @@ def export_deck_to_desktop(deck: dict[str, Any], catalog_db: Path,
             token_section = section.casefold() == "tokens"
             for card in cards:
                 provider_id = card.get("provider_card_id")
-                printing = _printing(conn, provider_id, card.get("set_code")) if provider_id else None
-                if not printing:
-                    raise ValueError(f"Impression introuvable pour {card.get('name', 'carte')}")
-                faces = printing["faces"]
-                if not faces or any(face["status"] != "ready" or not _valid_asset(version, face["relative_path"]) for face in faces):
-                    raise ValueError(f"Images incomplètes pour {card.get('printed_name') or card.get('name')}: toutes les faces physiques doivent être prêtes")
+                linked = proxy_lookup(provider_id) if proxy_lookup and card.get("set_code") == "proxy" else None
+                if linked:
+                    current, path = linked
+                    card.update(current)
+                    if not _valid_asset(path.parent, path.name):
+                        raise ValueError(f"Image du proxy indisponible pour {card.get('name', 'carte')}")
+                    sources = [(0, path)]
+                else:
+                    printing = _printing(conn, provider_id, card.get("set_code")) if provider_id else None
+                    if not printing:
+                        raise ValueError(f"Impression introuvable pour {card.get('name', 'carte')}")
+                    faces = printing["faces"]
+                    if not faces or any(face["status"] != "ready" or not _valid_asset(version, face["relative_path"]) for face in faces):
+                        raise ValueError(f"Images incomplètes pour {card.get('printed_name') or card.get('name')}: toutes les faces physiques doivent être prêtes")
+                    sources = [(face["face_index"], (version / face["relative_path"]).resolve()) for face in faces]
                 name = str(card.get("printed_name") or card.get("name") or "Carte")
                 mana = 0 if token_section else card.get("mana_value")
                 mana_label = str(int(mana)) if isinstance(mana, (int, float)) and float(mana).is_integer() else str(mana if mana is not None else 0)
@@ -156,14 +165,13 @@ def export_deck_to_desktop(deck: dict[str, Any], catalog_db: Path,
                 if quantity < 1:
                     raise ValueError(f"Quantité invalide pour {name}")
                 for copy_index in range(1, quantity + 1):
-                    for face in faces:
-                        suffix = f" (face {face['face_index'] + 1})" if len(faces) > 1 else ""
+                    for face_index, source in sources:
+                        suffix = f" (face {face_index + 1})" if len(sources) > 1 else ""
                         if quantity > 1:
                             suffix += f" ({copy_index})"
                         stem = _safe_name(f"{mana_label} - {name}{suffix}")
-                        source = (version / face["relative_path"]).resolve()
                         output_subdir = Path("Jetons") if token_section else Path()
-                        todo.append((source, output_subdir, stem, face["face_index"]))
+                        todo.append((source, output_subdir, stem, face_index))
     finally:
         conn.close()
     if not todo:

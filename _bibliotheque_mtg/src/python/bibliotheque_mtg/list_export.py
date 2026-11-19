@@ -5,9 +5,10 @@ import io
 import shutil
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .deck_media import _safe_name, _valid_asset
+from .images import OUTPUT_SIZE
 from .v2.query import connect
 
 
@@ -16,15 +17,19 @@ def _mana_label(value) -> str:
     return str(int(number)) if number.is_integer() else str(number)
 
 
-def _png(source: Path | None) -> bytes:
+def _png(source: Path | None, *, normalize=False) -> bytes:
     output = io.BytesIO()
     if source is None:
         image = Image.new("RGB", (531, 738), "white")
     else:
         with Image.open(source) as original:
-            image = original.convert("RGBA")
+            image = ImageOps.exif_transpose(original).convert("RGBA") if normalize else original.convert("RGBA")
     try:
-        image.save(output, format="PNG")
+        if normalize:
+            with ImageOps.pad(image, OUTPUT_SIZE, method=Image.Resampling.LANCZOS, color=(0, 0, 0, 0)) as canvas:
+                canvas.save(output, format="PNG")
+        else:
+            image.save(output, format="PNG")
         return output.getvalue()
     finally:
         image.close()
@@ -108,15 +113,21 @@ def export_card_to_desktop(provider_card_id: str, face_index: int, catalog_db: P
     slot = next((item for item in slots if item["face_index"] == face_index), None)
     if slot is None or slot["status"] != "ready" or not _valid_asset(version, slot["relative_path"]):
         raise ValueError("Image locale indisponible pour cette face.")
+    suffix = f" (face {face_index + 1})" if len(slots) > 1 else ""
+    return export_local_card_image(version / slot["relative_path"],
+                                   (row["french_name"] or row["name"]) + suffix, row["mana_value"], desktop)
+
+
+def export_local_card_image(image_path: Path, name: str, mana_value, desktop: Path | None = None,
+                            *, normalize=False) -> dict:
     desktop = Path(desktop) if desktop is not None else Path.home() / "Desktop"
     target = desktop.expanduser().resolve() / "Cartes exportées"
     target.mkdir(parents=True, exist_ok=True)
-    suffix = f" (face {face_index + 1})" if len(slots) > 1 else ""
-    stem = _safe_name(f"{_mana_label(row['mana_value'])} - {row['french_name'] or row['name']}{suffix}")
+    stem = _safe_name(f"{_mana_label(mana_value)} - {name}")
     candidate = target / f"{stem}.png"
     duplicate = 2
     while candidate.exists():
         candidate = target / f"{stem} ({duplicate}).png"
         duplicate += 1
-    candidate.write_bytes(_png(version / slot["relative_path"]))
+    candidate.write_bytes(_png(image_path, normalize=normalize))
     return {"path": str(candidate), "folder": str(target)}

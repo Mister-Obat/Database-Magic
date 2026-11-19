@@ -390,6 +390,24 @@ select[hidden]{display:none!important}
 .card-fact-copy{flex:none;display:grid;place-items:center;width:1.9rem;height:1.9rem;border:1px solid #66577e;border-radius:8px;background:#ffffff0c;color:#cbbaff}
 .card-fact-copy:hover,.card-fact-copy:focus-visible{background:#514169;color:white;border-color:#bba5ff}
 .card-fact-copy svg{width:1rem;height:1rem}
+.proxy-association, .proxy-association-body { display:grid; gap:.8rem; }
+.proxy-association-toggle { justify-self:end; }
+.proxy-association-body[hidden] { display:none; }
+.proxy-association + .card-facts-heading { margin-top:1.25rem; }
+.card-viewer-image.unlinked-proxy-image { padding-inline:0; }
+.linked-proxy-image .image-import-button { top:.25rem; }
+.linked-proxy-image .image-export-button { top:3rem; }
+.linked-proxy-image .personal-add-button { top:5.75rem; }
+.proxy-association h2 { margin:0; font-family:Georgia,serif; }
+.proxy-association :is(p, .pager) { margin:0; }
+.proxy-association p:empty { display:none; }
+.proxy-association-form, .proxy-association-results { display:grid; gap:.65rem; }
+.proxy-association-form button[type="submit"] { justify-self:start; }
+.proxy-association-result { display:grid; grid-template-columns:3rem minmax(0,1fr) auto; align-items:center; gap:.65rem; padding:.6rem 0; border-top:1px solid var(--line); }
+.proxy-association-thumbnail { width:100%; aspect-ratio:531/738; object-fit:contain; border-radius:4px; }
+.proxy-association-thumbnail.deck-card-image-empty { font-size:.68rem; }
+.proxy-association-description { display:grid; gap:.2rem; overflow-wrap:anywhere; }
+.proxy-association-result .muted { font-size:.82rem; }
 @media(max-width:700px){.card-dialog{width:96vw}.card-viewer-body{grid-template-columns:1fr;grid-template-rows:minmax(220px,48%) minmax(0,1fr);gap:.6rem}.card-facts{padding:1rem}.card-viewer-art,.card-viewer-missing{max-height:100%}}
 .card-viewer-image{position:relative;display:grid;grid-template-rows:minmax(0,1fr);justify-items:center;width:100%;min-height:0;padding:0 0 0 3.2rem;gap:.35rem}
 .card-image-stage{display:grid;place-items:center;width:100%;height:auto;min-height:0;align-self:stretch;position:relative}
@@ -534,7 +552,7 @@ select[hidden]{display:none!important}
 .image-import-button{top:3rem}
 .image-export-button{top:5.75rem}
 .card-face-flip{top:8.5rem}
-.card-export-status{position:absolute;left:3rem;top:5.75rem;max-width:min(30rem,calc(100vw - 6rem));padding:.4rem .6rem;border-radius:6px;background:var(--panel2);color:var(--green2);overflow-wrap:anywhere;pointer-events:auto}
+.card-export-status{position:absolute;z-index:1;inset-inline:1rem;bottom:1rem;width:max-content;max-width:min(30rem,calc(100% - 2rem));box-sizing:border-box;margin:0 auto;padding:.4rem .6rem;border-radius:6px;background:var(--panel2);color:var(--green2);text-align:center;overflow-wrap:anywhere}
 .edition-search input:focus-visible{position:relative;z-index:6}
 @media(max-width:760px){.edition-browser{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:430px){.filter-grid>.edition-browser{grid-column:1}.edition-browser{grid-template-columns:minmax(0,1fr)}}
@@ -1049,6 +1067,19 @@ select[hidden]{display:none!important}
   background:linear-gradient(145deg,#282139,#191725 72%);
 }
 :is(.card-dialog,.image-choice-dialog,.ai-translation-dialog,.card-usages-dialog)::backdrop{background:#070610cc}
+.card-dialog::backdrop{backdrop-filter:none}
+@media (prefers-reduced-motion:no-preference){
+  @supports (transition-behavior:allow-discrete) and (overlay:auto){
+    .card-dialog,.card-dialog::backdrop{
+      opacity:0;
+      transition:opacity 130ms ease-out,display 130ms allow-discrete,overlay 130ms allow-discrete;
+    }
+    .card-dialog[open],.card-dialog[open]::backdrop{opacity:1}
+    @starting-style{
+      .card-dialog[open],.card-dialog[open]::backdrop{opacity:0}
+    }
+  }
+}
 :is(.card-dialog,.image-choice-dialog,.ai-translation-dialog) :is(input,textarea,select,.custom-select-button){
   background:#14121e;
   border-color:var(--line);
@@ -1113,9 +1144,8 @@ select[hidden]{display:none!important}
 .image-choice-dialog .comparison-column-stage{background:#211c30;border-color:#494059}
 .image-choice-dialog .comparison-preview-pane,
 .image-choice-dialog .comparison-column-stage{background:#14121e}
-.card-image-actions.image-search-pending>button:not(.image-search-cancel),
-.card-image-actions.image-search-pending>input{display:none}
-.card-image-actions .image-search-cancel{position:absolute;left:50%;bottom:1rem;transform:translateX(-50%);white-space:nowrap}
+.card-image-actions.image-search-pending{display:none}
+.image-search-loading{display:grid;justify-items:center;gap:1rem;text-align:center}
 .image-choice-dialog .image-comparison[data-step='compare'] .comparison-current-panel{
   height:100%;
   min-height:0;
@@ -1181,7 +1211,6 @@ select[hidden]{display:none!important}
 .image-choice-dialog .comparison-selection-pane .ai-step-actions button{min-width:0;white-space:normal}
 .image-choice-dialog .comparison-selection-pane .ai-step-actions button[hidden]{display:none}
 .image-choice-dialog .comparison-selection-pane .ai-step-actions button:last-child,.image-choice-dialog .comparison-selection-pane .ai-step-actions button:nth-last-child(2){grid-column:1/-1}
-.card-image-actions .image-search-cancel:is(:hover,:focus-visible)::after{content:none}
 .ai-translation-actions{justify-content:center}
 .image-choice-dialog .image-comparison[data-step='review']>.review-footer,
 .image-choice-dialog .image-comparison[data-step='review'] .review-footer .ai-actions{justify-content:center}
@@ -1628,12 +1657,14 @@ select[hidden]{display:none!important}
 }
 
 /* The preferred column count yields to a readable minimum on narrow grids. */
-:is(.deck-cards, #results, #edition-cards, #list-import-results, .personal-deck-grid) {
+:is(.deck-cards, #results, #edition-cards, #list-import-results, #personal-proxy-grid, .personal-deck-grid) {
   --grid-gap:.8rem;
   --preferred-tile-width:calc((100% - (var(--card-grid-columns, 9) - 1) * var(--grid-gap)) / var(--card-grid-columns, 9) - .1px);
   grid-template-columns:repeat(auto-fill, minmax(clamp(min(100%, 5.5rem), var(--preferred-tile-width), 100%), 1fr));
   gap:var(--grid-gap);
 }
+#personal-proxy-grid .edition-card-tile { height:100%; }
+#personal-proxy-grid > p { grid-column:1/-1; }
 :is(.deck-card-tile, .personal-deck-tile) {
   container-type:inline-size;
   overflow-wrap:anywhere;

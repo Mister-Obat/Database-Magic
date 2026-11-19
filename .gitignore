@@ -74,6 +74,9 @@ Thumbs.db
 /_bibliotheque_mtg/schemas/examples/
 
 # Project knowledge is maintained with the source
+/proxy/*
+!/proxy/README.md
+
 /protocole.md
 /Protocole_Bibliotheque_Magic_Indexation_JSON_Images_PNG.md
 /Magic/README_Bibliotheque_Magic.md

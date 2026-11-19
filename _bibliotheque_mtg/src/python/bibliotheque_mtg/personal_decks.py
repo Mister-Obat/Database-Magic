@@ -322,13 +322,20 @@ def import_preconstructed(path, source, catalog_db):
         return _write(conn, deck)
 
 
-def with_media(deck, catalog_db):
+def with_media(deck, catalog_db, proxy_lookup=None):
     result = copy.deepcopy(deck)
     # Keep snapshot text if the exact card disappears from a future catalogue.
     enriched = enrich_deck_media({"sections": {s["id"]: s["cards"] for s in result["sections"]}}, catalog_db)
     for section in result["sections"]:
         for card, media in zip(section["cards"], enriched["sections"][section["id"]]):
             card.update({key: value for key, value in media.items() if key.startswith("image_")})
+            if proxy_lookup and card.get("set_code") == "proxy":
+                linked = proxy_lookup(card.get("provider_card_id"))
+                if linked:
+                    current, _ = linked
+                    for key in ("name", "printed_name", "type_line", "mana_value", "collector_number", "image_url"):
+                        card[key] = current.get(key)
+                    card.update(image_ready=True, image_status="ready")
     commander = next((s for s in result["sections"] if s.get("source_section") == "commander"), None)
     cover_section = commander if commander is not None else (result["sections"][0] if result["sections"] else None)
     first = cover_section["cards"] if cover_section else []
@@ -338,10 +345,10 @@ def with_media(deck, catalog_db):
     return result
 
 
-def export_deck(path, deck_id, catalog_db, desktop=None):
+def export_deck(path, deck_id, catalog_db, desktop=None, proxy_lookup=None):
     deck = get_deck(path, deck_id)
     sections = {}
     for section in deck["sections"]:
         key = "tokens" if section["name"] == "Jetons" or section.get("source_section") == "tokens" else section["id"]
         sections.setdefault(key, []).extend(section["cards"])
-    return export_deck_to_desktop({**deck, "sections": sections}, catalog_db, desktop)
+    return export_deck_to_desktop({**deck, "sections": sections}, catalog_db, desktop, proxy_lookup=proxy_lookup)

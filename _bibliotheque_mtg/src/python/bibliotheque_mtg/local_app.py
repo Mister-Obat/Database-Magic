@@ -35,7 +35,7 @@ from .decks import (_SET_NAMES_FR, deck_facets, ensure_deck_index, get_deck,
                     index_deck_colors, list_decks, refresh_deck_index)
 from .deck_media import enrich_deck_media, export_deck_to_desktop
 from .list_import import resolve_list, parse_list
-from .list_export import export_card_to_desktop, export_list_to_desktop
+from .list_export import export_card_to_desktop, export_list_to_desktop, export_local_card_image
 from . import personal_decks
 from .v2.card_generation import (generate_card_candidate, extract_card_text_reference,
                                  CardGenerationError)
@@ -45,6 +45,7 @@ from .archive_identification import (ArchiveConflictError, _edition_icon_urls, a
                                      delete_archive_file, describe_archive_target,
                                      cached_archive_ocr, import_manual_archive_choice, propose_archive_ocr,
                                      search_archive_printings)
+from .proxies import Proxies
 
 
 OPS_ROOT = Path(__file__).resolve().parents[3]
@@ -55,11 +56,13 @@ HISTORICAL_INDEX = OPS_ROOT / "reports" / "v2-t4.1-historical-unidentified-index
 HISTORICAL_RESOLVED = OPS_ROOT / "state" / "historical-archive-resolved.json"
 DECK_DB = OPS_ROOT / "state" / "preconstructed-decks.sqlite"
 PERSONAL_DECK_DB = OPS_ROOT / "state" / "personal-decks.sqlite"
+PROXIES = Proxies(OPS_ROOT.parent / "proxy", OPS_ROOT / "state")
+PROXY_ASSOCIATE = "/api/v2/proxies/associate"
 PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                         ("create", "save", "add", "import", "export", "delete")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 30
+APP_API_REVISION = 32
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -1398,6 +1401,7 @@ def _prepare_image_preview(provider_id: str, face_index: int, catalog_db: Path, 
 
 
 def _card_usage(catalog_db: Path, provider_id: str) -> dict:
+    provider_id = str(provider_id)
     """Find confirmed local uses at printing and oracle levels, without network access."""
     def blank():
         return {"editions": [], "decks": [], "personal_decks": []}
@@ -1405,8 +1409,12 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
     exact, global_usage = blank(), blank()
     result = {"found": False, "exact": exact, "global": global_usage,
               **global_usage, "unloaded_decks": 0}
+    proxy = PROXIES.linked(catalog_db, provider_id) if provider_id.startswith("proxy-") else None
+    if provider_id.startswith("proxy-") and not proxy:
+        return result
+    source_id = proxy[0]["proxy_source_id"] if proxy else provider_id
     with connect(catalog_db) as conn:
-        card = conn.execute("SELECT p.printing_id,p.oracle_id FROM source_records sr JOIN printings p USING(printing_id) WHERE sr.provider_card_id=?", (str(provider_id),)).fetchone()
+        card = conn.execute("SELECT p.printing_id,p.oracle_id FROM source_records sr JOIN printings p USING(printing_id) WHERE sr.provider_card_id=?", (source_id,)).fetchone()
         if not card:
             return result
         oracle, printing = card["oracle_id"], card["printing_id"]
@@ -1414,6 +1422,9 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
             FROM printings p JOIN editions e USING(set_id)
             WHERE e.eligibility='eligible' AND (p.oracle_id=? OR p.printing_id=?)""", (oracle, printing)).fetchall()
         printings = {row["printing_id"] for row in rows} | {printing}
+        proxy_printings = PROXIES.printing_ids(catalog_db, oracle)
+        if proxy:
+            proxy_printings.add(proxy[0]["printing_id"])
         id_to_printing = {r[0]: r[1] for r in conn.execute(
             "SELECT sr.provider_card_id,p.printing_id FROM source_records sr JOIN printings p USING(printing_id) WHERE p.oracle_id=? OR p.printing_id=?", (oracle, printing))}
         set_numbers = {}
@@ -1432,6 +1443,11 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
         for usage in (exact, global_usage):
             for edition in usage["editions"]:
                 edition["edition_icon_url"] = icons.get(edition["code"].lower())
+        if proxy_printings:
+            proxy_edition = {"code": "proxy", "name": "Proxy", "name_fr": "Proxy", "released_at": None}
+            global_usage["editions"].insert(0, proxy_edition)
+        if proxy:
+            exact["editions"] = [proxy_edition]
 
         matches = {"exact": {}, "global": {}}
         if DECK_DB.exists():
@@ -1468,7 +1484,7 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
                         continue
                     item = {key: row[key] for key in ("id", "name", "name_fr", "set_code", "set_name", "set_name_fr")}
                     item["colors"] = list(row["colors"]) if row["colors"] is not None else None
-                    if is_exact:
+                    if is_exact and not proxy:
                         matches["exact"][row["id"]] = item
                     if is_global:
                         matches["global"][row["id"]] = item
@@ -1483,9 +1499,9 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
                     cards = [c for section in deck.get("sections", []) for c in section.get("cards", [])]
                     resolved = {c.get("printing_id") or id_to_printing.get(c.get("provider_card_id")) for c in cards}
                     item = {"id": deck["id"], "name": deck["name"], "colors": deck.get("colors")}
-                    if printing in resolved:
+                    if (proxy[0]["printing_id"] if proxy else printing) in resolved:
                         exact["personal_decks"].append(item)
-                    if resolved & printings:
+                    if resolved & (printings | proxy_printings):
                         global_usage["personal_decks"].append(item)
         for usage in (exact, global_usage):
             usage["personal_decks"].sort(key=lambda d: d["name"].casefold())
@@ -1533,11 +1549,15 @@ class LibraryHandler(BaseHTTPRequestHandler):
             if route == "/api/v2/personal-decks":
                 items = personal_decks.list_decks(PERSONAL_DECK_DB, params.get("q", ""),
                                                   list(params.get("colors", "")))
-                self._json({"items": [personal_decks.with_media(deck, self.db) for deck in items]})
+                database = self.db
+                self._json({"items": [personal_decks.with_media(
+                    deck, database, lambda identifier: PROXIES.linked(database, identifier)) for deck in items]})
                 return
             if route == "/api/v2/personal-deck":
                 deck = personal_decks.get_deck(PERSONAL_DECK_DB, params.get("id", ""))
-                self._json({"deck": personal_decks.with_media(deck, self.db)})
+                database = self.db
+                self._json({"deck": personal_decks.with_media(
+                    deck, database, lambda identifier: PROXIES.linked(database, identifier))})
                 return
             if route == "/api/v2/notifications":
                 with _IMAGE_TASKS_LOCK:
@@ -1791,14 +1811,22 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 else:
                     immutable = asset[1] in path.name
                     self._send(200, path.read_bytes(), asset[0], cache_control="private, max-age=31536000, immutable" if immutable else "no-store")
-            elif route in {"/api/v2/editions", "/api/v2/search", "/api/v2/card", "/api/v2/edition"}:
-                result = api.dispatch(self.db, route, params)
+            elif route == "/api/v2/proxies/image":
+                try:
+                    data, content_type = PROXIES.image(params.get("id"))
+                except FileNotFoundError:
+                    self._json({"error": "proxy_not_found"}, 404)
+                else:
+                    self._send(200, data, content_type)
+            elif route in {"/api/v2/proxies", "/api/v2/editions", "/api/v2/search", "/api/v2/card", "/api/v2/edition"}:
+                if route != "/api/v2/card" or str(params.get("id", "")).startswith("proxy-"):
+                    result = PROXIES.dispatch(self.db, route, params, _enrich_result)
+                else:
+                    result = api.dispatch(self.db, route, params)
                 if route == "/api/v2/editions":
                     for edition in result.get("items", []):
                         edition["name_fr"] = _SET_NAMES_FR.get(str(edition["code"]).upper())
-                if route in {"/api/v2/search", "/api/v2/edition"}:
-                    result = _enrich_result(self.db, result)
-                if route == "/api/v2/card" and result.get("found"):
+                if route == "/api/v2/card" and result.get("found") and not result["card"].get("proxy"):
                     card = result["card"]
                     with connect(self.db) as conn:
                         slots = conn.execute(
@@ -1860,7 +1888,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _LIST_TASK, _BATCH_TASK
         route = urllib.parse.urlsplit(self.path).path
-        if route not in PERSONAL_POST_ROUTES and route != "/api/v2/search/image-slots" and route not in {"/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
+        if route not in PERSONAL_POST_ROUTES and route not in {PROXY_ASSOCIATE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
             self._json({"error": "route_not_found"}, 404)
             return
         expected_origin = f"http://127.0.0.1:{self.server.server_port}"
@@ -1884,6 +1912,12 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     self._json({"error": "invalid_import_request"}, 400)
                     return
                 image_bytes = self.rfile.read(length)
+                if provider_id.startswith("proxy-"):
+                    if int(face_index) != 0:
+                        raise ValueError("Un proxy possède une seule image locale.")
+                    result = PROXIES.replace_image(self.db, provider_id, image_bytes)
+                    self._json({"status": "ready", "result": result})
+                    return
                 with _MAINTENANCE_LOCK:
                     if _maintenance_is_active():
                         self._json({"error": "maintenance_in_progress"}, 409)
@@ -1900,8 +1934,14 @@ class LibraryHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json({"error": "json_object_required"}, 400)
                 return
+            if route == PROXY_ASSOCIATE:
+                self._json(PROXIES.associate(self.db, payload.get("provider_card_id"), payload.get("source_id")))
+                return
             if route in PERSONAL_POST_ROUTES:
                 action = route.rsplit("/", 1)[1]
+                database = self.db
+                def proxy_lookup(identifier):
+                    return PROXIES.linked(database, identifier)
                 if action == "create":
                     deck = personal_decks.create_deck(PERSONAL_DECK_DB, payload.get("name"),
                             payload.get("colors", []), payload.get("commander", False))
@@ -1913,8 +1953,16 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     self._json({"deleted": True, "deck_id": deleted["id"], "revision": deleted["revision"]})
                     return
                 elif action == "add":
-                    deck = personal_decks.add_card(PERSONAL_DECK_DB, payload.get("deck_id"), self.db,
-                            payload.get("provider_card_id"), payload.get("printing_id"), payload.get("section_id"))
+                    provider_id = payload.get("provider_card_id")
+                    if isinstance(provider_id, str) and provider_id.startswith("proxy-"):
+                        with PROXIES.lock:
+                            if not proxy_lookup(provider_id):
+                                raise ValueError("Proxy associé introuvable.")
+                            deck = personal_decks.add_card(PERSONAL_DECK_DB, payload.get("deck_id"), PROXIES.database,
+                                    provider_id, payload.get("printing_id"), payload.get("section_id"))
+                    else:
+                        deck = personal_decks.add_card(PERSONAL_DECK_DB, payload.get("deck_id"), database,
+                                provider_id, payload.get("printing_id"), payload.get("section_id"))
                 elif action == "import":
                     source_result = get_deck(DECK_DB, payload.get("deck_id"), catalog_db=self.db,
                                              fetch_missing=False, include_tokens=True)
@@ -1925,9 +1973,10 @@ class LibraryHandler(BaseHTTPRequestHandler):
                         raise ValueError("Ouvrez le préconstruit pour charger sa composition avant de le copier.")
                     deck = personal_decks.import_preconstructed(PERSONAL_DECK_DB, source, self.db)
                 else:
-                    self._json(personal_decks.export_deck(PERSONAL_DECK_DB, payload.get("deck_id"), self.db))
+                    self._json(personal_decks.export_deck(PERSONAL_DECK_DB, payload.get("deck_id"), database,
+                                                        proxy_lookup=proxy_lookup))
                     return
-                self._json({"deck": personal_decks.with_media(deck, self.db)})
+                self._json({"deck": personal_decks.with_media(deck, database, proxy_lookup)})
                 return
             if route == "/api/v2/search/image-slots":
                 printing_ids = payload.get("printing_ids")
@@ -2244,7 +2293,17 @@ class LibraryHandler(BaseHTTPRequestHandler):
                         or not isinstance(provider_id, str) or not 0 < len(provider_id) <= 100
                         or type(face_index) is not int or not 0 <= face_index < 10):
                     raise ValueError("Carte et face attendues.")
-                self._json(export_card_to_desktop(provider_id, face_index, self.db))
+                if provider_id.startswith("proxy-"):
+                    linked = PROXIES.linked(self.db, provider_id)
+                    if face_index != 0 or not linked:
+                        raise ValueError("Image du proxy associé indisponible.")
+                    card, path = linked
+                    fr = next((record for record in card["translations"] if record["lang"] == "fr"), {})
+                    self._json(export_local_card_image(
+                        path, fr.get("printed_name") or card.get("printed_name") or card["name"],
+                        card["mana_value"], normalize=True))
+                else:
+                    self._json(export_card_to_desktop(provider_id, face_index, self.db))
                 return
             if route == "/api/v2/list-import/export":
                 if payload:
