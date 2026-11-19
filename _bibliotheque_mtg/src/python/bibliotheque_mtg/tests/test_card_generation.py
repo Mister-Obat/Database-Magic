@@ -95,7 +95,7 @@ def test_generate_card_candidate_uses_verified_french_text_without_text_image(
     assert Path(result["path"]).is_file()
     assert observed["args"].count("--image") == 1
     assert '"oracle_text": "Vol"' in observed["input"]
-    assert "sole authority" in observed["input"]
+    assert "FRENCH_TEXT_JSON (SUBORDINATE REFERENCE)" in observed["input"]
 
 
 def test_generate_card_candidate_rejects_missing_codex_output(tmp_path, monkeypatch):

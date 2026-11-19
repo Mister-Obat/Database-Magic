@@ -484,10 +484,12 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   de sélection, la pagination et les actions de rafraîchissement peuvent relire
   les résultats.
 - Recherche de cartes et de decks utilisent six sélecteurs visuels W/U/B/R/G/C.
-  Les couleurs cochées sont cumulatives ; C signifie strictement sans couleur
-  et se sélectionne seul. À droite des symboles, le mode « Normal » conserve la
-  recherche par inclusion des couleurs choisies ; le mode « Couleurs exactes »
-  exige exactement cet ensemble de couleurs (mono W, bicolore WU, etc.). Sans
+  Les couleurs W/U/B/R/G cochées sont cumulatives ; C ajoute les cartes
+  sans couleur aux résultats contenant les autres couleurs choisies. En mode
+  « Couleurs exactes », C ajoute les cartes strictement incolores aux cartes
+  dont l’ensemble des couleurs W/U/B/R/G est exact. Le mode « Normal » conserve
+  la recherche par inclusion des couleurs choisies ; le mode « Couleurs exactes »
+  exige exactement cet ensemble (mono W, bicolore WU, etc.). Sans
   couleur choisie, les deux modes ne filtrent pas. Les symboles gardent un nom
   accessible en français. L'état sélectionné reste visuellement stable au clic,
   sans halo de focus de souris ; le focus clavier demeure visible.
@@ -606,7 +608,7 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
    langue disponible. Les images restent attachées à leur impression exacte,
    y compris les images importées ou retouchées localement. Les recherches non fondées sur un nom ne sont pas
    étendues par Oracle. La lecture des lignes affichées est groupée par page.
-   Le filtre couleur des cartes accepte plusieurs couleurs indépendantes ou C
+   Le filtre couleur des cartes accepte plusieurs couleurs indépendantes et C
    pour `colors_key=''`, jamais une chaîne sous-texte ambiguë. `color_mode=exact`
    compare la clé canonique de couleurs complète ; `contains` (défaut) vérifie
    chaque couleur demandée. Le filtre deck suit la même logique sur l'identité

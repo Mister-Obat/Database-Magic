@@ -113,8 +113,8 @@ class QueryV2Tests(unittest.TestCase):
             conn.close()
         self.assertEqual(['fr-1'], [item['provider_card_id'] for item in search_cards(self.db,color='C')['items']])
         self.assertEqual(['fr-1'], [item['provider_card_id'] for item in search_cards(self.db,color='C',color_mode='exact')['items']])
-        with self.assertRaises(ValueError):
-            search_cards(self.db,color='CW')
+        self.assertEqual(['fr-1'], [item['provider_card_id'] for item in search_cards(self.db,color='CW')['items']])
+        self.assertEqual(['fr-1'], [item['provider_card_id'] for item in search_cards(self.db,color='CW',color_mode='exact')['items']])
 
     def test_color_mode_is_validated_without_color_selection(self):
         with self.assertRaises(ValueError):
@@ -226,7 +226,7 @@ class QueryV2Tests(unittest.TestCase):
             record = list(conn.execute("SELECT * FROM source_records WHERE provider_card_id='en-1'").fetchone())
             record[0], record[1] = 'other-card', 'other-printing'
             conn.execute("INSERT INTO source_records VALUES(" + ",".join("?" for _ in record) + ")", record)
-            conn.execute("INSERT INTO source_search SELECT 'other-card',set_code,lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text FROM source_search WHERE provider_card_id='en-1'")
+            conn.execute("INSERT INTO source_search SELECT 'other-card',set_code,lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text,artist FROM source_search WHERE provider_card_id='en-1'")
             conn.execute("INSERT INTO card_faces SELECT 'other-printing',face_index,physical_image FROM card_faces WHERE printing_id=?", (first,))
             conn.execute("INSERT INTO image_slots SELECT printing_id,face_index,'fr',NULL,'missing',NULL,'{}' FROM card_faces WHERE printing_id=?", (first,))
             conn.execute("INSERT INTO image_slots SELECT printing_id,face_index,'fr',NULL,'missing',NULL,'{}' FROM card_faces WHERE printing_id='other-printing'")

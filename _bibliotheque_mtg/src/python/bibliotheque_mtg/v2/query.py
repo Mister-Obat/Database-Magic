@@ -237,23 +237,27 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
     if rarity: filters.append("sr.rarity=?"); args.append(str(rarity).casefold())
     if color:
         selected = set(str(color).upper().replace(",", "").replace(" ", ""))
-        if not selected <= set("WUBRGC") or ("C" in selected and len(selected) > 1):
-            raise ValueError("Couleurs attendues : W, U, B, R, G ou C seule")
-        if "C" in selected:
+        if not selected <= set("WUBRGC"):
+            raise ValueError("Couleurs attendues : W, U, B, R, G ou C")
+        canonical = "".join(symbol for symbol in "WUBRG" if symbol in selected)
+        color_filters = []
+        if color_mode == "exact" and canonical:
+            color_filters.append("length(sr.colors_key)=?")
+            args.append(len(canonical))
+            color_filters.append("sr.colors_key NOT GLOB '*[^WUBRG]*'")
+            for symbol in canonical:
+                color_filters.append("instr(sr.colors_key,?)>0")
+                args.append(symbol)
+        else:
+            for symbol in canonical:
+                color_filters.append("instr(sr.colors_key,?)>0")
+                args.append(symbol)
+        if "C" in selected and canonical:
+            filters.append("(sr.colors_key='' OR (" + " AND ".join(color_filters) + "))")
+        elif "C" in selected:
             filters.append("sr.colors_key=''")
         else:
-            canonical = "".join(symbol for symbol in "WUBRG" if symbol in selected)
-            if color_mode == "exact":
-                filters.append("length(sr.colors_key)=?")
-                args.append(len(canonical))
-                filters.append("sr.colors_key NOT GLOB '*[^WUBRG]*'")
-                for symbol in canonical:
-                    filters.append("instr(sr.colors_key,?)>0")
-                    args.append(symbol)
-            else:
-                for symbol in canonical:
-                    filters.append("instr(sr.colors_key,?)>0")
-                    args.append(symbol)
+            filters.extend(color_filters)
     if mana_value is not None: filters.append("sr.mana_value=?"); args.append(float(mana_value))
     if type_text:
         type_pattern='%'+str(type_text).replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'

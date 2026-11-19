@@ -128,8 +128,8 @@ cartes V2 et de son cycle de publication.
   jouables, hors jetons, cartes de plan et machinations. Un jeton dérivé ne
   modifie jamais l'identité de couleur indexée du deck.
   Un filtre couleur ne renvoie que les decks indexés couleur.
-- Le filtre accepte W/U/B/R/G et C ; `C` sélectionne uniquement les decks
-  indexés incolores (`colors=''`) et ne peut pas être combiné avec W/U/B/R/G.
+- Le filtre accepte W/U/B/R/G et C ; `C` ajoute les decks
+  indexés incolores (`colors=''`) aux résultats des couleurs choisies.
   En mode `contains` (défaut), les autres couleurs cochées doivent toutes être
   présentes et le deck peut en contenir d'autres. En mode `exact`, l'identité
   de couleur indexée doit correspondre exactement à l'ensemble choisi. Sans

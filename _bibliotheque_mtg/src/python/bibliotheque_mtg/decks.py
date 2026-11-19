@@ -671,13 +671,9 @@ def _color_filter(colors: str | list[str] | tuple[str, ...] | None) -> list[str]
         return []
     values = list(colors) if not isinstance(colors, str) else list(colors.upper())
     normalized = {str(value).strip().upper() for value in values if str(value).strip()}
-    if "C" in normalized:
-        if normalized != {"C"}:
-            raise ValueError("C (incolore) ne peut pas être combiné avec W, U, B, R ou G")
-        return ["C"]
-    if any(len(value) != 1 or value not in "WUBRG" for value in normalized):
+    if any(len(value) != 1 or value not in "WUBRGC" for value in normalized):
         raise ValueError("Couleurs attendues : W, U, B, R, G ou C")
-    return [color for color in "WUBRG" if color in normalized]
+    return [color for color in "WUBRGC" if color in normalized]
 
 
 def deck_facets(db_path: str | Path = DEFAULT_DB) -> dict[str, Any]:
@@ -728,22 +724,27 @@ def list_decks(db_path: str | Path = DEFAULT_DB, *, query: str | None = None, na
             raise ValueError(f"Format invalide : {deck_format}")
         clauses.append(f"({_format_sql()})=?")
         args.append(deck_format)
-    if selected_colors == ["C"]:
+    if selected_colors:
         clauses.append("colors IS NOT NULL")
-        clauses.append("colors=''")
-    elif selected_colors:
-        clauses.append("colors IS NOT NULL")
-        if color_mode == "exact":
-            clauses.append("length(colors)=?")
-            args.append(len(selected_colors))
-            clauses.append("colors NOT GLOB '*[^WUBRG]*'")
-            for color in selected_colors:
-                clauses.append("instr(colors,?)>0")
+        canonical = [color for color in selected_colors if color != "C"]
+        color_clauses = []
+        if color_mode == "exact" and canonical:
+            color_clauses.append("length(colors)=?")
+            args.append(len(canonical))
+            color_clauses.append("colors NOT GLOB '*[^WUBRG]*'")
+            for color in canonical:
+                color_clauses.append("instr(colors,?)>0")
                 args.append(color)
         else:
-            for color in selected_colors:
-                clauses.append("instr(colors,?)>0")
+            for color in canonical:
+                color_clauses.append("instr(colors,?)>0")
                 args.append(color)
+        if "C" in selected_colors and canonical:
+            clauses.append("(colors='' OR (" + " AND ".join(color_clauses) + "))")
+        elif "C" in selected_colors:
+            clauses.append("colors=''")
+        else:
+            clauses.extend(color_clauses)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     sort_column = {"name": "name COLLATE NOCASE", "date": "release_date", "added": "added_at"}.get(str(sort).casefold())
     if sort_column is None:

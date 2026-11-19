@@ -210,10 +210,6 @@ function colorSymbols(colors) {
 function setManaPressed(button, pressed) { button.setAttribute("aria-pressed", pressed ? "true" : "false"); }
 function toggleMana(button, container) {
   const activate = button.getAttribute("aria-pressed") !== "true";
-  if (activate) {
-    if (button.dataset.color === "C") container.querySelectorAll(".mana-toggle").forEach(item => setManaPressed(item, false));
-    else { const colorless = container.querySelector('.mana-toggle[data-color="C"]'); if (colorless) setManaPressed(colorless, false); }
-  }
   setManaPressed(button, activate);
 }
 

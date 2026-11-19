@@ -85,7 +85,7 @@ def test_verified_french_names_search_and_edition_filter(tmp_path):
     assert detail["name_fr"] == "Méli-mélo spatio-temporel"
 
 
-def test_colorless_filter_and_reject_mixed_colors(tmp_path):
+def test_colorless_filter_can_be_combined_with_colors(tmp_path):
     db = tmp_path / "decks.sqlite"
     import_decks([{
         "name": "Colorless", "cards": [{"name": "Artifact", "colorIdentity": []}]
@@ -95,8 +95,7 @@ def test_colorless_filter_and_reject_mixed_colors(tmp_path):
 
     assert list_decks(db, colors="C")["items"][0]["name"] == "Colorless"
     assert list_decks(db, colors=["C"])["total"] == 1
-    with pytest.raises(ValueError, match="ne peut pas être combiné"):
-        list_decks(db, colors="CW")
+    assert {item["name"] for item in list_decks(db, colors="CU")["items"]} == {"Colorless", "Blue"}
 
 
 def test_color_modes_match_exact_or_containing_identity(tmp_path):
@@ -122,6 +121,8 @@ def test_color_modes_match_exact_or_containing_identity(tmp_path):
     assert {item["name"] for item in list_decks(db, colors="WU", color_mode="exact")["items"]} == {"Azorius"}
     assert {item["name"] for item in list_decks(db, colors="WU")["items"]} == {"Azorius", "Bant"}
     assert {item["name"] for item in list_decks(db, colors="C", color_mode="exact")["items"]} == {"Colorless"}
+    assert {item["name"] for item in list_decks(db, colors="CW")["items"]} == {"Colorless", "White", "Azorius", "Bant"}
+    assert {item["name"] for item in list_decks(db, colors="CW", color_mode="exact")["items"]} == {"Colorless", "White"}
     with pytest.raises(ValueError, match="contains ou exact"):
         list_decks(db, colors="WU", color_mode="invalid")
 

@@ -97,7 +97,7 @@ def make_catalogue(tmp_path, base_url, *, fr_path="/image", en_path="/image", fa
                      (f"provider-{lang}", "printing-demo", lang, "fixture", name, name if lang == "fr" else None,
                       "Artifact", None, "{1}", 1, "[]", "[]", "", "", "rare", "[]", "fixture rule", "fixture text", json.dumps(raw)))
         conn.execute("INSERT INTO printing_languages VALUES(?,?,?)", ("printing-demo", lang, f"provider-{lang}"))
-        conn.execute("INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?)", (f"provider-{lang}", "tst", lang, name, name, "Artifact", "", "fixture rule", "fixture text"))
+        conn.execute("INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?,?)", (f"provider-{lang}", "tst", lang, name, name, "Artifact", "", "fixture rule", "fixture text", ""))
     for i in range(face_count):
         conn.execute("INSERT INTO card_faces VALUES(?,?,?)", ("printing-demo", i, 1))
         conn.execute("INSERT INTO image_slots VALUES(?,?,?,?,?,?,?)", ("printing-demo", i, "fr", None, "missing", None, "{}"))
@@ -227,7 +227,7 @@ def test_download_does_not_propagate_image_between_editions(tmp_path, image_serv
                  ("provider-other", "printing-other", "en", "fixture", "Other Card", None,
                   "Artifact", None, "{1}", 1, "[]", "[]", "", "", "rare", "[]", "fixture", "fixture", json.dumps(raw)))
     conn.execute("INSERT INTO printing_languages VALUES(?,?,?)", ("printing-other", "en", "provider-other"))
-    conn.execute("INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?)", ("provider-other", "oth", "en", "Other Card", "Other Card", "Artifact", "", "fixture", "fixture"))
+    conn.execute("INSERT INTO source_search VALUES(?,?,?,?,?,?,?,?,?,?)", ("provider-other", "oth", "en", "Other Card", "Other Card", "Artifact", "", "fixture", "fixture", ""))
     conn.execute("INSERT INTO card_faces VALUES(?,?,?)", ("printing-other", 0, 1))
     conn.execute("INSERT INTO image_slots VALUES(?,?,?,?,?,?,?)", ("printing-other", 0, "fr", None, "missing", None, "{}"))
     conn.commit(); conn.close()
