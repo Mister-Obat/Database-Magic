@@ -52,5 +52,5 @@ Lorsqu’aucune image française satisfaisante n’existe, l’application peut 
 
 ### Archives et decks
 
-- **Archives** — Les PNG personnels peuvent être analysés par OCR, rapprochés d’une impression et intégrés au catalogue après vérification.
+- **Archives** — Déposez vos anciennes images de cartes dans [`Cartes Magic/`](Cartes%20Magic/README.md), à la racine du projet. Ouvrez **Archives** pour les parcourir, lancer la reconnaissance de texte (OCR local via Tesseract) et associer une image à la bonne impression avant de l’importer. L’OCR est expérimental et peut se tromper ou ne rien trouver. Vérifiez les propositions et choisissez l’impression manuellement si nécessaire. Le dossier est livré vide d’images et fonctionne sans index historique.
 - **Decks** — Consultez les listes préconstruites ou composez un deck personnel, avec sections, couleurs et quantités. L’export peut rassembler les images sur le Bureau.

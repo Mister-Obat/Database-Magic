@@ -5,7 +5,8 @@
 .pytest_cache/
 
 # Local card collection and image assets (never publish card scans)
-/Cartes Magic/
+/Cartes Magic/*
+!/Cartes Magic/README.md
 /_bibliotheque_mtg/Images/
 /Magic/Prog/
 /Magic/Cartes.md
