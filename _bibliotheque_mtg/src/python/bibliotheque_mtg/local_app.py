@@ -59,7 +59,7 @@ PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                         ("create", "save", "add", "import", "export", "delete")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 29
+APP_API_REVISION = 30
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -1625,6 +1625,12 @@ class LibraryHandler(BaseHTTPRequestHandler):
             elif route == "/styles.css":
                 file = _safe_child(UI_ROOT, "styles.css")
                 self._send(200, file.read_bytes(), "text/css; charset=utf-8")
+            elif route == "/mana.css":
+                file = _safe_child(UI_ROOT, "mana.css")
+                self._send(200, file.read_bytes(), "text/css; charset=utf-8")
+            elif route == "/mana.woff2":
+                file = _safe_child(UI_ROOT, "assets/mana.woff2")
+                self._send(200, file.read_bytes(), "font/woff2")
             elif route == "/logo.png":
                 self._send(200, (OPS_ROOT.parent / "Logo.png").read_bytes(), "image/png")
             elif route == "/favicon.ico":

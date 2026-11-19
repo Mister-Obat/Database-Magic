@@ -311,7 +311,8 @@ function cardActionIcon(name) {
     addDeck: [["path", { d: "M12 10v6" }], ["path", { d: "M9 13h6" }], ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }]],
     usages: [["rect", { x: 3, y: 3, width: 7, height: 7, rx: 1 }], ["rect", { x: 14, y: 3, width: 7, height: 7, rx: 1 }], ["path", { d: "M6.5 14v7m-3.5-3.5h7M14 15h7m-7 4h7" }]],
     occurrences: [["rect", { x: 8, y: 8, width: 13, height: 13, rx: 2 }], ["path", { d: "M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" }]],
-    flip: [["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }], ["path", { d: "M21 3v5h-5" }], ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }], ["path", { d: "M8 16H3v5" }]]
+    flip: [["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }], ["path", { d: "M21 3v5h-5" }], ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }], ["path", { d: "M8 16H3v5" }]],
+    copy: [["rect", { x: 8, y: 8, width: 13, height: 13, rx: 2 }], ["path", { d: "M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" }]]
   };
   const namespace = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(namespace, "svg");
@@ -1406,10 +1407,115 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
       : slots.some(x => x.status === "ready") ? slots.find(x => x.status === "ready").face_index : (slots[0]?.face_index ?? 0);
     const imageWrap = node("div", "card-image-stage");
     const controls = node("div", "card-image-actions");
+    const details = node("aside", "card-facts");
+    let detailLanguage = "fr";
+    let copyTimer;
+    const copyNotice = node("div", "card-copy-notice", "Copié dans le presse-papiers");
+    copyNotice.setAttribute("role", "status");
+    const showCopyNotice = message => {
+      copyNotice.textContent = message;
+      copyNotice.classList.add("visible");
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => copyNotice.classList.remove("visible"), 2200);
+    };
+    const symbolClass = token => {
+      const value = token.toUpperCase();
+      if (/^(?:[0-9]|1[0-9]|20|100|1000000|[WUBRGCSXYZEH])$/.test(value)) return value.toLowerCase();
+      if (value === "T") return "tap";
+      if (value === "Q") return "untap";
+      if (/^(?:[WUBRG]\/P|[2C]\/W|[2C]\/U|[2C]\/B|[2C]\/R|[2C]\/G|[WUBRG]\/[WUBRG]|[WUBRG]\/[WUBRG]\/P)$/.test(value)) return value.replaceAll("/", "").toLowerCase();
+      return null;
+    };
+    const symbolText = value => {
+      const fragment = document.createDocumentFragment();
+      const source = String(value);
+      const pattern = /\{([^{}]+)\}/g;
+      let cursor = 0;
+      for (const match of source.matchAll(pattern)) {
+        fragment.append(document.createTextNode(source.slice(cursor, match.index)));
+        const kind = symbolClass(match[1]);
+        if (kind) {
+          const symbol = node("span", `ms ms-cost ms-${kind} card-rule-symbol`);
+          symbol.setAttribute("role", "img"); symbol.setAttribute("aria-label", match[1]);
+          symbol.title = match[0]; fragment.append(symbol);
+        } else fragment.append(document.createTextNode(match[0]));
+        cursor = match.index + match[0].length;
+      }
+      fragment.append(document.createTextNode(source.slice(cursor)));
+      return fragment;
+    };
+    const detailRow = (label, value, copy = false) => {
+      if (value === null || value === undefined || value === "") return null;
+      const row = node("div", "card-fact");
+      row.append(node("span", "card-fact-label", label));
+      const content = node("div", "card-fact-content");
+      const display = node("span", "card-fact-value");
+      display.append(label === "Coût de mana" || label === "Texte de la carte" ? symbolText(value) : document.createTextNode(String(value)));
+      content.append(display);
+      if (copy) {
+        const button = node("button", "card-fact-copy");
+        button.type = "button"; button.append(cardActionIcon("copy"));
+        button.setAttribute("aria-label", `Copier ${label.toLowerCase()}`);
+        button.addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(String(value)); showCopyNotice("Copié dans le presse-papiers"); }
+          catch { showCopyNotice("Copie impossible"); }
+        });
+        content.append(button);
+      }
+      row.append(content); return row;
+    };
+    const renderDetails = () => {
+      const french = card.translations?.find(item => item.lang === "fr");
+      const english = card.translations?.find(item => item.lang === "en");
+      const fallback = english || card;
+      const raw = record => { try { return JSON.parse(record?.raw_json || "{}"); } catch { return {}; } };
+      const frData = raw(french), enData = raw(fallback);
+      const frFace = frData.card_faces?.[selectedFace] || frData;
+      const enFace = enData.card_faces?.[selectedFace] || enData;
+      const frenchAvailable = Boolean(french && (frFace.printed_name || frFace.printed_type_line || frFace.printed_text || (!frData.card_faces && (french.printed_name || french.printed_type_line || french.printed_text))));
+      if (!frenchAvailable) detailLanguage = "en";
+      const localized = detailLanguage === "fr" && frenchAvailable;
+      const face = localized ? frFace : enFace;
+      const source = localized ? french : fallback;
+      const name = localized ? (frFace.printed_name || (!frData.card_faces && french.printed_name) || enFace.name || fallback.name) : (enFace.name || fallback.name);
+      const type = localized ? (frFace.printed_type_line || (!frData.card_faces && french.printed_type_line) || enFace.type_line || fallback.type_line) : (enFace.type_line || fallback.type_line);
+      const rules = localized ? (frFace.printed_text || (!frData.card_faces && french.printed_text) || enFace.oracle_text || fallback.oracle_text) : (enFace.oracle_text || fallback.oracle_text);
+      const mana = face.mana_cost || source.mana_cost || enFace.mana_cost || fallback.mana_cost;
+      const flavor = face.flavor_text || (localized ? enFace.flavor_text : null);
+      const artist = face.artist || enFace.artist || raw(card).artist;
+      const title = node("div", "card-facts-heading");
+      const languages = node("div", "card-facts-languages");
+      for (const language of ["fr", "en"]) {
+        const button = node("button", "card-facts-language", language.toUpperCase());
+        button.type = "button";
+        button.disabled = language === "fr" && !frenchAvailable;
+        button.setAttribute("aria-pressed", String(detailLanguage === language));
+        button.setAttribute("aria-label", language === "fr" ? "Afficher en français" : "Afficher en anglais");
+        button.addEventListener("click", () => { detailLanguage = language; renderDetails(); });
+        languages.append(button);
+      }
+      title.append(node("span", "card-facts-kicker", "FICHE DE CARTE"), languages);
+      const rows = [detailRow("Nom", name, true), detailRow("Coût de mana", mana), detailRow("Type", type), detailRow("Texte de la carte", rules || "Aucun texte de règles", Boolean(rules))];
+      if (flavor) {
+        const flavorRow = detailRow("Texte d’ambiance", flavor);
+        flavorRow.classList.add("card-fact-flavor");
+        rows.push(flavorRow);
+      }
+      const power = face.power ?? enFace.power, toughness = face.toughness ?? enFace.toughness;
+      rows.push(detailRow("Loyauté", face.loyalty ?? enFace.loyalty), detailRow("Défense", face.defense ?? enFace.defense));
+      const footer = node("div", "card-facts-footer");
+      if (artist) footer.append(detailRow("Illustration", artist, true));
+      if (power != null && toughness != null) {
+        const combat = detailRow("Force / endurance", `${power} / ${toughness}`);
+        combat.classList.add("card-fact-combat"); footer.append(combat);
+      }
+      details.replaceChildren(title, ...rows.filter(Boolean), footer, copyNotice);
+    };
     let faceRequest = 0;
     const renderFace = async () => {
       const faceLoad = ++faceRequest;
       const slot = slots.find(x => x.face_index === selectedFace);
+      renderDetails();
       imageWrap.replaceChildren(node("div", "card-loading-spinner"));
       let visual;
       if (slot?.status === "ready") {
@@ -1852,7 +1958,8 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     await renderFace();
     if (request !== state.cardRequest || !dialog.open) return;
     imageArea.append(imageWrap, controls);
-    shell.append(header, imageArea); target.replaceChildren(shell); target.classList.remove("card-detail-loading");
+    const body = node("div", "card-viewer-body"); body.append(imageArea, details);
+    shell.append(header, body); target.replaceChildren(shell); target.classList.remove("card-detail-loading");
     if (resumedPreview) controls.querySelector(".card-image-search")?.click();
   } catch (error) { if (request === state.cardRequest) { showError(target,error.message); target.classList.remove("card-detail-loading"); } }
   finally { if (state.cardController === controller) state.cardController = null; }

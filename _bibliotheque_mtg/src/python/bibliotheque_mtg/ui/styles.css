@@ -356,23 +356,51 @@ select[hidden]{display:none!important}
 :is(.deck-color-filter,.search-color-filter) .mana-filter-controls{justify-content:space-between}
 
 /* Image first card viewer */
-.card-dialog{--card-fit-height:calc(min(94dvh,820px) - 5.5rem);position:fixed;width:min(94vw,720px);height:min(94dvh,820px);max-height:94dvh;padding:clamp(.55rem,1.5vw,1rem);overflow:hidden;display:none;grid-template-rows:minmax(0,1fr)}
+.card-dialog{position:fixed;width:min(96vw,1180px);height:min(94dvh,850px);max-height:94dvh;padding:.8rem;overflow:hidden;display:none;grid-template-rows:minmax(0,1fr)}
 .card-dialog[open]{display:grid}
-.card-dialog .dialog-close{position:absolute;z-index:3;right:.6rem;top:.6rem;display:grid;place-items:center;width:2.5rem;height:2.5rem;padding:0;border:1px solid var(--line);border-radius:50%;font-size:1.8rem;line-height:1}
+.card-dialog .dialog-close{position:absolute;z-index:3;right:1.1rem;top:1rem;display:grid;place-items:center;width:2.5rem;height:2.5rem;padding:0;border:1px solid var(--line);border-radius:50%;font-size:1.8rem;line-height:1}
 #card-detail{min-height:0;height:100%}.card-viewer{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:.35rem;justify-items:stretch}
 #card-detail.card-detail-loading .card-viewer-header,#card-detail.card-detail-loading .card-image-actions,#card-detail.card-detail-loading .face-switcher{visibility:hidden}
-.card-viewer-header{width:100%;min-height:2rem;padding:0 3rem;text-align:center}
+.card-viewer-header{display:grid;place-items:start center;width:100%;min-height:3.25rem;padding:0 3.5rem;text-align:center}
 .card-viewer-header .eyebrow{margin:.25rem 0;font-size:clamp(.72rem,1.8vh,.82rem);letter-spacing:.04em;text-transform:none;color:var(--ink)}
-.card-viewer-image{position:relative;display:grid;grid-template-rows:minmax(0,1fr);justify-items:center;width:100%;min-height:0;padding-bottom:.75rem;gap:.35rem}
+.card-viewer-body{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(340px,.92fr);gap:1.3rem;min-height:0;width:100%}
+.card-facts{position:relative;display:flex;flex-direction:column;min-height:0;overflow:auto;padding:1.5rem;border:1px solid #494059;border-radius:18px;background:linear-gradient(145deg,#302741,#211d30 58%,#191725);color:#f6f2ff;user-select:none}
+.card-facts-heading{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding-bottom:1.1rem;border-bottom:1px solid #ffffff24}
+.card-facts-kicker{font-size:.7rem;font-weight:800;letter-spacing:.18em;color:#bba5ff}
+.card-facts-languages{display:flex;gap:.2rem;padding:.15rem;border:1px solid #66577e;border-radius:999px;background:#171321}
+.card-facts-language{padding:.3rem .55rem;border:0;border-radius:999px;background:transparent;color:#aaa0c2;font-size:.68rem;font-weight:800;letter-spacing:.1em}
+.card-facts-language[aria-pressed="true"]{background:#665183;color:#fff}
+.card-facts-language:disabled{opacity:.35;cursor:not-allowed}
+.card-facts-language:not(:disabled):hover{color:#fff}
+.card-fact{padding:.85rem 0;border-bottom:1px solid #ffffff18}
+.card-fact-label{display:block;margin-bottom:.35rem;color:#aaa0c2;font-size:.67rem;font-weight:700;letter-spacing:.13em;text-transform:uppercase}
+.card-fact-content{display:flex;align-items:flex-start;gap:.5rem;justify-content:space-between}
+.card-fact-value{font-size:1rem;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.card-rule-symbol{font-size:.94em;vertical-align:-.12em;margin:0 .08em;white-space:nowrap}
+.card-fact-value .card-rule-symbol:first-child{margin-left:0}
+.card-fact-flavor .card-fact-value{font-family:Georgia,serif;font-style:italic;color:#d3c8e8}
+.card-facts-footer{display:flex;align-items:end;justify-content:space-between;gap:1rem;margin-top:auto;padding-top:1.2rem}
+.card-facts-footer .card-fact{min-width:0;border:0;padding:.4rem 0 0}
+.card-facts-footer .card-fact-combat{text-align:right;margin-left:auto}
+.card-facts-footer .card-fact-value{font-size:.9rem}
+.card-facts-footer .card-fact-combat .card-fact-value{font-family:Georgia,serif;font-size:1.45rem;white-space:nowrap}
+.card-copy-notice{position:sticky;bottom:.1rem;align-self:center;max-width:100%;margin-top:-2rem;padding:.45rem .8rem;border:1px solid #9d85c7;border-radius:999px;background:#3d3055;color:white;font-size:.76rem;box-shadow:0 5px 18px #0009;opacity:0;transform:translateY(.4rem);pointer-events:none;transition:opacity .15s,transform .15s}
+.card-copy-notice.visible{opacity:1;transform:translateY(0)}
+.card-facts-heading+.card-fact .card-fact-value{font-family:Georgia,serif;font-size:1.55rem;line-height:1.2}
+.card-fact-copy{flex:none;display:grid;place-items:center;width:1.9rem;height:1.9rem;border:1px solid #66577e;border-radius:8px;background:#ffffff0c;color:#cbbaff}
+.card-fact-copy:hover,.card-fact-copy:focus-visible{background:#514169;color:white;border-color:#bba5ff}
+.card-fact-copy svg{width:1rem;height:1rem}
+@media(max-width:700px){.card-dialog{width:96vw}.card-viewer-body{grid-template-columns:1fr;grid-template-rows:minmax(220px,48%) minmax(0,1fr);gap:.6rem}.card-facts{padding:1rem}.card-viewer-art,.card-viewer-missing{max-height:100%}}
+.card-viewer-image{position:relative;display:grid;grid-template-rows:minmax(0,1fr);justify-items:center;width:100%;min-height:0;padding:0 0 0 3.2rem;gap:.35rem}
 .card-image-stage{display:grid;place-items:center;width:100%;height:auto;min-height:0;align-self:stretch;position:relative}
-.card-viewer-art,.card-viewer-missing{width:auto;height:auto;max-width:min(100%,calc(var(--card-fit-height) * 531 / 738));max-height:var(--card-fit-height);aspect-ratio:531 / 738;object-fit:contain;border-radius:3.1% / 2.2%;box-shadow:0 8px 34px #0009;background:#111711}
-.card-viewer-missing{display:grid;place-items:center;color:var(--muted);border:1px dashed var(--line);font-size:1.05rem;width:auto;height:calc(100% - 1rem);max-width:calc(100% - 1rem);max-height:calc(100% - 1rem);margin:auto}
+.card-viewer-art,.card-viewer-missing{width:auto;height:100%;max-width:100%;max-height:100%;aspect-ratio:531 / 738;object-fit:contain;border-radius:3.1% / 2.2%;box-shadow:0 8px 34px #0009;background:#111711}
+.card-viewer-missing{display:grid;place-items:center;color:var(--muted);border:1px dashed var(--line);font-size:1.05rem;margin:auto}
 .card-loading-spinner{width:2.2rem;height:2.2rem;border:3px solid #ffffff33;border-top-color:var(--green2);border-radius:50%;animation:card-spin .8s linear infinite}
 @keyframes card-spin{to{transform:rotate(360deg)}}
 .card-image-search,.card-image-icon{position:absolute;left:.25rem;z-index:2;width:2.5rem;height:2.5rem;padding:0;font-size:1.45rem;border-radius:50%;display:grid;place-items:center}
 .card-image-search{top:.25rem}
 .card-image-actions,.face-switcher{display:flex;justify-content:center;align-items:center;gap:.4rem;flex-wrap:wrap}
-.card-image-actions{position:absolute;inset:0;pointer-events:none}.card-image-actions button,.card-image-actions input,.card-image-actions a{pointer-events:auto}
+.card-image-actions{position:absolute;top:0;bottom:0;left:0;width:2.8rem;pointer-events:none}.card-image-actions button,.card-image-actions input,.card-image-actions a{pointer-events:auto}
 .card-image-actions :is(button,a):hover,.card-dialog .dialog-close:hover{background:#334a37;color:var(--green2);border-color:var(--green);box-shadow:0 0 0 2px #9bc69b55,0 0 18px #9bc69b55}
 .card-image-actions :is(button,a):is(:hover,:focus-visible)::after{content:attr(aria-label);position:absolute;z-index:4;left:calc(100% + .5rem);top:50%;transform:translateY(-50%);width:max-content;max-width:min(14rem,calc(100vw - 5rem));padding:.4rem .6rem;border:1px solid var(--green);border-radius:6px;background:var(--panel2);color:var(--ink);box-shadow:0 4px 14px #0009;font-size:.78rem;line-height:1.3;text-align:left;white-space:normal;pointer-events:none}
 .face-choice{padding:.4rem .65rem;font-size:.82rem}.face-choice.active{border-color:var(--green);color:var(--green2)}
@@ -1066,6 +1094,7 @@ select[hidden]{display:none!important}
   font-size:0;
   box-shadow:inset 0 1px #ede1ff23,var(--action-shadow);
 }
+.card-dialog .dialog-close{top:.8rem;right:.8rem}
 :is(.card-dialog,.image-choice-dialog) .dialog-close::before,
 :is(.card-dialog,.image-choice-dialog) .dialog-close::after{
   content:'';

@@ -46,6 +46,18 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   pas un titre lisible.
 - `ui/index.html`, `ui/app.js`, `ui/styles.css` : affichage navigateur et appels à
   l’API.
+- La visionneuse place à droite de l'image une fiche textuelle de la face
+  sélectionnée (ou dessous en fenêtre étroite). Le sélecteur FR/EN choisit les
+  champs imprimés français de la même impression par défaut quand ils existent ;
+  FR est désactivé sinon. Les valeurs manquantes utilisent l'anglais. La fiche
+  affiche séparément le texte d'ambiance disponible et place le crédit de
+  l'illustrateur et la force/endurance en pied. Le nom, le texte des règles et
+  l'illustrateur ont une commande de copie avec confirmation visible. Les détails
+  par face proviennent du `raw_json` des traductions retournées par `/card`,
+  sans nouvelle requête distante.
+  Les codes de mana et de règles entre accolades s'affichent avec la police
+  Mana locale ; la copie conserve leur texte source. Les commandes d'image
+  occupent une colonne réservée à gauche de l'image.
 - La recherche libre inclut le nom de l'illustrateur. Entrée dans le champ de
   recherche de cartes ou de decks déclenche la même action que « Rechercher ».
 - Une nouvelle soumission de Recherche ou de Decks annule côté navigateur la

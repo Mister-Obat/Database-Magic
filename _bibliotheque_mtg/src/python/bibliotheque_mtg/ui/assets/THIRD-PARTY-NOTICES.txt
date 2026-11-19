@@ -11,3 +11,7 @@ The source project states attribution is appreciated but not required.
 
 Magic: The Gathering and its symbols are trademarks and/or copyrighted materials
 of Wizards of the Coast LLC and its affiliates.
+
+Mana icon font (mana.woff2) and CSS mapping (mana.css) from andrewgioia/mana v1.18.0.
+Font: SIL Open Font License 1.1. CSS: MIT License.
+https://github.com/andrewgioia/mana

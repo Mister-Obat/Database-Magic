@@ -492,7 +492,7 @@ def card_detail(db, provider_card_id):
         row=c.execute("SELECT sr.*,p.set_id,p.oracle_id,p.collector_number,p.layout,p.identity_status,p.variant_attributes_json,e.code AS set_code,e.name AS edition FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id) WHERE sr.provider_card_id=?",(str(provider_card_id),)).fetchone()
         if row is None: return {"contract_version":CONTRACT_VERSION,"found":False,"card":None}
         result=_readable_record(row)
-        translations=[_readable_record(r) for r in c.execute("SELECT lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text FROM source_records WHERE printing_id=? ORDER BY lang",(row['printing_id'],))]
+        translations=[_readable_record(r) for r in c.execute("SELECT lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text,raw_json FROM source_records WHERE printing_id=? ORDER BY lang",(row['printing_id'],))]
         image_slots=[dict(r) for r in c.execute("SELECT face_index,preferred_language,selected_language,status,asset_id FROM image_slots WHERE printing_id=? ORDER BY face_index",(row['printing_id'],))]
     localized=next((x for x in translations if x['lang']=='fr'),None)
     fallback=next((x for x in translations if x['lang']=='en'),None)
