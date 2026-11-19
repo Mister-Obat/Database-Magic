@@ -9,6 +9,15 @@ from bibliotheque_mtg.v2.catalogue import migrate
 from .test_catalogue_v2 import source_database
 
 
+def test_batch_filter_accepts_current_search_fields_and_other_modes():
+    search = {"q": "", "oracle_id": "oracle-1", "printing_id": "", "unique": "1",
+              "image_filter": "without", "result_sort": "date"}
+    assert local_app._batch_filter_payload("search", search) == {
+        "oracle_id": "oracle-1", "unique": "1", "image_filter": "without", "result_sort": "date"}
+    assert local_app._batch_filter_payload("edition", {"set": "s1"}) == {"set": "s1"}
+    assert local_app._batch_filter_payload("decks", {"q": "test"}) == {"q": "test"}
+
+
 def test_card_usage_exposes_edition_icon_and_deck_colors(monkeypatch, tmp_path):
     source = tmp_path / "source.sqlite"
     catalogue = tmp_path / "catalogue.sqlite"

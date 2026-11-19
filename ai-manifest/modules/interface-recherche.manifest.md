@@ -158,6 +158,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   prêts et traite les autres avec `download_printing`. La tâche asynchrone expose
   progression, erreurs et annulation ; les mises à jour du catalogue sont
   bloquées pendant son exécution. Un filtre actif est requis pour les Decks.
+  Le lot Recherche accepte aussi les critères d'identité `oracle_id`,
+  `printing_id` et `unique` transmis par la recherche courante.
   Le lot emploie au plus quatre workers pour les téléchargements d'impressions,
   avec au plus quatre départs de requêtes d'images Scryfall par seconde.
   Tant que le total des impressions manquantes n'est pas calculé, le suivi

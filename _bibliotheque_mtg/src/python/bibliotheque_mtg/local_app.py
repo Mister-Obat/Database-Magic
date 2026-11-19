@@ -977,7 +977,7 @@ def _run_deck_task(task_id: str, deck_id: str, cancel: threading.Event) -> None:
 def _batch_filter_payload(mode: str, filters: dict) -> dict:
     search_keys = {"q", "set", "lang", "rarity", "color", "color_mode", "mana_value", "type",
                    "card_type", "image_filter", "result_sort", "mana_min", "mana_max", "power_min", "power_max",
-                   "toughness_min", "toughness_max"}
+                   "toughness_min", "toughness_max", "oracle_id", "printing_id", "unique"}
     deck_keys = {"q", "deck_format", "deck_type", "set_code", "colors", "color_mode", "sort", "order", "image_filter"}
     if not isinstance(mode, str) or mode not in {"search", "edition", "decks"} or not isinstance(filters, dict):
         raise ValueError("Filtres de téléchargement invalides")
