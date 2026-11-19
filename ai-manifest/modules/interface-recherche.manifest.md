@@ -484,6 +484,20 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   de sélection, la pagination et les actions de rafraîchissement peuvent relire
   les résultats.
 - Recherche de cartes et de decks utilisent six sélecteurs visuels W/U/B/R/G/C.
+  Les filtres d'édition, de rareté et de type de carte dans Recherche, et
+  d'édition, de format et de type de produit dans Decks, acceptent plusieurs
+  cases cochées. Tout est coché par défaut. Le menu d'éditions défile ; chaque
+  menu propose Tout cocher, Tout décocher et Valider. Une sélection vide ne
+  renvoie aucun résultat ; toutes les cases cochées n'appliquent aucun filtre.
+  Le sélecteur simple sous-jacent reste masqué et inaccessible pendant ce mode ;
+  un seul déclencheur visible reprend le style des champs du catalogue. Les
+  listes d'éditions et de types de cartes défilent. Cases, déclencheur et actions
+  ont des noms accessibles, un focus visible et se pilotent au clavier.
+  Un seul de ces menus reste ouvert ; cliquer hors du menu ou en ouvrir un
+  autre applique les cases cochées comme le bouton Valider.
+  Pour les types de carte, une sélection partielle inclut au moins un type coché
+  et exclut tout type décoché, même sur une carte à plusieurs types. Jetons est
+  reconnu par l'édition ou le layout et bloque les jetons quand il est décoché.
   Les couleurs W/U/B/R/G cochées sont cumulatives ; C ajoute les cartes
   sans couleur aux résultats contenant les autres couleurs choisies. En mode
   « Couleurs exactes », C ajoute les cartes strictement incolores aux cartes
@@ -613,6 +627,11 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
    compare la clé canonique de couleurs complète ; `contains` (défaut) vérifie
    chaque couleur demandée. Le filtre deck suit la même logique sur l'identité
    de couleur indexée du deck.
+   Une recherche peut se limiter à un `oracle_id` (ou à un `printing_id` si
+   l'identité Oracle manque), tout en affichant le nom de la carte dans le champ
+   de recherche. L'option « Retirer les doublons », désactivée par défaut,
+   garde une impression par nom canonique, choisie selon la date de sortie de
+   l'édition la plus récente avant pagination et après les autres filtres.
 3. Une fiche est identifiée par ID fournisseur et reste liée à son `printing_id`.
    Les traductions FR et EN proviennent de cette impression exacte.
 4. Les slots image sont enrichis depuis `image_slots` et `image_assets`; les
@@ -728,6 +747,13 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - `GET /api/v2/card/usage?id=<provider_card_id>` renvoie `found`, `editions`, `decks`, `personal_decks` et `unloaded_decks`. Les rapprochements utilisent l'identité oracle du catalogue actif, ou l'impression exacte si elle n'a pas d'oracle. Les éditions éligibles sont regroupées par code. Les decks préconstruits sont limités aux compositions locales chargées ; `unloaded_decks` signale les compositions non chargées. Les rapprochements de leurs entrées emploient un identifiant Scryfall, une identité oracle explicite ou une édition et un numéro non ambigus. Les decks personnels utilisent les impressions conservées dans leurs compositions actives. Aucun accès réseau ni chargement implicite n'est effectué.
 - La visionneuse ouvre la liste des éditions et des decks associés dans une
   modale ; chaque lien s'ouvre dans un nouvel onglet à la destination précise.
+  Un second bouton Lucide, placé au-dessus, ouvre un nouvel onglet Recherche
+  déjà lancé pour toutes les impressions de la carte courante, avec nom visible,
+  couleurs exactes et types correspondants ; il garde les doublons visibles.
+  Les lignes d'édition affichent leur symbole disponible à gauche du nom ; les
+  lignes de decks préconstruits et personnels affichent leurs couleurs connues
+  au même emplacement. Les symboles décoratifs d'édition ne répètent pas le nom
+  accessible et aucune image distante nouvelle n'est recherchée pour la modale.
   Cette modale propose deux vues : impression précise (même `printing_id`) et
   carte globale (même `oracle_id`, ou l'impression seule sans oracle). Les
   éditions et decks sont séparés dans chacune. Une édition ouverte par ce

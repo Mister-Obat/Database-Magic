@@ -704,6 +704,8 @@ def list_decks(db_path: str | Path = DEFAULT_DB, *, query: str | None = None, na
     offset = max(0, int(offset))
     eligible = "(source='community' OR type IN (" + ",".join("?" for _ in SUPPORTED_DECK_TYPES) + "))"
     clauses, args = [eligible], list(SUPPORTED_DECK_TYPES)
+    if any(value == "-" for value in (deck_type, deck_format, set_code)):
+        clauses.append("0")
     if query and str(query).strip():
         q = "%" + str(query).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         q_normalized = "%" + _normalize_search(query).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -713,17 +715,22 @@ def list_decks(db_path: str | Path = DEFAULT_DB, *, query: str | None = None, na
         else:
             clauses.append("(name LIKE ? ESCAPE '\\' OR name_fr_search LIKE ? ESCAPE '\\' OR set_code LIKE ? ESCAPE '\\' OR set_name LIKE ? ESCAPE '\\' OR set_name_fr_search LIKE ? ESCAPE '\\' OR type LIKE ? ESCAPE '\\')")
             args.extend([q, q_normalized, q, q, q_normalized, q])
-    if deck_type:
-        clauses.append("type=?")
-        args.append(str(deck_type))
-    if set_code and str(set_code).strip():
-        clauses.append("upper(set_code)=upper(?)")
-        args.append(str(set_code).strip())
-    if deck_format:
-        if deck_format not in {"Commander", "Standard", "Pioneer", "Modern", "Autre"}:
+    if deck_type and deck_type != "-":
+        selected_types = str(deck_type).split("|")
+        clauses.append("type IN (" + ",".join("?" for _ in selected_types) + ")")
+        args.extend(selected_types)
+    if set_code and set_code != "-" and str(set_code).strip():
+        codes = [code.strip() for code in str(set_code).replace("|", ",").split(",") if code.strip()]
+        if len(codes) > 2000 or any(not code.isalnum() for code in codes):
+            raise ValueError("Codes d'édition invalides")
+        clauses.append("upper(set_code) IN (" + ",".join("upper(?)" for _ in codes) + ")")
+        args.extend(codes)
+    if deck_format and deck_format != "-":
+        formats = str(deck_format).split("|")
+        if any(value not in {"Commander", "Standard", "Pioneer", "Modern", "Autre"} for value in formats):
             raise ValueError(f"Format invalide : {deck_format}")
-        clauses.append(f"({_format_sql()})=?")
-        args.append(deck_format)
+        clauses.append(f"({_format_sql()}) IN (" + ",".join("?" for _ in formats) + ")")
+        args.extend(formats)
     if selected_colors:
         clauses.append("colors IS NOT NULL")
         canonical = [color for color in selected_colors if color != "C"]

@@ -14,7 +14,7 @@
   }
 
   function enhance(select) {
-    if (select.dataset.customSelect || select.multiple || select.size > 1) return;
+    if (select.dataset.customSelect || select.dataset.multiFilter || select.multiple || select.size > 1) return;
     select.dataset.customSelect = "true";
     const wrapper = document.createElement("span");
     wrapper.className = "custom-select";

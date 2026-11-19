@@ -123,6 +123,9 @@ def test_color_modes_match_exact_or_containing_identity(tmp_path):
     assert {item["name"] for item in list_decks(db, colors="C", color_mode="exact")["items"]} == {"Colorless"}
     assert {item["name"] for item in list_decks(db, colors="CW")["items"]} == {"Colorless", "White", "Azorius", "Bant"}
     assert {item["name"] for item in list_decks(db, colors="CW", color_mode="exact")["items"]} == {"Colorless", "White"}
+    assert list_decks(db, deck_type="-")["total"] == 0
+    assert list_decks(db, deck_format="-")["total"] == 0
+    assert list_decks(db, set_code="-")["total"] == 0
     with pytest.raises(ValueError, match="contains ou exact"):
         list_decks(db, colors="WU", color_mode="invalid")
 

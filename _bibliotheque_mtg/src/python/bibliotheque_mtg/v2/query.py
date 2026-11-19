@@ -195,8 +195,8 @@ def _match_term(term, db=None):
 
 
 def _set_codes(value):
-    codes = [code.strip().casefold() for code in str(value or "").split(",") if code.strip()]
-    if len(codes) > 32 or any(not code.isalnum() for code in codes):
+    codes = [code.strip().casefold() for code in str(value or "").replace("|", ",").split(",") if code.strip()]
+    if len(codes) > 2000 or any(not code.isalnum() for code in codes):
         raise ValueError("Codes d'édition invalides")
     return list(dict.fromkeys(codes))
 
@@ -213,7 +213,7 @@ def _search_cache_key(db, values):
     return (str(path), tuple(fingerprints), *values)
 
 
-def search_cards(db, term="", *, set_code=None, language=None, rarity=None, color=None, color_mode="contains", mana_value=None, type_text=None, mana_min=None, mana_max=None, power_min=None, power_max=None, toughness_min=None, toughness_max=None, card_type=None, image_filter="all", result_sort="date", limit=50, offset=0):
+def search_cards(db, term="", *, set_code=None, language=None, rarity=None, color=None, color_mode="contains", mana_value=None, type_text=None, mana_min=None, mana_max=None, power_min=None, power_max=None, toughness_min=None, toughness_max=None, card_type=None, image_filter="all", result_sort="date", oracle_id=None, printing_id=None, unique=False, limit=50, offset=0):
     limit,offset=_page(limit,offset,max_size=300)
     color_mode = str(color_mode).casefold()
     if color_mode not in {"contains", "exact"}:
@@ -226,15 +226,26 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
     cache_key = _search_cache_key(db, (str(term), str(set_code or ""), str(language or ""),
         str(rarity or ""), str(color or ""), color_mode, str(mana_value), str(type_text or ""),
         str(mana_min), str(mana_max), str(power_min), str(power_max), str(toughness_min),
-        str(toughness_max), str(card_type or ""), image_filter))
-    match=_match_term(term, db)
+        str(toughness_max), str(card_type or ""), image_filter, str(oracle_id or ""), str(printing_id or "")))
+    match=None if oracle_id or printing_id else _match_term(term, db)
     filters=[]; args=[]
-    codes = _set_codes(set_code)
+    if oracle_id:
+        filters.append("p.oracle_id=?"); args.append(str(oracle_id))
+    elif printing_id:
+        filters.append("p.printing_id=?"); args.append(str(printing_id))
+    codes = _set_codes(None if set_code == "-" else set_code)
+    if set_code == "-": filters.append("0")
     if codes:
         filters.append("e.code IN (" + ",".join("?" for _ in codes) + ")")
         args.extend(codes)
     display_language = str(language).casefold() if language else None
-    if rarity: filters.append("sr.rarity=?"); args.append(str(rarity).casefold())
+    if rarity == "-": filters.append("0")
+    elif rarity:
+        rarities = [value.casefold() for value in str(rarity).split("|")]
+        if any(value not in {"common", "uncommon", "rare", "special", "mythic"} for value in rarities):
+            raise ValueError("Rareté invalide")
+        filters.append("sr.rarity IN (" + ",".join("?" for _ in rarities) + ")")
+        args.extend(rarities)
     if color:
         selected = set(str(color).upper().replace(",", "").replace(" ", ""))
         if not selected <= set("WUBRGC"):
@@ -263,20 +274,18 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         type_pattern='%'+str(type_text).replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
         filters.append("(sr.type_line LIKE ? ESCAPE '\\' OR sr.printed_type_line LIKE ? ESCAPE '\\')")
         args.extend([type_pattern,type_pattern])
-    card_type_match = None
-    if card_type:
+    if card_type == "-": filters.append("0")
+    elif card_type:
+        types = set(str(card_type).split("|"))
         allowed_types = {"creature": "Creature", "land": "Land", "instant": "Instant", "sorcery": "Sorcery", "artifact": "Artifact", "enchantment": "Enchantment", "planeswalker": "Planeswalker", "battle": "Battle", "plane": "Plane", "phenomenon": "Phenomenon", "scheme": "Scheme", "conspiracy": "Conspiracy", "vanguard": "Vanguard", "dungeon": "Dungeon", "kindred": "Kindred"}
-        if card_type == "token":
-            filters.append("e.set_type='token'")
-        elif card_type == "kindred":
-            card_type_match = 'type_line : (Kindred OR Tribal)'
-            filters.append("(sr.type_line LIKE '%Kindred%' OR sr.type_line LIKE '%Tribal%')")
-        elif card_type in allowed_types:
-            card_type_match = f'type_line : "{allowed_types[card_type]}"'
-            filters.append("sr.type_line LIKE ?")
-            args.append("%" + allowed_types[card_type] + "%")
-        else:
+        if any(value not in allowed_types and value != "token" for value in types):
             raise ValueError("Type de carte invalide")
+        predicates = {value: f"sr.type_line LIKE '%{name}%'" for value, name in allowed_types.items()}
+        predicates["kindred"] = "(sr.type_line LIKE '%Kindred%' OR sr.type_line LIKE '%Tribal%')"
+        predicates["token"] = "(e.set_type='token' OR p.layout IN ('token','double_faced_token'))"
+        filters.append("(" + " OR ".join(predicates[value] for value in types) + ")")
+        if types != {"token"}:
+            filters.extend("NOT " + predicates[value] for value in predicates if value not in types)
     for field, lower, upper in (("sr.mana_value", mana_min, mana_max),
                                 ("json_extract(sr.raw_json,'$.power')", power_min, power_max),
                                 ("json_extract(sr.raw_json,'$.toughness')", toughness_min, toughness_max)):
@@ -312,17 +321,10 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
             scoped = " OR ".join('set_code : "' + code + '"' for code in codes)
             match = "(" + scoped + ") AND " + match
         name_match = f"(name : ({match}) OR printed_name : ({match}))"
-        if card_type_match:
-            match = "(" + match + ") AND (" + card_type_match + ")"
         from_sql=("source_search CROSS JOIN source_records sr ON sr.provider_card_id=source_search.provider_card_id "
                   "JOIN printings p USING(printing_id) JOIN editions e USING(set_id)")
         where.append("source_search MATCH ?")
         args.append(match)
-    elif card_type_match:
-        from_sql=("source_search CROSS JOIN source_records sr ON sr.provider_card_id=source_search.provider_card_id "
-                  "JOIN printings p USING(printing_id) JOIN editions e USING(set_id)")
-        where.append("source_search MATCH ?")
-        args.append(card_type_match)
     else:
         from_sql=("editions e CROSS JOIN printings p ON p.set_id=e.set_id "
                   "CROSS JOIN source_records sr ON sr.printing_id=p.printing_id")
@@ -399,6 +401,21 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         else:
             c.execute("CREATE TEMP TABLE chosen_search (printing_id TEXT PRIMARY KEY) WITHOUT ROWID")
             c.executemany("INSERT INTO chosen_search VALUES(?)", ((printing_id,) for printing_id in cached_ids))
+        if str(unique).casefold() in {"1", "true", "yes"}:
+            c.execute("""CREATE TEMP TABLE unique_search AS
+                SELECT printing_id FROM (
+                  SELECT p.printing_id, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE((SELECT lower(trim(sr.name)) FROM source_records sr
+                      WHERE sr.printing_id=p.printing_id
+                      ORDER BY CASE sr.lang WHEN 'en' THEN 0 WHEN 'fr' THEN 1 ELSE 2 END,
+                               sr.provider_card_id LIMIT 1), p.printing_id)
+                    ORDER BY e.released_at DESC,e.code DESC,
+                             CAST(p.collector_number AS INTEGER) DESC,p.collector_number DESC,
+                             p.printing_id DESC) AS rank
+                  FROM chosen_search JOIN printings p USING(printing_id)
+                  JOIN editions e USING(set_id)) WHERE rank=1""")
+            c.execute("DELETE FROM chosen_search WHERE printing_id NOT IN (SELECT printing_id FROM unique_search)")
+            c.execute("DROP TABLE unique_search")
         count=c.execute("SELECT COUNT(*) FROM chosen_search").fetchone()[0]
         order = "e.released_at DESC,e.code,CAST(p.collector_number AS INTEGER),p.collector_number,p.printing_id"
         if result_sort == "date_asc":
@@ -472,7 +489,7 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
 
 def card_detail(db, provider_card_id):
     with _connection(db) as c:
-        row=c.execute("SELECT sr.*,p.set_id,p.collector_number,p.layout,p.identity_status,p.variant_attributes_json,e.code AS set_code,e.name AS edition FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id) WHERE sr.provider_card_id=?",(str(provider_card_id),)).fetchone()
+        row=c.execute("SELECT sr.*,p.set_id,p.oracle_id,p.collector_number,p.layout,p.identity_status,p.variant_attributes_json,e.code AS set_code,e.name AS edition FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id) WHERE sr.provider_card_id=?",(str(provider_card_id),)).fetchone()
         if row is None: return {"contract_version":CONTRACT_VERSION,"found":False,"card":None}
         result=_readable_record(row)
         translations=[_readable_record(r) for r in c.execute("SELECT lang,name,printed_name,type_line,printed_type_line,oracle_text,printed_text FROM source_records WHERE printing_id=? ORDER BY lang",(row['printing_id'],))]

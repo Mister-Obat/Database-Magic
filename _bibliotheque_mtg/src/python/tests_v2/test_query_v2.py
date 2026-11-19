@@ -44,6 +44,14 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual(1,result['total'])
         self.assertEqual('fr-1',result['items'][0]['provider_card_id'])
 
+    def test_multiple_choices_and_empty_selection(self):
+        self.assertEqual(search_cards(self.db)['total'], search_cards(self.db, set_code='s1|s2')['total'])
+        self.assertEqual(0, search_cards(self.db, set_code='-')['total'])
+        self.assertEqual(0, search_cards(self.db, rarity='-')['total'])
+        self.assertEqual(0, search_cards(self.db, card_type='-')['total'])
+        self.assertEqual(search_cards(self.db, card_type='land')['total'],
+                         search_cards(self.db, card_type='land|artifact')['total'])
+
     def test_phyrexian_printed_name_uses_readable_canonical_name(self):
         conn = sqlite3.connect(self.db)
         try:
@@ -91,6 +99,25 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual(1, chosen['total'])
         self.assertEqual(0, search_cards(self.db, 'Rule', power_min=3)['total'])
         self.assertEqual(0, search_cards(self.db, 'Rule', card_type='land')['total'])
+
+    def test_unchecked_token_excludes_artifact_treasure(self):
+        conn = sqlite3.connect(self.db)
+        try:
+            original = conn.execute("SELECT printing_id FROM printings LIMIT 1").fetchone()[0]
+            conn.execute("INSERT INTO oracle_cards VALUES('treasure-oracle',1)")
+            conn.execute("INSERT INTO printings SELECT 'treasure-printing',set_id,'99','treasure-oracle','token',illustration_id,identity_status,identity_evidence,variant_attributes_json FROM printings WHERE printing_id=?", (original,))
+            record = list(conn.execute("SELECT * FROM source_records WHERE provider_card_id='en-1'").fetchone())
+            record[0], record[1], record[4], record[6] = 'treasure-card', 'treasure-printing', 'Treasure Token', 'Token Artifact — Treasure'
+            conn.execute("INSERT INTO source_records VALUES(" + ",".join("?" for _ in record) + ")", record)
+            conn.execute("INSERT INTO source_search SELECT 'treasure-card',set_code,lang,'Treasure Token',printed_name,'Token Artifact — Treasure',printed_type_line,oracle_text,printed_text,artist FROM source_search WHERE provider_card_id='en-1'")
+            conn.commit()
+        finally:
+            conn.close()
+        all_but_token = 'creature|land|instant|sorcery|artifact|enchantment|planeswalker|battle|kindred|plane|phenomenon|scheme|conspiracy|vanguard|dungeon'
+        self.assertEqual(1, search_cards(self.db, 'Treasure')['total'])
+        self.assertEqual(0, search_cards(self.db, 'Treasure', card_type=all_but_token)['total'])
+        self.assertEqual(0, search_cards(self.db, 'Treasure', card_type='artifact')['total'])
+        self.assertEqual(1, search_cards(self.db, 'Treasure', card_type='token')['total'])
 
     def test_multiple_colors_and_colorless_are_distinct(self):
         conn = sqlite3.connect(self.db)
@@ -157,6 +184,34 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual(2, edition_cards(self.db, 's1,s2')['total'])
         self.assertEqual(2, search_cards(self.db, set_code='s1,s2')['total'])
         self.assertEqual(1, search_cards(self.db, 'Set One')['total'])
+
+    def test_occurrences_by_oracle_and_latest_unique_printing(self):
+        conn = sqlite3.connect(self.db)
+        try:
+            first = conn.execute("SELECT printing_id FROM printings").fetchone()[0]
+            conn.execute("INSERT INTO editions VALUES(?,?,?,?,?,?,?,?,?)",
+                         ('set-2', 's2', 'Set Two', 'expansion', '2025-01-01', 0, 1, 'eligible', None))
+            conn.execute("INSERT INTO printings SELECT 'latest-printing','set-2','7',oracle_id,layout,illustration_id,identity_status,identity_evidence,variant_attributes_json FROM printings WHERE printing_id=?", (first,))
+            record = list(conn.execute("SELECT * FROM source_records WHERE provider_card_id='en-1'").fetchone())
+            record[0], record[1] = 'latest-card', 'latest-printing'
+            conn.execute("INSERT INTO source_records VALUES(" + ",".join("?" for _ in record) + ")", record)
+            conn.execute("INSERT INTO oracle_cards VALUES('other-oracle',1)")
+            conn.execute("INSERT INTO printings SELECT 'homonym-printing',set_id,'8','other-oracle',layout,illustration_id,identity_status,identity_evidence,variant_attributes_json FROM printings WHERE printing_id=?", (first,))
+            record[0], record[1] = 'homonym-card', 'homonym-printing'
+            conn.execute("INSERT INTO source_records VALUES(" + ",".join("?" for _ in record) + ")", record)
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual('oracle-1', card_detail(self.db, 'en-1')['card']['oracle_id'])
+        occurrences = search_cards(self.db, 'Forest', oracle_id='oracle-1', color='C', color_mode='exact', card_type='land')
+        self.assertEqual(2, occurrences['total'])
+        self.assertEqual({'latest-printing', first}, {item['printing_id'] for item in occurrences['items']})
+        self.assertEqual(1, search_cards(self.db, oracle_id='other-oracle')['total'])
+        unique = search_cards(self.db, unique=True)
+        self.assertEqual(1, unique['total'])
+        self.assertEqual('latest-printing', unique['items'][0]['printing_id'])
+        self.assertEqual(1, search_cards(self.db, unique='1', limit=1, offset=1)['total'])
+        self.assertEqual([], search_cards(self.db, unique='1', limit=1, offset=1)['items'])
 
     def test_edition_cards_show_one_language_per_printing_before_pagination(self):
         result = edition_cards(self.db, 's1', limit=1)

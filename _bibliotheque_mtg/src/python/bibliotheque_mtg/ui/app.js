@@ -188,6 +188,87 @@ function editionLabel(deck) {
 function selectedManaColors(container) {
   return Array.from(container.querySelectorAll('.mana-toggle[aria-pressed="true"]'), button => button.dataset.color).join("");
 }
+const MULTI_FILTER_IDS = ["filter-set", "filter-rarity", "filter-type", "deck-edition", "deck-format", "deck-type"];
+function multiValue(id) { return $(id).dataset.multiValue ?? $(id).value; }
+function setMultiValue(id, value) {
+  const select = $(id);
+  select.dataset.multiValue = id === "filter-set" && value && value !== "-" && !value.includes("|") ? groupedEditionCode(value) : value || "";
+  renderMultiFilter(id);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+function renderMultiFilter(id) {
+  const select = $(id), details = document.getElementById(`${id}-multi`);
+  if (!details) return;
+  const options = [...select.options].filter(option => option.value);
+  const value = multiValue(id);
+  const chosen = value === "" ? new Set(options.map(option => option.value)) : new Set(value === "-" ? [] : value.split("|"));
+  const summary = details.querySelector("summary");
+  summary.textContent = chosen.size === options.length ? "Toutes sélectionnées" : chosen.size === 0 ? "Aucune sélection" : `${chosen.size} sélection${chosen.size > 1 ? "s" : ""}`;
+  summary.setAttribute("aria-label", `${select.dataset.filterLabel} : ${summary.textContent}`);
+  const list = details.querySelector(".multi-filter-list");
+  list.replaceChildren();
+  for (const option of options) {
+    const label = document.createElement("label"), checkbox = document.createElement("input");
+    checkbox.type = "checkbox"; checkbox.value = option.value; checkbox.checked = chosen.has(option.value);
+    label.append(checkbox, document.createTextNode(option.textContent)); list.append(label);
+  }
+}
+function commitMultiFilter(id) {
+  const boxes = [...document.querySelectorAll(`#${id}-multi .multi-filter-list input[type="checkbox"]`)];
+  if (!boxes.length) return;
+  const selected = boxes.filter(box => box.checked).map(box => box.value);
+  const value = selected.length === boxes.length ? "" : selected.length ? selected.join("|") : "-";
+  if (value !== multiValue(id)) setMultiValue(id, value);
+}
+function closeMultiFilter(details) {
+  if (!details.open) return;
+  commitMultiFilter(details.id.slice(0, -"-multi".length));
+  details.open = false;
+}
+function setupMultiFilters() {
+  for (const id of MULTI_FILTER_IDS) {
+    const select = $(id), details = document.createElement("details");
+    details.id = `${id}-multi`; details.className = `multi-filter${id.includes("edition") || id === "filter-set" ? " multi-filter-editions" : ""}${id === "filter-type" ? " multi-filter-types" : ""}`;
+    const summary = document.createElement("summary"); summary.className = "custom-select-button";
+    details.append(summary);
+    const panel = document.createElement("div"), list = document.createElement("div"), actions = document.createElement("div");
+    panel.className = "multi-filter-panel"; list.className = "multi-filter-list"; actions.className = "multi-filter-actions";
+    list.setAttribute("role", "group");
+    for (const [text, checked] of [["Tout cocher", true], ["Tout décocher", false]]) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "secondary-button"; button.textContent = text;
+      button.addEventListener("click", () => list.querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = checked; }));
+      actions.append(button);
+    }
+    const apply = document.createElement("button"); apply.type = "button"; apply.className = "primary-button"; apply.textContent = "Valider";
+    apply.addEventListener("click", () => {
+      closeMultiFilter(details); summary.focus();
+    });
+    actions.append(apply); panel.append(list, actions); details.append(panel);
+    details.addEventListener("toggle", () => {
+      if (details.open) {
+        document.querySelectorAll(".multi-filter[open]").forEach(other => { if (other !== details) closeMultiFilter(other); });
+        renderMultiFilter(id);
+      } else commitMultiFilter(id);
+    });
+    const label = select.parentElement, field = document.createElement("div");
+    field.className = "multi-filter-field";
+    label.before(field); field.append(label, details);
+    const labelText = label.querySelector(".search-field-label")?.textContent?.trim() || label.textContent.trim();
+    select.dataset.filterLabel = labelText;
+    list.setAttribute("aria-label", labelText);
+    select.dataset.multiFilter = "true";
+    select.hidden = true;
+    details.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.preventDefault(); closeMultiFilter(details); summary.focus(); }
+    });
+    renderMultiFilter(id);
+  }
+  document.addEventListener("pointerdown", event => {
+    document.querySelectorAll(".multi-filter[open]").forEach(details => {
+      if (!details.contains(event.target)) closeMultiFilter(details);
+    });
+  });
+}
 function colorSymbols(colors) {
   if (!Array.isArray(colors)) return null;
   const values = colors.length ? colors : ["C"];
@@ -229,6 +310,7 @@ function cardActionIcon(name) {
     download: [["path", { d: "M12 15V3" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }], ["path", { d: "m7 10 5 5 5-5" }]],
     addDeck: [["path", { d: "M12 10v6" }], ["path", { d: "M9 13h6" }], ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }]],
     usages: [["rect", { x: 3, y: 3, width: 7, height: 7, rx: 1 }], ["rect", { x: 14, y: 3, width: 7, height: 7, rx: 1 }], ["path", { d: "M6.5 14v7m-3.5-3.5h7M14 15h7m-7 4h7" }]],
+    occurrences: [["rect", { x: 8, y: 8, width: 13, height: 13, rx: 2 }], ["path", { d: "M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" }]],
     flip: [["path", { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }], ["path", { d: "M21 3v5h-5" }], ["path", { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }], ["path", { d: "M8 16H3v5" }]]
   };
   const namespace = "http://www.w3.org/2000/svg";
@@ -289,6 +371,7 @@ function viewRoute(view = state.view) {
     add("q", applied.q); add("set", applied.set);
     add("rarity", applied.rarity); add("card_type", applied.card_type);
     add("colors", applied.color); add("color_mode", applied.color_mode, "contains");
+    add("oracle_id", applied.oracle_id); add("printing_id", applied.printing_id); add("unique", applied.unique);
     for (const [key, value] of Object.entries(refined)) add(key, value);
     add("page", state.searchPage + 1, 1);
   } else if (view === "editions") {
@@ -341,12 +424,14 @@ async function restoreRoute() {
   const query = new URLSearchParams(separator < 0 ? "" : fragment.slice(separator + 1));
   if (view === "recherche") {
     state.searchExecuted = query.has("searched") || query.size > 0;
-    $("query").value = query.get("q") || ""; $("filter-set").value = groupedEditionCode(query.get("set"));
-    $("filter-rarity").value = query.get("rarity") || "";
+    $("query").value = query.get("q") || ""; setMultiValue("filter-set", query.get("set"));
+    setMultiValue("filter-rarity", query.get("rarity"));
     restoreManaColors($("filter-color"), query.get("colors"));
     $("filter-color-mode").value = query.get("color_mode") || "contains";
     const savedCardType = (query.get("card_type") || query.get("type") || "").toLowerCase();
-    $("filter-type").value = [...$("filter-type").options].some(option => option.value === savedCardType) ? savedCardType : "";
+    setMultiValue("filter-type", savedCardType);
+    $("search-unique").checked = query.get("unique") === "1";
+    state.searchIdentity = { oracle_id: query.get("oracle_id") || "", printing_id: query.get("printing_id") || "" };
     for (const [key, id] of Object.entries(REFINE_IDS)) $(id).value = query.get(key) || (key === "image_filter" ? "all" : key === "result_order" ? "desc" : key === "result_sort" ? "date" : "");
     const legacySort = query.get("result_sort");
     if (legacySort && legacySort.includes("_")) {
@@ -355,8 +440,8 @@ async function restoreRoute() {
     state.searchBaseFilters = mainSearchFilters();
     state.refineFilters = refineSearchFilters();
     state.searchPage = routePage(query);
-    if (pendingUserDraft) applySearchDraft(pendingUserDraft);
-    else if (pendingStoredDraft?.route === location.hash) applySearchDraft(pendingStoredDraft);
+    if (!query.has("auto") && pendingUserDraft) applySearchDraft(pendingUserDraft);
+    else if (!query.has("auto") && pendingStoredDraft?.route === location.hash) applySearchDraft(pendingStoredDraft);
   } else if (view === "editions") {
     $("edition-query").value = query.get("q") || "";
     state.exactEditionCode = query.has("exact") ? query.get("set") : null;
@@ -368,8 +453,8 @@ async function restoreRoute() {
     await loadDeckFacets();
     if (request !== routeRestoreRequest) return;
     $("deck-query").value = query.get("q") || "";
-    $("deck-format").value = query.get("format") || ""; $("deck-edition").value = query.get("set") || "";
-    $("deck-type").value = query.get("type") || "";
+    setMultiValue("deck-format", query.get("format")); setMultiValue("deck-edition", query.get("set"));
+    setMultiValue("deck-type", query.get("type"));
     restoreManaColors(document.querySelector(".deck-color-filter"), query.get("colors"));
     $("deck-color-mode").value = query.get("color_mode") || "contains";
     $("deck-sort").value = query.get("sort") || "date"; $("deck-order").value = query.get("order") || "desc";
@@ -389,6 +474,7 @@ async function restoreRoute() {
     else if (id !== state.openDeckId) void openDeck(id, null);
   }
   setView(view, null);
+  if (view === "recherche" && query.get("auto") === "1") { void runSearch(); return; }
   if (view === "perso" && query.get("deck") && personalState.deck?.id !== query.get("deck"))
     void openPersonalDeck(query.get("deck"));
   if (restoreDeckScroll) scrollToDeckList();
@@ -737,6 +823,7 @@ async function loadEditions() {
     const options = document.createDocumentFragment(); options.append(select.options[0]);
     for (const e of grouped) { const option = document.createElement("option"); option.value = e.code; option.textContent = `${e.name_fr || e.name} (${e.code.split(",")[0]})`; option.dataset.searchTerms = [e.name_fr || e.name, e.name || e.name_fr, ...e.code.split(",")].map(editionSearchKey).join("|"); options.append(option); }
     select.replaceChildren(options); select.value = groupedEditionCode(selected);
+    if (id === "filter-set") renderMultiFilter(id);
   }
   renderEditionSuggestions();
   setText($("edition-count"), `${formatNumber(grouped.length)} groupes d’éditions · ${formatNumber(all.length)} séries interrogeables.`);
@@ -799,7 +886,7 @@ function attachEditionSuggestions(inputId, listId, selectId, onSelect) {
   const input = $(inputId), list = $(listId), select = $(selectId);
   let codes = [], active = -1;
   const hide = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); active = -1; };
-  const choose = code => { select.value = code; input.value = ""; hide(); onSelect(); };
+  const choose = code => { if (MULTI_FILTER_IDS.includes(selectId)) setMultiValue(selectId, code); else select.value = code; input.value = ""; hide(); onSelect(); };
   const render = () => {
     const term = editionSearchKey(input.value.trim());
     list.replaceChildren(); codes = []; hide();
@@ -866,7 +953,7 @@ async function renderDeckSuggestions() {
   }
 }
 const REFINE_IDS = { image_filter: "refine-images", result_sort: "refine-sort", result_order: "refine-order", mana_min: "refine-mana-min", mana_max: "refine-mana-max", power_min: "refine-power-min", power_max: "refine-power-max", toughness_min: "refine-toughness-min", toughness_max: "refine-toughness-max" };
-function mainSearchFilters() { return { q: $("query").value.trim(), set: $("filter-set").value, rarity: $("filter-rarity").value.toLowerCase(), color: selectedManaColors($("filter-color")), color_mode: $("filter-color-mode").value, card_type: $("filter-type").value }; }
+function mainSearchFilters() { return { q: $("query").value.trim(), set: multiValue("filter-set"), rarity: multiValue("filter-rarity").toLowerCase(), color: selectedManaColors($("filter-color")), color_mode: $("filter-color-mode").value, card_type: multiValue("filter-type"), oracle_id: state.searchIdentity?.oracle_id || "", printing_id: state.searchIdentity?.printing_id || "", unique: $("search-unique").checked ? "1" : "" }; }
 function refineSearchFilters() { return Object.fromEntries(Object.entries(REFINE_IDS).map(([key, id]) => [key, $(id).value])); }
 function captureSearchDraft() { return { route: location.hash, main: mainSearchFilters(), refine: refineSearchFilters() }; }
 function readSearchDraft() {
@@ -878,11 +965,13 @@ function readSearchDraft() {
 function applySearchDraft(draft) {
   const main = draft.main || {}, refine = draft.refine || {};
   $("query").value = main.q || "";
-  $("filter-set").value = groupedEditionCode(main.set);
-  $("filter-rarity").value = main.rarity || "";
+  setMultiValue("filter-set", main.set);
+  setMultiValue("filter-rarity", main.rarity);
   restoreManaColors($("filter-color"), main.color);
   $("filter-color-mode").value = main.color_mode || "contains";
-  $("filter-type").value = main.card_type || "";
+  setMultiValue("filter-type", main.card_type);
+  $("search-unique").checked = main.unique === "1";
+  state.searchIdentity = { oracle_id: main.oracle_id || "", printing_id: main.printing_id || "" };
   for (const [key, id] of Object.entries(REFINE_IDS)) {
     const fallback = key === "image_filter" ? "all" : key === "result_order" ? "desc" : key === "result_sort" ? "date" : "";
     $(id).value = refine[key] || fallback;
@@ -930,6 +1019,7 @@ function renderRecentSearches() {
     option.addEventListener("pointerdown", event => event.preventDefault());
     option.addEventListener("click", () => {
       input.value = term;
+      state.searchIdentity = null;
       searchDraftTouched = true;
       persistSearchDraft();
       input.focus();
@@ -1025,7 +1115,7 @@ function batchTimeRemaining(task) {
   const minutes = Math.floor(seconds % 3600 / 60);
   return ` · temps restant estimé : ${hours ? `${hours} h ` : ""}${minutes} min`;
 }
-function deckResultFilters() { return { q: $("deck-query").value.trim(), deck_format: $("deck-format").value, deck_type: $("deck-type").value, set_code: $("deck-edition").value, colors: selectedManaColors(document.querySelector(".deck-color-filter")), color_mode: $("deck-color-mode").value, sort: $("deck-sort").value, order: $("deck-order").value, image_filter: $("deck-image-filter").value }; }
+function deckResultFilters() { return { q: $("deck-query").value.trim(), deck_format: multiValue("deck-format"), deck_type: multiValue("deck-type"), set_code: multiValue("deck-edition"), colors: selectedManaColors(document.querySelector(".deck-color-filter")), color_mode: $("deck-color-mode").value, sort: $("deck-sort").value, order: $("deck-order").value, image_filter: $("deck-image-filter").value }; }
 function deckHasFilter() { const f = state.deckAppliedFilters || {}; return Boolean(f.q || f.deck_format || f.deck_type || f.set_code || f.colors); }
 function updateBatchButtons() {
   $("download-search-results").disabled = Boolean(batchTaskId) || !state.searchExecuted || !state.searchTotal;
@@ -1062,9 +1152,9 @@ async function openBatchDownloadTask(task) {
   } else {
     await loadDeckFacets();
     $("deck-query").value = filters.q || "";
-    $("deck-format").value = filters.deck_format || "";
-    $("deck-type").value = filters.deck_type || "";
-    $("deck-edition").value = filters.set_code || "";
+    setMultiValue("deck-format", filters.deck_format);
+    setMultiValue("deck-type", filters.deck_type);
+    setMultiValue("deck-edition", filters.set_code);
     restoreManaColors(document.querySelector(".deck-color-filter"), filters.colors);
     $("deck-color-mode").value = filters.color_mode || "contains";
     $("deck-sort").value = filters.sort || "date";
@@ -1242,13 +1332,16 @@ async function showCardUsages(card) {
   });
   dialog.append(title, tabs, content, close); document.body.append(dialog);
   dialog.addEventListener("close", () => dialog.remove(), { once: true }); dialog.showModal();
-  const group = (label, entries, route, name) => {
+  const group = (label, entries, route, name, icon) => {
     const section = node("section", "card-usages-group");
     section.append(node("h3", "", label));
     if (!entries?.length) section.append(node("p", "muted", "Aucune occurrence locale connue."));
     for (const entry of entries || []) {
-      const link = node("a", "secondary-button", name(entry));
+      const link = node("a", "secondary-button");
       link.href = `${location.origin}/${route(entry)}`; link.target = "_blank"; link.rel = "noopener noreferrer";
+      const symbol = icon(entry);
+      if (symbol) link.append(symbol);
+      link.append(node("span", "", name(entry)));
       section.append(link);
     }
     return section;
@@ -1259,9 +1352,15 @@ async function showCardUsages(card) {
     const renderScope = scope => {
       const entries = data[scope] || data;
       content.replaceChildren(
-        group("Éditions", entries.editions, e => `#editions?set=${encodeURIComponent(e.code)}&exact=1`, e => `${e.name_fr || e.name || e.code} (${e.code.toUpperCase()})`),
-        group("Decks préconstruits chargés", entries.decks, d => `#decks?deck=${encodeURIComponent(d.id)}`, d => d.name_fr || d.name || d.id),
-        group("Decks personnels", entries.personal_decks, d => `#perso?deck=${encodeURIComponent(d.id)}`, d => d.name || d.id));
+        group("Éditions", entries.editions, e => `#editions?set=${encodeURIComponent(e.code)}&exact=1`, e => `${e.name_fr || e.name || e.code} (${e.code.toUpperCase()})`, e => {
+          if (!e.edition_icon_url) return null;
+          const image = node("img", "card-usages-edition-icon");
+          image.src = e.edition_icon_url; image.alt = ""; image.loading = "lazy";
+          image.addEventListener("error", () => image.remove(), { once: true });
+          return image;
+        }),
+        group("Decks préconstruits chargés", entries.decks, d => `#decks?deck=${encodeURIComponent(d.id)}`, d => d.name_fr || d.name || d.id, d => colorSymbols(d.colors)),
+        group("Decks personnels", entries.personal_decks, d => `#perso?deck=${encodeURIComponent(d.id)}`, d => d.name || d.id, d => colorSymbols(d.colors)));
       if (data.unloaded_decks) content.append(node("p", "muted", "Les decks préconstruits non encore chargés ne sont pas examinés."));
       for (const button of tabs.children) button.setAttribute("aria-selected", String(button.dataset.scope === scope));
     };
@@ -1723,6 +1822,20 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
       addPersonal.type = "button"; addPersonal.setAttribute("aria-label", "Ajouter cette carte à un deck personnel");
       addPersonal.addEventListener("click", () => void choosePersonalDeck(card));
       controls.append(addPersonal);
+      const english = card.translations?.find(record => record.lang === "en");
+      const typeLine = english?.type_line || card.type_line || "";
+      const typeNames = { creature: "Creature", land: "Land", instant: "Instant", sorcery: "Sorcery", artifact: "Artifact", enchantment: "Enchantment", planeswalker: "Planeswalker", battle: "Battle", kindred: "Kindred|Tribal", plane: "Plane", phenomenon: "Phenomenon", scheme: "Scheme", conspiracy: "Conspiracy", vanguard: "Vanguard", dungeon: "Dungeon" };
+      const selectedTypes = Object.entries(typeNames).filter(([, name]) => new RegExp(`\\b(?:${name})\\b`, "i").test(typeLine)).map(([key]) => key);
+      if (["token", "double_faced_token"].includes(card.layout)) selectedTypes.push("token");
+      const occurrencesQuery = new URLSearchParams({ searched: "1", auto: "1", q: english?.name || card.name || "", colors: card.colors_key || "C", color_mode: "exact" });
+      if (card.oracle_id) occurrencesQuery.set("oracle_id", card.oracle_id);
+      else occurrencesQuery.set("printing_id", card.printing_id);
+      if (selectedTypes.length) occurrencesQuery.set("card_type", selectedTypes.join("|"));
+      const occurrences = node("a", "secondary-button card-image-icon card-occurrences-button"); occurrences.append(cardActionIcon("occurrences"));
+      occurrences.href = `${location.href.split("#")[0]}#recherche?${occurrencesQuery}`;
+      occurrences.target = "_blank"; occurrences.rel = "noopener noreferrer";
+      occurrences.setAttribute("aria-label", "Voir toutes les occurrences de la carte");
+      controls.append(occurrences);
       const usages = node("button", "secondary-button card-image-icon card-usages-button"); usages.append(cardActionIcon("usages"));
       usages.type = "button"; usages.setAttribute("aria-label", "Voir les éditions et decks utilisant cette carte");
       usages.addEventListener("click", () => void showCardUsages(card));
@@ -2004,7 +2117,7 @@ async function loadDeckFacets(force = false) {
     for (const type of [...(data.types || [])].sort((a, b) => productTypeLabel(a).localeCompare(productTypeLabel(b), "fr"))) {
       const option = document.createElement("option"); option.value = type; option.textContent = productTypeLabel(type); select.append(option);
     }
-    select.value = current;
+    select.value = current; renderMultiFilter("deck-type");
     const editionSelect = $("deck-edition"), selectedEdition = editionSelect.value, firstEdition = editionSelect.options[0];
     editionSelect.replaceChildren(firstEdition);
     for (const edition of data.editions || []) {
@@ -2014,7 +2127,7 @@ async function loadDeckFacets(force = false) {
       option.dataset.searchTerms = [edition.name_fr, edition.name_en, edition.code].map(editionSearchKey).filter(Boolean).join("|");
       editionSelect.append(option);
     }
-    editionSelect.value = selectedEdition;
+    editionSelect.value = selectedEdition; renderMultiFilter("deck-edition");
     const coverage = Number(data.color_indexed || 0), total = Number(data.total || 0);
     const incomplete = coverage < total;
     document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button => { button.disabled = incomplete; });
@@ -2521,6 +2634,7 @@ document.querySelector(".brand").addEventListener("click", event => { event.prev
 window.addEventListener("popstate", restoreRoute);
 window.addEventListener("hashchange", restoreRoute);
 $("search-form").addEventListener("input", event => {
+  if (event.target === $("query")) state.searchIdentity = null;
   searchDraftTouched = true;
   persistSearchDraft();
   setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche.");
@@ -2538,13 +2652,19 @@ $("search-submit").addEventListener("click", () => {
   state.searchPage = 0;
   void runSearch();
 });
+$("search-unique").addEventListener("change", () => {
+  if (!state.searchExecuted) return;
+  state.searchBaseFilters = mainSearchFilters();
+  state.searchPage = 0;
+  void runSearch();
+});
 $("download-search-results").addEventListener("click", () => void startBatchDownload("search"));
 $("download-edition-results").addEventListener("click", () => void startBatchDownload("edition"));
 $("download-deck-results").addEventListener("click", () => void startBatchDownload("decks"));
 $("refresh-search-results").addEventListener("click", () => void refreshSearchImages());
 $("refresh-edition-results").addEventListener("click", () => void renderEditionPage());
 $("refresh-deck-results").addEventListener("click", () => void refreshDeckResults());
-$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("refresh-search-results").disabled = false; $("search-form").reset(); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
+$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("refresh-search-results").disabled = false; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
 $("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
 $("query").addEventListener("focus", renderRecentSearches);
 $("query").addEventListener("click", renderRecentSearches);
@@ -2609,6 +2729,7 @@ $("clear-deck-filters").addEventListener("click", () => {
   for (const id of ["deck-query", "deck-edition-query", "deck-format", "deck-type", "deck-edition", "deck-color-mode", "deck-image-filter", "deck-sort", "deck-order"]) {
     const field = $(id); field.value = field.options ? field.options[0].value : "";
   }
+  for (const id of ["deck-edition", "deck-format", "deck-type"]) setMultiValue(id, "");
   document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button => setManaPressed(button, false));
   clearTimeout(deckSuggestionTimer); ++state.deckSuggestionRequest;
   hideDeckSuggestions();
@@ -2706,6 +2827,7 @@ $("image-choice-dialog").addEventListener("close", () => {
 });
 $("back-to-deck-list").addEventListener("click", () => closeDeck());
 const initialView = location.hash.slice(1).split("?", 1)[0];
+setupMultiFilters();
 activateView(ROUTE_VIEWS.has(initialView) ? initialView : "info");
 initialInfo = loadHome();
 initialEditions = ensureEditions();

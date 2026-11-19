@@ -128,6 +128,8 @@ cartes V2 et de son cycle de publication.
   jouables, hors jetons, cartes de plan et machinations. Un jeton dérivé ne
   modifie jamais l'identité de couleur indexée du deck.
   Un filtre couleur ne renvoie que les decks indexés couleur.
+  Les filtres d'édition, de format et de type de produit acceptent plusieurs
+  valeurs ; une sélection vide explicite renvoie zéro deck.
 - Le filtre accepte W/U/B/R/G et C ; `C` ajoute les decks
   indexés incolores (`colors=''`) aux résultats des couleurs choisies.
   En mode `contains` (défaut), les autres couleurs cochées doivent toutes être

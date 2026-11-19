@@ -1,9 +1,37 @@
 import json
+import sqlite3
 import threading
 import time
 import urllib.request
 
 from bibliotheque_mtg import local_app
+from bibliotheque_mtg.v2.catalogue import migrate
+from .test_catalogue_v2 import source_database
+
+
+def test_card_usage_exposes_edition_icon_and_deck_colors(monkeypatch, tmp_path):
+    source = tmp_path / "source.sqlite"
+    catalogue = tmp_path / "catalogue.sqlite"
+    source_database(source)
+    migrate(source, catalogue, archive_sha256="d" * 64, archive_as_of="2026-10-20")
+    with sqlite3.connect(catalogue) as conn:
+        printing = conn.execute("SELECT printing_id FROM source_records WHERE provider_card_id='en-1'").fetchone()[0]
+    decks_db = tmp_path / "decks.sqlite"
+    with sqlite3.connect(decks_db) as conn:
+        conn.executescript("CREATE TABLE decks(id TEXT,name TEXT,name_fr TEXT,set_code TEXT,set_name TEXT,set_name_fr TEXT,colors TEXT,loaded INTEGER); CREATE TABLE deck_cards(deck_id TEXT,set_code TEXT,collector_number TEXT,raw_json TEXT);")
+        conn.execute("INSERT INTO decks VALUES(?,?,?,?,?,?,?,?)", ("deck-1", "Test deck", None, "s1", "Set One", None, "WU", 1))
+        conn.execute("INSERT INTO deck_cards VALUES(?,?,?,?)", ("deck-1", "s1", "1", json.dumps({"identifiers": {"scryfallId": "en-1"}})))
+    personal_db = tmp_path / "personal.sqlite"
+    with sqlite3.connect(personal_db) as conn:
+        conn.execute("CREATE TABLE personal_decks(document TEXT)")
+        conn.execute("INSERT INTO personal_decks VALUES(?)", (json.dumps({"id": "personal-1", "name": "Personal", "colors": ["B"], "sections": [{"cards": [{"printing_id": printing}]}]}),))
+    monkeypatch.setattr(local_app, "DECK_DB", decks_db)
+    monkeypatch.setattr(local_app, "PERSONAL_DECK_DB", personal_db)
+    monkeypatch.setattr(local_app, "_edition_icon_urls", lambda codes, db: {"s1": "https://svgs.scryfall.io/sets/s1.svg"})
+    usage = local_app._card_usage(catalogue, "en-1")
+    assert usage["exact"]["editions"][0]["edition_icon_url"] == "https://svgs.scryfall.io/sets/s1.svg"
+    assert usage["exact"]["decks"][0]["colors"] == ["W", "U"]
+    assert usage["exact"]["personal_decks"][0]["colors"] == ["B"]
 
 
 def test_manual_image_import_is_allowed_during_batch_download(monkeypatch):

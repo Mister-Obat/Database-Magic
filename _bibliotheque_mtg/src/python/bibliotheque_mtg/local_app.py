@@ -1428,13 +1428,17 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
                 code = row["code"]
                 editions.setdefault(code, {"code": code, "name": row["name"], "name_fr": _SET_NAMES_FR.get(code.upper()), "released_at": row["released_at"]})
             usage["editions"] = sorted(editions.values(), key=lambda x: (x["released_at"] or "", x["code"]), reverse=True)
+        icons = _edition_icon_urls({row["code"].lower() for row in rows}, OPS_ROOT / "catalogue.sqlite")
+        for usage in (exact, global_usage):
+            for edition in usage["editions"]:
+                edition["edition_icon_url"] = icons.get(edition["code"].lower())
 
         matches = {"exact": {}, "global": {}}
         if DECK_DB.exists():
             with sqlite3.connect(f"{DECK_DB.resolve().as_uri()}?mode=ro", uri=True) as deck_conn:
                 deck_conn.row_factory = sqlite3.Row
                 result["unloaded_decks"] = deck_conn.execute("SELECT count(*) FROM decks WHERE loaded=0").fetchone()[0]
-                for row in deck_conn.execute("""SELECT d.id,d.name,d.name_fr,d.set_code,d.set_name,d.set_name_fr,
+                for row in deck_conn.execute("""SELECT d.id,d.name,d.name_fr,d.set_code,d.set_name,d.set_name_fr,d.colors,
                         c.set_code AS card_set,c.collector_number,c.raw_json
                         FROM decks d JOIN deck_cards c ON c.deck_id=d.id WHERE d.loaded=1"""):
                     try:
@@ -1463,6 +1467,7 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
                     except (ValueError, TypeError, AttributeError):
                         continue
                     item = {key: row[key] for key in ("id", "name", "name_fr", "set_code", "set_name", "set_name_fr")}
+                    item["colors"] = list(row["colors"]) if row["colors"] is not None else None
                     if is_exact:
                         matches["exact"][row["id"]] = item
                     if is_global:
@@ -1477,7 +1482,7 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
                         continue
                     cards = [c for section in deck.get("sections", []) for c in section.get("cards", [])]
                     resolved = {c.get("printing_id") or id_to_printing.get(c.get("provider_card_id")) for c in cards}
-                    item = {"id": deck["id"], "name": deck["name"]}
+                    item = {"id": deck["id"], "name": deck["name"], "colors": deck.get("colors")}
                     if printing in resolved:
                         exact["personal_decks"].append(item)
                     if resolved & printings:
