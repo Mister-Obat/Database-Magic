@@ -2,7 +2,8 @@
 
 ## Cartes proxy
 
-Dans Perso, **Voir les proxies** ouvre une sous-page paginée. La visionneuse
+Dans Perso, **Voir les proxies** ouvre une sous-page paginée. Les cartes à
+référencer précèdent les cartes référencées. La visionneuse
 affiche l’image locale et propose un choix d’impression réelle par nom et
 édition. La sélection associe les caractéristiques de cette impression à la
 carte de l’édition **Proxy**. Les proxies sont également interrogeables dans
@@ -12,6 +13,17 @@ Ses résultats montrent les miniatures disponibles localement avec aperçu au
 survol. Pour un proxy associé, la fiche propose de réassocier la carte,
 remplacer l’image par un fichier local, exporter l’image sur le Bureau,
 ajouter le proxy à un deck personnel et consulter ses occurrences.
+Le sélecteur d’ajout permet de créer un deck sur place par son nom. Chaque clic
+sur un deck ajoute un exemplaire. La liste reste ouverte jusqu’à validation ou
+fermeture par l’utilisateur.
+Dans un deck personnel, la grille reste en présentation de consultation avec
+quantités, retrait confirmé et déplacement par glisser-déposer. Le nom de
+chaque section se modifie sur place, avec validation, annulation ou suppression.
+Le formulaire du nom et des couleurs garde les changements en brouillon
+jusqu’à validation. L’annulation conserve le nom et les couleurs existants.
+Le bouton Modifier se trouve dans le titre du deck. L’action Dupliquer ouvre
+un champ prérempli et crée un deck indépendant qui conserve l’ordre, les sections,
+les couleurs et les quantités de l’original.
 Le téléchargement d’un proxy sur le Bureau produit une copie PNG de 531 × 738
 pixels avec marges transparentes si nécessaire. L’image du dossier reste intacte.
 Les occurrences distinguent l’impression Proxy de l’ensemble de la carte

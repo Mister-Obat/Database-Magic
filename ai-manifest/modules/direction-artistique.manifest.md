@@ -8,15 +8,17 @@ Référence du 18 novembre 2026 pour Accueil, Recherche, Éditions, Decks et Arc
 
 Une retouche de cette DA agit sur les couleurs, les contours et les états visuels. Toute évolution des fenêtres, des modales, de la disposition ou du comportement relève d’une demande distincte.
 
-La visionneuse de carte, la recherche et la sélection d’images, la génération IA et sa confirmation de traduction reprennent cette palette sur leurs fonds, surfaces, champs, boutons et états. Leur montage hors des vues du catalogue exige que leurs variables de couleur soient définies sur les dialogues eux-mêmes. L’aperçu agrandi, ajouté directement au document et partagé par Recherche, Éditions, Archives et Decks (y compris le commandant), utilise le contour lilas clair. Les boutons de fermeture des dialogues de carte, de comparaison et de deck reprennent le bouton secondaire de l’en-tête ; celui du deck défile avec son contenu.
+La visionneuse de carte, la recherche et la sélection d’images, la génération IA et sa confirmation de traduction reprennent cette palette sur leurs fonds, surfaces, champs, boutons et états. Leur montage hors des vues du catalogue exige que leurs variables de couleur soient définies sur les dialogues eux-mêmes. L’aperçu agrandi, ajouté directement au document et partagé par Recherche, Éditions, Archives et Decks (y compris le commandant), reprend le bord naturel de la carte. Les boutons de fermeture des dialogues de carte, de comparaison et de deck reprennent le bouton secondaire de l’en-tête ; celui du deck défile avec son contenu.
 
 ## Palette
 
 La visionneuse et son voile sombre apparaissent et disparaissent ensemble sur
 130 ms. Le voile conserve sa teinte violette sans flou. Avec la préférence
 système de réduction des animations, l’ouverture et la fermeture sont immédiates.
-Le visuel est contenu dans un cadre au ratio 531 × 738 dimensionné par l’espace
-disponible. En fenêtre étroite ou basse, les actions passent sous l’image.
+La carte suit les proportions du visuel et reste dans l’espace disponible. Les
+coins arrondis et une ombre courte suivent le bord de l’image, sans fond ni
+liseré visible dans les zones transparentes. Le même traitement s’applique à
+l’aperçu agrandi. En fenêtre étroite ou basse, les actions passent sous l’image.
 
 | Élément | Référence |
 | --- | --- |

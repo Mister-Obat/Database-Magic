@@ -509,7 +509,7 @@ def card_detail(db, provider_card_id):
     return {"contract_version":CONTRACT_VERSION,"found":True,"card":result}
 
 
-def edition_cards(db, set_code, *, limit=50, offset=0):
+def edition_cards(db, set_code, *, limit=50, offset=0, proxy_groups=False):
     limit, offset = _page(limit, offset, max_size=300)
     codes = _set_codes(set_code)
     if not codes:
@@ -519,7 +519,7 @@ def edition_cards(db, set_code, *, limit=50, offset=0):
         SELECT sr.provider_card_id,p.printing_id,e.code AS set_code,e.name AS edition,
                sr.lang,sr.name,sr.printed_name,sr.type_line,sr.printed_type_line,
                sr.mana_cost,sr.mana_value,sr.rarity,p.collector_number,p.layout,
-               p.identity_status,sr.oracle_text,sr.printed_text,
+               p.identity_status,sr.oracle_text,sr.printed_text,p.variant_attributes_json,
                ROW_NUMBER() OVER (
                    PARTITION BY p.printing_id
                    ORDER BY CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 WHEN 'ja' THEN 2 WHEN 'ph' THEN 3 ELSE 4 END,
@@ -533,11 +533,13 @@ def edition_cards(db, set_code, *, limit=50, offset=0):
     )"""
     with _connection(db) as c:
         total = c.execute(ranked + " SELECT COUNT(*) FROM ranked WHERE preferred_rank=1", codes).fetchone()[0]
+        association = ",json_extract(variant_attributes_json,'$.proxy_source_id') AS proxy_source_id" if proxy_groups else ""
+        order = "proxy_source_id IS NOT NULL," if proxy_groups else ""
         rows = c.execute(
             ranked + " SELECT provider_card_id,printing_id,set_code,edition,lang,name,printed_name,"
             "type_line,printed_type_line,mana_cost,mana_value,rarity,collector_number,layout,"
-            "identity_status,oracle_text,printed_text FROM ranked WHERE preferred_rank=1 "
-            "ORDER BY CAST(collector_number AS INTEGER),collector_number,printing_id LIMIT ? OFFSET ?",
+            "identity_status,oracle_text,printed_text" + association + " FROM ranked WHERE preferred_rank=1 "
+            "ORDER BY " + order + "CAST(collector_number AS INTEGER),collector_number,printing_id LIMIT ? OFFSET ?",
             codes + [limit, offset],
         ).fetchall()
     return {"contract_version": CONTRACT_VERSION, "total": total, "limit": limit,

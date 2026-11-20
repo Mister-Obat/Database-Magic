@@ -308,6 +308,8 @@ function cardActionIcon(name) {
   const shapes = {
     search: [["path", { d: "m21 21-4.34-4.34" }], ["circle", { cx: 11, cy: 11, r: 8 }]],
     minus: [["path", { d: "M5 12h14" }]],
+    close: [["path", { d: "m18 6-12 12M6 6l12 12" }]],
+    arrowUp: [["path", { d: "M12 19V5m-7 7 7-7 7 7" }]],
     plus: [["path", { d: "M5 12h14" }], ["path", { d: "M12 5v14" }]],
     upload: [["path", { d: "M12 3v12" }], ["path", { d: "m17 8-5-5-5 5" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }]],
     download: [["path", { d: "M12 15V3" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }], ["path", { d: "m7 10 5 5 5-5" }]],
@@ -1946,7 +1948,12 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
         img.alt = card.printed_name || card.name || "Image de carte";
         img.loading = "eager";
         img.src = currentCardImageUrl(card) || `/assets?${params({ path: slot.relative_path })}`;
-        try { await img.decode(); visual = img; }
+        try {
+          await img.decode();
+          if (img.naturalWidth && img.naturalHeight)
+            img.style.setProperty("--viewer-image-ratio", String(img.naturalWidth / img.naturalHeight));
+          visual = img;
+        }
         catch { visual = node("div", "card-viewer-missing", "Image indisponible"); }
       } else visual = node("div", "card-viewer-missing", "Image absente");
       if (faceLoad !== faceRequest || request !== state.cardRequest || !dialog.open) return;
@@ -2529,7 +2536,11 @@ const hoverPreview=node("img","archive-hover-preview");
 hoverPreview.hidden=true;hoverPreview.alt="";document.body.append(hoverPreview);
 function attachHoverPreview(thumbnail, focusTarget=thumbnail, enlarged=hoverPreview){
   const position=(x,y)=>{
-    const width=Math.min(350,window.innerWidth-24),height=Math.min(window.innerHeight*.82,width*738/531);
+    const ratio=thumbnail.naturalWidth/thumbnail.naturalHeight;
+    const width=Math.min(350,window.innerWidth-24,window.innerHeight*.82*ratio);
+    const height=width/ratio;
+    enlarged.style.width=`${width}px`;
+    enlarged.style.height=`${height}px`;
     const left=x+18+width>window.innerWidth?x-width-18:x+18;
     enlarged.style.left=`${Math.max(12,Math.min(left,window.innerWidth-width-12))}px`;
     enlarged.style.top=`${Math.max(12,Math.min(y-height/2,window.innerHeight-height-12))}px`;
@@ -3051,15 +3062,15 @@ function personalButton(label, action, primary = false) {
 async function renderPersonalProxies() {
     const request = ++proxyState.request;
     const root = $("personal-content");
-    $("personal-heading-content").replaceChildren(node("h1", "", "Proxies"));
-    $("personal-heading-content").firstElementChild.id = "personal-title";
+    $("personal-heading-content").replaceChildren(...deckTitleContent(
+        "Cartes personnelles", "Proxies", null, "personal-title"));
     personalStatus("");
     const toolbar = node("div", "personal-toolbar");
     toolbar.append(personalButton("Retour aux decks personnels", () => {
         renderPersonalList();
         syncRoute("push");
     }));
-    const grid = node("div", "results-grid");
+    const grid = node("div", "personal-proxy-groups");
     grid.id = "personal-proxy-grid";
     grid.setAttribute("aria-live", "polite");
     const pager = node("div", "pager");
@@ -3086,7 +3097,17 @@ async function renderPersonalProxies() {
             await renderPersonalProxies();
             return;
         }
-        renderEditionItems(grid, data.items, "Aucun proxy dans la collection.");
+        grid.replaceChildren();
+        for (const [title, linked] of [["À référencer", false], ["Référencés", true]]) {
+            const items = data.items.filter(item => Boolean(item.proxy_source_id) === linked);
+            if (!items.length) continue;
+            const section = node("section", "deck-section");
+            const cards = node("div", "results-grid personal-proxy-cards");
+            section.append(node("h3", "", title), cards);
+            renderEditionItems(cards, items);
+            grid.append(section);
+        }
+        if (!data.total) grid.append(node("p", "empty-state", "Aucun proxy dans la collection."));
         pager.hidden = pages <= 1;
         prev.disabled = proxyState.page === 0;
         next.disabled = proxyState.page + 1 >= pages;
@@ -3482,7 +3503,7 @@ function renderPersonalList(initialDecks = null) {
         for (const deck of items) {
             const entry = node("article", "personal-list-entry");
             const tile = deckCoverTile(deck.name, deck.colors || [], deck.cover_card, () => void openPersonalDeck(deck.id));
-            const remove = personalButton("Supprimer", async () => {
+            const remove = personalButton("", async () => {
                 if (!window.confirm(`Supprimer le deck « ${deck.name} » ?`)) return;
                 remove.disabled = true;
                 try {
@@ -3496,6 +3517,8 @@ function renderPersonalList(initialDecks = null) {
                 }
             });
             remove.setAttribute("aria-label", `Supprimer le deck ${deck.name}`);
+            remove.classList.add("personal-card-remove");
+            remove.append(cardActionIcon("close"));
             entry.append(tile, remove);
             list.append(entry);
         }
@@ -3673,21 +3696,21 @@ function personalMove(sourceId, cardId, targetId, beforeId = null) {
     personalChanged();
     renderPersonalEditor();
 }
-function updatePersonalHeading(deck = null) {
-    $("personal-heading-content").replaceChildren(...deckTitleContent(
+function updatePersonalHeading(deck = null, editButton = null) {
+    const [eyebrow, heading] = deckTitleContent(
         deck ? "Deck personnel" : "Votre collection de compositions",
         deck?.name || "Decks personnels",
         deck ? deck.colors || [] : null,
         "personal-title",
-    ));
+    );
+    if (editButton) heading.append(editButton);
+    $("personal-heading-content").replaceChildren(eyebrow, heading);
 }
 function renderPersonalEditor() {
     const deck = personalState.deck, root = $("personal-content"), editing = personalState.editing;
-    root.classList.toggle("personal-editing", editing);
     hoverPreview.hidden = true;
     if (!deck)
         return;
-    updatePersonalHeading(deck);
     root.replaceChildren();
     const actions = node("div", "personal-toolbar"), back = personalButton("Retour à la liste", async () => {
         back.disabled = true;
@@ -3699,7 +3722,7 @@ function renderPersonalEditor() {
         }
         else
             back.disabled = false;
-    });
+    }, true);
     const exportButton = personalButton("Exporter le deck sur le Bureau", async () => {
         exportButton.disabled = true;
         try {
@@ -3716,17 +3739,14 @@ function renderPersonalEditor() {
         }
     });
     actions.append(back, exportButton);
-    const editButton = personalButton(editing ? "Terminer" : "Modifier", async () => {
-        if (editing) {
-            editButton.disabled = true;
-            if (!await flushPersonal()) {
-                editButton.disabled = false;
-                return;
-            }
-        }
-        personalState.editing = !editing;
+    const editButton = personalButton("Modifier", () => {
+        personalState.editing = { name: deck.name, colors: [...(deck.colors || [])] };
         renderPersonalEditor();
-    }, true);
+        $("personal-content").querySelector(".personal-deck-fields input")?.focus();
+    });
+    editButton.classList.add("personal-heading-edit");
+    editButton.setAttribute("aria-label", "Modifier le nom et les couleurs");
+    updatePersonalHeading(deck, editing ? null : editButton);
     const refresh = personalButton("", async () => {
         refresh.disabled = true;
         try {
@@ -3750,69 +3770,91 @@ function renderPersonalEditor() {
     const refreshUse = document.createElementNS("http://www.w3.org/2000/svg", "use");
     refreshUse.setAttribute("href", "#search-icon-refresh"); refreshIcon.append(refreshUse); refresh.append(refreshIcon);
     const editActions = node("div", "search-header-actions personal-edit-actions");
-    editActions.append(editButton, refresh);
+    editActions.append(personalButton("Dupliquer", () => duplicatePersonalDeck(deck)), refresh);
     actions.append(editActions);
     root.append(actions);
     if (editing) {
-        const fields = node("div", "panel personal-toolbar personal-deck-fields"), label = node("label", "", "Nom du deck"), name = node("input");
-        name.value = deck.name;
+        const fields = node("form", "panel personal-toolbar personal-deck-fields"), label = node("label", "", "Nom du deck"), name = node("input");
+        name.value = editing.name;
         name.maxLength = 200;
-        name.addEventListener("input", () => {
-            deck.name = name.value;
-            $("personal-title").textContent = deck.name || "Deck sans nom";
-            personalChanged();
-        });
+        name.required = true;
+        name.addEventListener("input", () => { editing.name = name.value; });
         label.append(name);
-        fields.append(label, personalColorField(deck.colors || [], colors => {
-            deck.colors = colors;
-            updatePersonalHeading(deck);
+        const buttons = node("div", "personal-deck-field-actions");
+        const validate = node("button", "primary-button", "Valider");
+        validate.type = "submit";
+        const finish = () => {
+            personalState.editing = false;
+            renderPersonalEditor();
+        };
+        buttons.append(validate, personalButton("Annuler", finish));
+        fields.append(label, personalColorField(editing.colors, colors => { editing.colors = colors; }), buttons);
+        fields.addEventListener("submit", event => {
+            event.preventDefault();
+            const nextName = name.value.trim();
+            if (!nextName) { name.focus(); return; }
+            deck.name = nextName;
+            deck.colors = editing.colors;
             personalChanged();
-        }));
+            finish();
+        });
         root.append(fields);
     }
-    if (editing) {
-        root.append(node("p", "muted", "Glissez une carte avant une autre, ou dans une section. La première carte de la zone de commandement représente le commandant."));
-    }
-    if (!editing && !deck.sections.some(section => section.cards.length)) {
+    if (!deck.sections.some(section => section.cards.length)) {
         root.append(node("p", "empty-state", "Ajoutez des cartes depuis Recherche."));
     }
     for (const section of deck.sections) {
-        if (!editing && !section.cards.length) continue;
-        const container = node("section", editing ? "panel personal-section" : "deck-section");
-        const sectionCount = node("span", "personal-section-count");
+        const container = node("section", "deck-section personal-section");
+        const heading = node("div", "personal-section-heading");
+        const title = deckSectionTitle(section.name, section.cards);
         const updateSectionCount = () => {
-            sectionCount.textContent = `(${deckSectionCount(section.cards)})`;
+            title.textContent = `${section.name} (${deckSectionCount(section.cards)})`;
         };
-        if (editing) {
-            const heading = node("div", "personal-toolbar"), title = node("input");
-            title.value = section.name;
-            title.setAttribute("aria-label", "Nom de la section");
-            title.addEventListener("input", () => {
-                section.name = title.value;
+        const form = node("form", "personal-section-form"), field = node("input");
+        field.setAttribute("aria-label", "Nom de la section");
+        field.required = true;
+        field.maxLength = 200;
+        form.hidden = true;
+        const setSectionEditing = active => {
+            form.hidden = !active;
+            heading.hidden = active;
+            if (active) { field.value = section.name; field.focus(); field.select(); }
+            else modify.focus();
+        };
+        const modify = personalButton("Modifier", () => setSectionEditing(true));
+        modify.setAttribute("aria-label", `Modifier la section ${section.name}`);
+        heading.append(title, modify);
+        const saveSection = node("button", "primary-button", "Valider");
+        saveSection.type = "submit";
+        form.addEventListener("submit", event => {
+            event.preventDefault();
+            const nextName = field.value.trim();
+            if (!nextName) { field.focus(); return; }
+            if (nextName !== section.name) {
+                section.name = nextName;
+                modify.setAttribute("aria-label", `Modifier la section ${nextName}`);
+                updateSectionCount();
                 personalChanged();
-            });
-            updateSectionCount();
-            heading.append(title, sectionCount);
-            const remove = personalButton("Supprimer la section", () => {
-                const target = deck.sections.find(s => s.id !== section.id);
-                if (!target)
-                    return;
-                if (section.cards.length && !window.confirm(`Déplacer les ${section.cards.length} références vers « ${target.name} » et supprimer « ${section.name} » ?`))
-                    return;
-                target.cards.push(...section.cards);
-                deck.sections = deck.sections.filter(s => s.id !== section.id);
-                personalChanged();
-                renderPersonalEditor();
-            });
-            remove.disabled = deck.sections.length < 2;
-            heading.append(remove);
-            container.append(heading);
-        } else {
-            container.append(deckSectionTitle(section.name, section.cards));
-        }
-        const cards = node("div", editing ? "deck-cards personal-cards-edit" : "deck-cards");
+            }
+            setSectionEditing(false);
+        });
+        const remove = personalButton("Supprimer", () => {
+            const target = deck.sections.find(s => s.id !== section.id);
+            if (!target)
+                return;
+            if (section.cards.length && !window.confirm(`Déplacer les ${section.cards.length} références vers « ${target.name} » et supprimer « ${section.name} » ?`))
+                return;
+            target.cards.push(...section.cards);
+            deck.sections = deck.sections.filter(s => s.id !== section.id);
+            personalChanged();
+            renderPersonalEditor();
+        });
+        remove.disabled = deck.sections.length < 2;
+        form.append(field, saveSection, personalButton("Annuler", () => setSectionEditing(false)), remove);
+        container.append(heading, form);
+        const cards = node("div", "deck-cards personal-cards-edit");
         container.addEventListener("dragover", e => {
-            if (editing && personalState.drag) {
+            if (personalState.drag) {
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
                 container.classList.add("personal-drop-target");
@@ -3826,7 +3868,7 @@ function renderPersonalEditor() {
         container.addEventListener("drop", e => {
             e.preventDefault();
             container.classList.remove("personal-drop-target");
-            if (editing && personalState.drag) {
+            if (personalState.drag) {
                 const drag = personalState.drag;
                 const sameSection = drag.sectionId === section.id;
                 const beforeId = sameSection
@@ -3841,20 +3883,11 @@ function renderPersonalEditor() {
         for (const card of section.cards) {
             const cardName = card.printed_name || card.name_fr || card.name || "Carte non résolue";
             const preview = personalImage(card);
-            if (!editing) {
-                const tile = card.provider_card_id
-                    ? personalButton("", () => void openCard(card.provider_card_id))
-                    : node("article");
-                tile.className = card.provider_card_id ? "deck-card-tile deck-card-open" : "deck-card-tile";
-                tile.append(preview, node("span", "deck-card-name", `${card.count} × ${cardName}`));
-                cards.append(tile);
-                continue;
-            }
             const tile = node("article", "deck-card-tile personal-card-edit");
             tile.draggable = true;
             tile.dataset.personalCard = card.id;
             tile.addEventListener("dragstart", e => {
-                if (!editing || e.target.closest("input,select")) {
+                if (e.target.closest("input,select,.personal-card-remove")) {
                     e.preventDefault();
                     return;
                 }
@@ -3905,30 +3938,85 @@ function renderPersonalEditor() {
                 }
             });
             countLabel.append(count);
-            if (editing)
-                tile.append(countLabel);
-            const tools = node("div", "personal-card-tools");
-            tools.append(personalButton("Retirer", () => {
+            tile.append(countLabel);
+            const removeCard = personalButton("", () => {
                 if (!window.confirm(`Retirer « ${cardName} » de « ${section.name} » ? Tous les exemplaires de cette ligne seront retirés.`)) return;
                 section.cards.splice(section.cards.findIndex(c => c.id === card.id), 1);
                 personalChanged();
                 renderPersonalEditor();
-            }));
-            if (editing)
-                tile.append(tools);
+            });
+            removeCard.classList.add("personal-card-remove");
+            removeCard.append(cardActionIcon("close"));
+            removeCard.setAttribute("aria-label", `Retirer ${cardName} du deck`);
+            tile.append(removeCard);
             cards.append(tile);
         }
         if (!section.cards.length)
-            cards.append(node("p", "muted", editing ? "Section vide · Déposez une carte ici." : "Section vide"));
+            cards.append(node("p", "muted", "Section vide · Déposez une carte ici."));
         container.append(cards);
         root.append(container);
     }
-    if (editing)
-        root.append(personalButton("Ajouter une section", () => {
+    const footer = node("div", "personal-deck-footer");
+    const top = personalButton("", () => {
+        const title = $("personal-title");
+        title?.setAttribute("tabindex", "-1");
+        title?.focus({ preventScroll: true });
+        window.scrollTo({ top: 0 });
+    });
+    top.classList.add("personal-scroll-top");
+    top.title = "Remonter en haut";
+    top.setAttribute("aria-label", top.title);
+    top.append(cardActionIcon("arrowUp"));
+    footer.append(personalButton("Ajouter une section", () => {
             deck.sections.push({ id: crypto.randomUUID(), name: "Nouvelle section", cards: [] });
             personalChanged();
             renderPersonalEditor();
-        }));
+    }), top);
+    root.append(footer);
+}
+function duplicatePersonalDeck(deck) {
+    const dialog = node("dialog", "personal-picker personal-duplicate");
+    const heading = node("h2", "", "Dupliquer le deck");
+    const form = node("form", "personal-picker-form");
+    const label = node("label", "", "Nom du nouveau deck"), name = node("input");
+    name.value = deck.name;
+    name.maxLength = 200;
+    name.required = true;
+    label.append(name);
+    const status = node("p", "error-state");
+    status.setAttribute("role", "status");
+    const actions = node("div", "personal-picker-footer");
+    const validate = node("button", "primary-button", "Valider");
+    validate.type = "submit";
+    const cancel = personalButton("Annuler", () => dialog.close());
+    actions.append(validate, cancel);
+    form.append(label, status, actions);
+    dialog.append(heading, form);
+    dialog.setAttribute("aria-label", heading.textContent);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    dialog.addEventListener("cancel", event => { if (validate.disabled) event.preventDefault(); });
+    form.addEventListener("submit", async event => {
+        event.preventDefault();
+        const newName = name.value.trim();
+        if (!newName || validate.disabled) { name.focus(); return; }
+        name.disabled = validate.disabled = cancel.disabled = true;
+        status.textContent = "";
+        try {
+            if (!await flushPersonal()) throw new Error("Enregistrez d’abord le deck ouvert.");
+            const { deck: copy } = await postJSON("/api/v2/personal-decks/duplicate", {
+                deck_id: deck.id, name: newName, revision: deck.revision,
+            });
+            dialog.close();
+            adoptPersonalDeck(copy);
+        } catch (error) {
+            status.textContent = error.message;
+            name.disabled = validate.disabled = cancel.disabled = false;
+            name.focus();
+        }
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    name.select();
 }
 async function importPersonalDeck(id, button) {
     button.disabled = true;
@@ -3948,55 +4036,100 @@ async function importPersonalDeck(id, button) {
 }
 async function choosePersonalDeck(card) {
     const dialog = node("dialog", "personal-picker"), heading = node("h2", "", "Ajouter à un deck personnel"), status = node("p", "muted", "Chargement…"), list = node("div", "personal-picker-list");
+    status.setAttribute("role", "status");
+    const form = node("form", "personal-picker-form");
+    const nameLabel = node("label", "", "Nom du deck");
+    const name = node("input");
+    name.type = "text";
+    name.maxLength = 200;
+    name.disabled = true;
+    nameLabel.hidden = true;
+    nameLabel.append(name);
+    const create = personalButton("Créer un deck", () => {
+        nameLabel.hidden = !nameLabel.hidden;
+        name.disabled = nameLabel.hidden;
+        create.setAttribute("aria-expanded", String(!nameLabel.hidden));
+        create.textContent = nameLabel.hidden ? "Créer un deck" : "Annuler la création";
+        if (!nameLabel.hidden) name.focus();
+    });
+    create.setAttribute("aria-expanded", "false");
+    create.disabled = true;
+    const validate = node("button", "primary-button", "Valider");
+    validate.type = "submit";
     const footer = node("div", "personal-picker-footer");
-    footer.append(personalButton("Fermer", () => dialog.close()));
+    footer.append(create, validate);
+    form.append(nameLabel, footer);
     const body = node("div", "personal-picker-body");
     body.append(status, list);
-    dialog.append(heading, body, footer);
+    dialog.append(heading, body, form);
     dialog.setAttribute("aria-label", heading.textContent);
     document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove(), { once: true });
     dialog.showModal();
-    try {
-        const response = await getJSON("/api/v2/personal-decks");
-        status.textContent = response.items.length ? "Choisissez le deck de destination." : "Créez un deck dans l’onglet Perso pour y ajouter cette carte.";
-        for (const deck of response.items) {
-            const b = personalButton(deck.name, async () => {
-                list.querySelectorAll("button").forEach(x => {
-                    x.disabled = true;
-                });
-                try {
-                    if (!await flushPersonal())
-                        throw new Error("Le deck ouvert contient un brouillon non enregistré.");
-                    const result = await postJSON("/api/v2/personal-decks/add", { deck_id: deck.id, provider_card_id: card.provider_card_id, printing_id: card.printing_id });
-                    if (personalState.deck?.id === deck.id)
-                        adoptPersonalDeck(result.deck);
-                    dialog.close();
-                    const viewer = $("card-dialog");
-                    if (viewer.open) {
-                        viewer.querySelector(".personal-add-toast")?.remove();
-                        const toast = node("p", "personal-add-toast", `Carte ajoutée à « ${deck.name} ».`);
-                        toast.setAttribute("role", "status");
-                        viewer.append(toast);
-                        setTimeout(() => toast.remove(), 2200);
-                    }
-                }
-                catch (error) {
-                    status.textContent = `Ajout impossible : ${error.message}`;
-                    status.className = "error-state";
-                }
-                finally {
-                    list.querySelectorAll("button").forEach(x => {
-                        x.disabled = false;
-                    });
-                }
-            });
-            list.append(b);
-        }
+    let busy = false;
+    function report(message, error = false) {
+        status.textContent = message;
+        status.className = error ? "error-state" : "muted";
     }
-    catch (error) {
-        status.textContent = `Chargement impossible : ${error.message}`;
-        status.className = "error-state";
+    function setBusy(value) {
+        busy = value;
+        create.disabled = validate.disabled = value;
+        name.disabled = value || nameLabel.hidden;
+        for (const button of list.querySelectorAll("button")) button.disabled = value;
+    }
+    function deckButton(deck) {
+        const button = personalButton(deck.name, async () => {
+            if (busy) return;
+            setBusy(true);
+            report(`Ajout à « ${deck.name} »…`);
+            try {
+                if (!await flushPersonal())
+                    throw new Error("Le deck ouvert contient un brouillon non enregistré.");
+                const result = await postJSON("/api/v2/personal-decks/add", { deck_id: deck.id, provider_card_id: card.provider_card_id, printing_id: card.printing_id });
+                if (personalState.deck?.id === deck.id) adoptPersonalDeck(result.deck);
+                report(`Carte ajoutée à « ${deck.name} ».`);
+            } catch (error) {
+                report(`Ajout impossible : ${error.message}`, true);
+            } finally {
+                setBusy(false);
+                if (dialog.open) button.focus({ preventScroll: true });
+            }
+        });
+        return button;
+    }
+    form.addEventListener("submit", async event => {
+        event.preventDefault();
+        if (busy) return;
+        if (nameLabel.hidden) { dialog.close(); return; }
+        const deckName = name.value.trim();
+        if (!deckName) { report("Saisissez un nom de deck.", true); name.focus(); return; }
+        setBusy(true);
+        try {
+            const { deck } = await postJSON("/api/v2/personal-decks/create", { name: deckName, colors: [], commander: true });
+            name.value = "";
+            nameLabel.hidden = true;
+            create.textContent = "Créer un deck";
+            create.setAttribute("aria-expanded", "false");
+            const button = deckButton(deck);
+            list.prepend(button);
+            body.scrollTop = 0;
+            report(`Deck « ${deck.name} » créé. Cliquez sur son nom pour ajouter la carte.`);
+            setBusy(false);
+            if (dialog.open) button.focus({ preventScroll: true });
+        } catch (error) {
+            report(`Création impossible : ${error.message}`, true);
+            setBusy(false);
+            if (dialog.open) name.focus();
+        }
+    });
+    try {
+        const { items } = await getJSON("/api/v2/personal-decks");
+        report(items.length ? "Cliquez sur un deck pour y ajouter la carte." : "Créez un deck pour y ajouter cette carte.");
+        list.append(...items.map(deckButton));
+    } catch (error) {
+        report(`Chargement impossible : ${error.message}`, true);
+    } finally {
+        create.disabled = false;
     }
 }
 window.addEventListener("beforeunload", event => {

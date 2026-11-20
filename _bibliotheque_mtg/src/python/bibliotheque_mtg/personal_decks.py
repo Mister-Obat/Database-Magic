@@ -141,6 +141,18 @@ def create_deck(path, name, colors, commander=False):
         return _write(conn, _new(name, colors, commander=bool(commander)))
 
 
+def duplicate_deck(path, deck_id, name, revision):
+    with _database(path) as conn:
+        source = _read(conn, deck_id)
+        if type(revision) is not int or revision != source["revision"]:
+            raise RevisionConflict("Le deck a changé. Actualisez-le avant de le dupliquer.")
+        for section in source["sections"]:
+            section["id"] = _id()
+            for card in section["cards"]:
+                card["id"] = _id()
+        return _write(conn, _new(name, source["colors"], sections=source["sections"]))
+
+
 def get_deck(path, deck_id):
     with _database(path) as conn:
         return _read(conn, deck_id)

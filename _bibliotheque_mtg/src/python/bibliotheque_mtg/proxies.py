@@ -217,11 +217,11 @@ class Proxies:
             if params.get("official_only") or not files:
                 return empty if route == "/api/v2/proxies" else enrich(database, api.dispatch(database, route, params))
             self._rebuild(database, files)
-            local_route = "/api/v2/edition" if route == "/api/v2/proxies" else route
             local_params = {**params, "limit": limit, "offset": offset}
             if route == "/api/v2/proxies":
-                local_params["set"] = SET
-            local = api.dispatch(self.database, local_route, local_params)
+                local = query.edition_cards(self.database, SET, limit=limit, offset=offset, proxy_groups=True)
+            else:
+                local = api.dispatch(self.database, route, local_params)
             for card in local["items"]:
                 if route != "/api/v2/editions":
                     self._decorate(card)

@@ -59,10 +59,10 @@ PERSONAL_DECK_DB = OPS_ROOT / "state" / "personal-decks.sqlite"
 PROXIES = Proxies(OPS_ROOT.parent / "proxy", OPS_ROOT / "state")
 PROXY_ASSOCIATE = "/api/v2/proxies/associate"
 PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
-                        ("create", "save", "add", "import", "export", "delete")}
+                        ("create", "save", "add", "import", "export", "delete", "duplicate")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 32
+APP_API_REVISION = 34
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -1947,6 +1947,9 @@ class LibraryHandler(BaseHTTPRequestHandler):
                             payload.get("colors", []), payload.get("commander", False))
                 elif action == "save":
                     deck = personal_decks.save_deck(PERSONAL_DECK_DB, payload.get("deck"))
+                elif action == "duplicate":
+                    deck = personal_decks.duplicate_deck(PERSONAL_DECK_DB, payload.get("deck_id"),
+                            payload.get("name"), payload.get("revision"))
                 elif action == "delete":
                     deleted = personal_decks.delete_deck(PERSONAL_DECK_DB, payload.get("deck_id"),
                                                          payload.get("revision"))
