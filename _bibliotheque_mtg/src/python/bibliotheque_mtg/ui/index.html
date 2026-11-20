@@ -17,11 +17,13 @@
       <button data-view="info" class="nav-button" aria-label="Accueil" title="Accueil"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-home"></use></svg><span class="compact-nav-label">Accueil</span></button>
       <button data-view="recherche" class="nav-button" aria-label="Recherche" title="Recherche"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-search"></use></svg><span class="compact-nav-label">Recherche</span></button>
       <button data-view="editions" class="nav-button" aria-label="Éditions" title="Éditions"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-edition"></use></svg><span class="compact-nav-label">Éditions</span></button>
-      <button data-view="decks" class="nav-button" aria-label="Préconstruit" title="Préconstruit"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-deck"></use></svg><span class="compact-nav-label">Préconstruit</span></button>
-      <button data-view="perso" class="nav-button" aria-label="Perso" title="Perso"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-deck"></use></svg><span class="compact-nav-label">Perso</span></button>
+      <button data-view="decks" class="nav-button" aria-label="Deck préconstruit" title="Deck préconstruit"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-deck"></use></svg><span class="compact-nav-label">Deck préconstruit</span></button>
+      <button data-view="perso" class="nav-button" aria-label="Deck perso" title="Deck perso"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-deck"></use></svg><span class="compact-nav-label">Deck perso</span></button>
+      <button data-view="proxy" class="nav-button" aria-label="Proxy" title="Proxy"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-image"></use></svg><span class="compact-nav-label">Proxy</span></button>
       <button data-view="archives" class="nav-button" aria-label="Archives" title="Archives"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-archive"></use></svg><span class="compact-nav-label">Archives</span></button>
     </nav>
     <div class="topbar-actions">
+      <button id="refresh-view" class="secondary-button card-size-control" type="button" aria-label="Rafraîchir la page" title="Rafraîchir la page"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg></button>
       <button id="card-size-minus" class="secondary-button card-size-control" type="button" aria-label="Réduire les vignettes" title="Réduire les vignettes"></button>
       <button id="card-size-plus" class="secondary-button card-size-control" type="button" aria-label="Agrandir les vignettes" title="Agrandir les vignettes"></button>
       <button id="close-application" class="secondary-button" type="button" aria-label="Fermer l’application" title="Fermer l’application"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-power-off"></use></svg></button><div class="notification-center"><button id="notification-button" class="secondary-button" type="button" aria-label="Traitements et notifications" aria-expanded="false" title="Traitements et notifications"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-bell"></use></svg><span id="notification-count">0</span></button><div id="notification-panel" class="notification-panel" hidden><h2>Traitements et cartes à vérifier</h2><div id="notification-list"></div></div></div></div>
@@ -38,7 +40,7 @@
       <symbol id="search-icon-rarity" viewBox="0 0 24 24"><path d="m3 9 4-5h10l4 5-9 11ZM3 9h18M9 4l-1 5 4 11 4-11-1-5"/></symbol>
       <symbol id="search-icon-type" viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 7h8v5H8zM8 16h8"/></symbol>
       <symbol id="search-icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4"/></symbol>
-      <symbol id="search-icon-refresh" viewBox="0 0 24 24"><path d="M20 4v6h-6M20 10a8 8 0 1 0-.8 7"/></symbol>
+      <symbol id="search-icon-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8m0-5v5h-5m5 4a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16m5 0H3v5"/></symbol>
       <symbol id="search-icon-image" viewBox="0 0 24 24"><path d="M3 4h18v16H3zM3 17l5-4 4 3 4-6 5 6M8 8h.1"/></symbol>
       <symbol id="search-icon-sort" viewBox="0 0 24 24"><path d="M5 6h14M5 12h10M5 18h6"/></symbol>
       <symbol id="search-icon-order" viewBox="0 0 24 24"><path d="M8 4v16m-4-4 4 4 4-4m4 4V4m-4 4 4-4 4 4"/></symbol>
@@ -58,6 +60,11 @@
         <article class="stat"><span>Decks répertoriés</span><strong id="stat-decks">— / —</strong></article>
       </div>
       <p id="stats-error" class="muted error-state" role="status"></p>
+      <section class="panel home-activity" aria-labelledby="home-recent-decks-title">
+        <h2 id="home-recent-decks-title">Decks perso récemment modifiés</h2>
+        <div id="home-recent-decks" class="home-recent-decks"><p class="muted">Chargement…</p></div>
+        <p id="home-activity-error" class="muted error-state" role="status" hidden></p>
+      </section>
       <section class="maintenance-panel" aria-labelledby="maintenance-title">
         <div>
           <h2 id="maintenance-title">Mettre à jour la bibliothèque</h2>
@@ -82,7 +89,7 @@
       </section>
     </section>
     <section id="view-recherche" class="view catalogue-view" aria-labelledby="search-title">
-      <div class="page-heading"><p class="eyebrow">Catalogue complet</p><div class="heading-action"><h1 id="search-title">Rechercher une carte</h1><div class="search-header-actions"><button id="download-search-results" class="secondary-button search-header-button" type="button" disabled><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-download"></use></svg><span>Télécharger les images manquantes</span></button><button id="refresh-search-results" class="secondary-button search-header-button search-header-icon-button" type="button" aria-label="Rafraîchir les cartes recherchées" title="Rafraîchir les cartes recherchées"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg></button></div></div><div id="search-batch-status" class="batch-status" aria-live="polite"></div></div>
+      <div class="page-heading"><p class="eyebrow">Catalogue complet</p><div class="heading-action"><h1 id="search-title">Rechercher une carte</h1><div class="search-header-actions"><button id="download-search-results" class="secondary-button search-header-button" type="button" disabled><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-download"></use></svg><span>Télécharger les images manquantes</span></button></div></div><div id="search-batch-status" class="batch-status" aria-live="polite"></div></div>
       <form id="search-form" class="search-form">
         <div class="search-primary-row">
           <div class="search-main"><label for="query"><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-search"></use></svg>Nom, texte de règle, capacité ou illustrateur</span></label><input id="query" name="q" type="search" placeholder="Ex. Foudre, vol, créature, illustrateur…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="search-suggestions" aria-expanded="false"><div id="search-suggestions" class="edition-suggestions" role="listbox" aria-label="Recherches récentes" hidden></div></div>
@@ -112,7 +119,7 @@
       <div id="search-pager" class="pager" hidden><button id="previous-page" class="secondary-button">Précédent</button><span id="page-status" class="muted"></span><button id="next-page" class="secondary-button">Suivant</button></div>
     </section>
     <section id="view-editions" class="view catalogue-view" aria-labelledby="editions-title">
-      <div class="page-heading"><p class="eyebrow">Parcourir</p><div class="heading-action"><h1 id="editions-title">Éditions</h1><div class="search-header-actions"><button id="download-edition-results" class="secondary-button search-header-button" type="button" disabled><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-download"></use></svg><span>Télécharger les images manquantes</span></button><button id="refresh-edition-results" class="secondary-button search-header-button search-header-icon-button" type="button" aria-label="Rafraîchir les cartes de l’édition" title="Rafraîchir les cartes de l’édition"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg></button></div></div><div id="edition-batch-status" class="batch-status" aria-live="polite"></div></div>
+      <div class="page-heading"><p class="eyebrow">Parcourir</p><div class="heading-action"><h1 id="editions-title">Éditions</h1><div class="search-header-actions"><button id="download-edition-results" class="secondary-button search-header-button" type="button" disabled><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-download"></use></svg><span>Télécharger les images manquantes</span></button></div></div><div id="edition-batch-status" class="batch-status" aria-live="polite"></div></div>
       <div class="search-form edition-filter-panel"><div class="edition-browser"><label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-edition"></use></svg>Choisir une édition</span><select id="edition-select"><option value="">Sélectionner…</option></select></label><div class="edition-search"><label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-search"></use></svg>Rechercher une édition</span><input id="edition-query" type="search" placeholder="Nom ou code d’édition" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="edition-suggestions" aria-expanded="false"></label><div id="edition-suggestions" class="edition-suggestions" role="listbox" aria-label="Suggestions d’éditions" hidden></div></div></div></div>
       <p id="edition-count" class="muted"></p>
       <div id="edition-cards" class="results-grid"></div>
@@ -120,7 +127,7 @@
     </section>
     <section id="view-decks" class="view catalogue-view" aria-labelledby="decks-title">
       <div id="deck-browser">
-      <div class="page-heading"><p class="eyebrow">Collections officielles</p><div class="heading-action"><h1 id="decks-title">Deck préconstruit</h1><div class="search-header-actions"><button id="download-deck-results" class="secondary-button search-header-button" type="button" disabled><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-download"></use></svg><span>Télécharger les images manquantes</span></button><button id="refresh-deck-results" class="secondary-button search-header-button search-header-icon-button" type="button" aria-label="Rafraîchir les decks recherchés" title="Rafraîchir les decks recherchés"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg></button></div></div></div>
+      <div class="page-heading"><p class="eyebrow">Collections officielles</p><div class="heading-action"><h1 id="decks-title">Deck préconstruit</h1><div class="search-header-actions"><button id="download-deck-results" class="secondary-button search-header-button" type="button" disabled><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-download"></use></svg><span>Télécharger les images manquantes</span></button></div></div></div>
       <div id="deck-search-form" class="search-form">
         <div class="search-primary-row">
           <div class="deck-search"><label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-search"></use></svg>Rechercher un deck</span><input id="deck-query" type="search" placeholder="Nom du deck" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="deck-suggestions" aria-expanded="false"></label><div id="deck-suggestions" class="edition-suggestions" role="listbox" aria-label="Suggestions de decks" hidden></div></div>
@@ -150,7 +157,18 @@
         <div id="deck-detail" aria-live="polite"></div>
       </div>
     </section>
-    <section id="view-perso" class="view catalogue-view" aria-labelledby="personal-title"><div class="personal-heading"><div id="personal-heading-content"><p class="eyebrow">Votre collection de compositions</p><h1 id="personal-title">Decks personnels</h1></div><p id="personal-save-status" role="status" aria-live="polite"></p></div><div id="personal-content"></div></section>
+    <section id="view-perso" class="view catalogue-view" aria-labelledby="personal-title"><div class="personal-heading"><div id="personal-heading-content"><p class="eyebrow">Votre collection de compositions</p><h1 id="personal-title">Deck perso</h1></div><p id="personal-save-status" role="status" aria-live="polite"></p></div><div id="personal-content"></div></section>
+    <section id="view-proxy" class="view catalogue-view" aria-labelledby="proxy-title">
+      <div class="page-heading">
+        <div class="heading-action"><h1 id="proxy-title">Proxy</h1></div>
+      </div>
+      <div class="personal-toolbar proxy-toolbar">
+        <button id="proxy-open-folder" class="secondary-button" type="button">Ouvrir le dossier des proxies</button>
+        <p id="proxy-folder-help" class="small-note">Déposez vos images dans ce dossier. Elles seront détectées automatiquement à votre retour dans l’application.</p>
+      </div>
+      <p id="proxy-folder-status" class="small-note" role="status"></p>
+      <div id="proxy-content"></div>
+    </section>
     <section id="view-archives" class="view catalogue-view" aria-labelledby="archive-title">
       <div class="page-heading"><p class="eyebrow">Images historiques</p><div class="heading-action"><h1 id="archive-title">Archives à identifier</h1></div></div>
       <div class="archive-toolbar search-form"><label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-sort"></use></svg>État</span><select id="archive-status"><option value="">Tous</option><option value="unresolved">Non résolue</option><option value="ambiguous">Ambiguë</option></select></label><span id="archive-summary" class="muted"></span><div class="archive-actions"><button id="archive-ocr-all" class="secondary-button" type="button"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-scan"></use></svg>Analyser toutes les archives avec OCR</button><button id="archive-auto-name-all" class="secondary-button" type="button"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-search"></use></svg>Rechercher tous les noms automatiquement</button><button id="archive-ocr-stop" class="secondary-button" type="button" hidden><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-stop"></use></svg>Arrêter</button></div></div>

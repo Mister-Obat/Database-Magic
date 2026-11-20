@@ -89,3 +89,16 @@ transaction principale déjà validée. Les brouillons non confirmés sont conse
 dans le navigateur ; seule la réponse serveur autorise le statut Enregistré.
 Ces fichiers ne sont ni remplacés ni nettoyés par une publication de catalogue.
 Préserver aussi cette base et ses sauvegardes lors d'une copie de la bibliothèque.
+
+Les sections de la mosaïque sont stockées dans la même base avec leurs
+affectations. Elles ont un identifiant stable et sont listées dans l’ordre de
+création. Un deck sans affectation apparaît hors section, y compris dans une
+base créée avant cet ajout. La suppression d’une section libère ses affectations
+et conserve les decks. L’organisation de la mosaïque conserve le tri courant
+dans chaque section et ne modifie ni les compositions ni leurs révisions.
+Les écritures de sections suivent la même transaction et la même sauvegarde
+SQLite que les compositions.
+
+L’import texte attribue un identifiant local à chaque section et à chaque
+entrée, puis enregistre le deck complet dans une seule révision initiale.
+Les noms et les quantités des cartes sans correspondance locale sont conservés.

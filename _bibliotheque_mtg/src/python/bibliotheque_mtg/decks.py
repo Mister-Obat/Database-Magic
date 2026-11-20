@@ -3,16 +3,23 @@ from __future__ import annotations
 
 import hashlib
 import gzip
+import http.client
 import json
+import logging
+import lzma
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.request
 import urllib.parse
+from contextlib import closing
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from weakref import WeakValueDictionary
 
 CONTRACT_VERSION = "1.0.0"
 DECK_LIST_URL = "https://mtgjson.com/api/v5/DeckList.json"
@@ -24,6 +31,19 @@ PRECON_SPLIT = "train"
 DEFAULT_DB = Path(__file__).resolve().parents[3] / "state" / "preconstructed-decks.sqlite"
 SECTIONS = ("mainboard", "sideboard", "commander", "display_commander", "planar_deck", "scheme_deck", "tokens")
 MAX_PAGE_SIZE = 200
+_BACKGROUND_START_DELAY = 60
+_BACKGROUND_DECK_DELAY = 120
+_BACKGROUND_IDLE_DELAY = 300
+_BACKGROUND_RETRY_DELAY = 3600
+_BACKGROUND_PROVIDER_DELAY = 900
+_BACKGROUND_INDEX_DELAY = 7 * 24 * 3600
+_BACKGROUND_INDEX_RETRY_KEY = "background_deck_index_retry_after"
+_BACKGROUND_COMPRESSED_LIMIT = 1024 * 1024
+_BACKGROUND_JSON_LIMIT = 8 * 1024 * 1024
+_DECK_LOAD_LOCKS = WeakValueDictionary()
+_DECK_LOAD_LOCKS_GUARD = threading.Lock()
+_DECK_INDEX_DOWNLOAD_LOCK = threading.Lock()
+_LOG = logging.getLogger(__name__)
 SUPPORTED_DECK_TYPES = (
     "Advanced Deck", "Archenemy Deck", "Arena Promotional Deck", "Arena Starter Deck", "Arena Starter Kit",
     "Brawl Deck", "Challenge Deck", "Challenger Deck", "Clash Pack", "Dandan Deck",
@@ -86,6 +106,10 @@ def _schema(conn: sqlite3.Connection) -> None:
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS deck_cards_uuid_idx ON deck_cards(mtgjson_uuid);
         CREATE TABLE IF NOT EXISTS deck_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS deck_composition_retries (
+            deck_id TEXT PRIMARY KEY REFERENCES decks(id) ON DELETE CASCADE,
+            retry_after REAL NOT NULL
+        ) WITHOUT ROWID;
     """)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(decks)")}
     if "added_at" not in columns:
@@ -354,6 +378,19 @@ def ensure_deck_index(db_path: str | Path = DEFAULT_DB, *, refresh: bool = False
             if progress:
                 progress(1.0, "Index des decks déjà disponible")
             return {"decks": count, "loaded": 0, "refreshed": 0}
+    with _DECK_INDEX_DOWNLOAD_LOCK:
+        if not refresh and target.is_file():
+            with closing(_connect(target)) as conn:
+                try:
+                    count = conn.execute("SELECT COUNT(*) FROM decks").fetchone()[0]
+                except sqlite3.DatabaseError:
+                    count = 0
+            if count:
+                return {"decks": count, "loaded": 0, "refreshed": 0}
+        return _download_deck_index(target, timeout, progress)
+
+
+def _download_deck_index(target: Path, timeout: int, progress: Any) -> dict[str, int]:
     if progress:
         progress(0.0, "Téléchargement de l'index MTGJSON…")
     request = urllib.request.Request(DECK_LIST_URL, headers={"User-Agent": "LocalMagicLibrary/1.0"})
@@ -385,6 +422,7 @@ def ensure_deck_index(db_path: str | Path = DEFAULT_DB, *, refresh: bool = False
     _reindex_loaded_colors(target)
     with _connect(target) as conn:
         conn.execute("INSERT OR REPLACE INTO deck_meta(key,value) VALUES('playable_colors_v1','1')")
+        _write_background_index_retry(conn, time.time() + _BACKGROUND_INDEX_DELAY)
         conn.commit()
     result["refreshed"] = 1
     if progress:
@@ -772,30 +810,173 @@ def list_decks(db_path: str | Path = DEFAULT_DB, *, query: str | None = None, na
     return {"contract_version": CONTRACT_VERSION, "total": total, "limit": limit, "offset": offset, "items": items}
 
 
+def _read_background_xz(response: Any) -> bytes:
+    compressed = response.read(_BACKGROUND_COMPRESSED_LIMIT + 1)
+    if len(compressed) > _BACKGROUND_COMPRESSED_LIMIT:
+        raise ValueError("Fichier MTGJSON compressé trop volumineux")
+    decompressor = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=32 * 1024 * 1024)
+    data = decompressor.decompress(compressed, max_length=_BACKGROUND_JSON_LIMIT + 1)
+    if len(data) > _BACKGROUND_JSON_LIMIT or not decompressor.eof or decompressor.unused_data:
+        raise ValueError("Archive MTGJSON invalide ou trop volumineuse")
+    return data
+
+
 def _load_missing(db_path: str | Path, deck_row: sqlite3.Row, timeout: int,
-                  catalog_db: str | Path | None = None) -> None:
-    file_name = deck_row["file_name"]
-    if not file_name:
+                  catalog_db: str | Path | None = None, *, background: bool = False) -> None:
+    deck_id = deck_row["id"]
+    lock_key = (Path(db_path).resolve(), deck_id)
+    with _DECK_LOAD_LOCKS_GUARD:
+        lock = _DECK_LOAD_LOCKS.get(lock_key)
+        if lock is None:
+            lock = _DECK_LOAD_LOCKS[lock_key] = threading.Lock()
+    if not lock.acquire(blocking=not background):
         return
-    request = urllib.request.Request(DECK_FILE_BASE_URL + urllib.parse.quote(file_name, safe="") + ".json", headers={"User-Agent": "LocalMagicLibrary/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        if response.status != 200:
-            raise OSError(f"MTGJSON deck HTTP {response.status}")
-        doc = json.loads(response.read().decode("utf-8"))
-    payload = doc.get("data", doc)
-    if not isinstance(payload, dict):
-        raise ValueError("Format de composition MTGJSON invalide")
-    with _connect(db_path) as conn:
-        _schema(conn)
-        with conn:
-            _insert_cards(conn, deck_row["id"], payload)
-            _apply_doctor_who_planechase_conn(conn, deck_row["id"], deck_row["file_name"])
+    try:
+        with closing(_connect(db_path)) as conn:
+            current = conn.execute("SELECT id,file_name,loaded FROM decks WHERE id=?", (deck_id,)).fetchone()
+        if not current or current["loaded"] or not current["file_name"]:
+            return
+        file_name = current["file_name"]
+        suffix = ".json.xz" if background else ".json"
+        request = urllib.request.Request(DECK_FILE_BASE_URL + urllib.parse.quote(file_name, safe="") + suffix,
+                                         headers={"User-Agent": "LocalMagicLibrary/1.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise OSError(f"MTGJSON deck HTTP {response.status}")
+            data = _read_background_xz(response) if background else response.read()
+        doc = json.loads(data)
+        payload = doc.get("data", doc) if isinstance(doc, dict) else None
+        if not isinstance(payload, dict) or (background and not any(_section_values(payload).values())):
+            raise ValueError("Format de composition MTGJSON invalide")
+        with closing(_connect(db_path)) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT file_name,set_code,loaded FROM decks WHERE id=?", (deck_id,)).fetchone()
+            if not current or current["loaded"] or current["file_name"] != file_name:
+                return
+            _insert_cards(conn, deck_id, payload)
+            _apply_doctor_who_planechase_conn(conn, deck_id, file_name)
             if not (payload.get("tokens") or []) and catalog_db and Path(catalog_db).is_file():
                 cards = conn.execute("""SELECT raw_json FROM deck_cards
-                    WHERE deck_id=? AND section!='tokens' ORDER BY section,ordinal""", (deck_row["id"],)).fetchall()
-                tokens = _derive_tokens(deck_row["id"], deck_row["set_code"], cards, catalog_db)
-                if tokens:
-                    _insert_cards(conn, deck_row["id"], {"tokens": tokens}, only_sections={"tokens"})
+                    WHERE deck_id=? AND section!='tokens' ORDER BY section,ordinal""", (deck_id,)).fetchall()
+                tokens = _derive_tokens(deck_id, current["set_code"], cards, catalog_db)
+                if tokens or background:
+                    _insert_cards(conn, deck_id, {"tokens": tokens}, only_sections={"tokens"})
+            conn.execute("DELETE FROM deck_composition_retries WHERE deck_id=?", (deck_id,))
+    finally:
+        lock.release()
+
+
+def _composition_retry_after(error: urllib.error.HTTPError) -> float:
+    value = error.headers.get("Retry-After") if error.headers else None
+    if not value:
+        return 0
+    try:
+        return max(0, int(value))
+    except ValueError:
+        try:
+            return max(0, parsedate_to_datetime(value).timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+
+def _write_background_index_retry(conn: sqlite3.Connection, retry_after: float) -> None:
+    conn.execute("""INSERT INTO deck_meta(key,value) VALUES(?,?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        WHERE CAST(deck_meta.value AS REAL)<CAST(excluded.value AS REAL)""",
+        (_BACKGROUND_INDEX_RETRY_KEY, str(retry_after)))
+
+
+def _background_refresh_deck_index(db_path: str | Path) -> float:
+    if not _DECK_INDEX_DOWNLOAD_LOCK.acquire(blocking=False):
+        return _BACKGROUND_IDLE_DELAY
+    try:
+        target = Path(db_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with closing(_connect(target)) as conn, conn:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='deck_meta'").fetchone():
+                _schema(conn)
+                conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute("SELECT value FROM deck_meta WHERE key=?",
+                                    (_BACKGROUND_INDEX_RETRY_KEY,)).fetchone()
+            now = time.time()
+            if previous and float(previous["value"]) > now:
+                return _BACKGROUND_IDLE_DELAY
+            _write_background_index_retry(conn, now + _BACKGROUND_INDEX_DELAY)
+        request = urllib.request.Request(DECK_LIST_URL + ".xz", headers={"User-Agent": "LocalMagicLibrary/1.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                if response.status != 200:
+                    raise OSError(f"MTGJSON DeckList HTTP {response.status}")
+                payload = json.loads(_read_background_xz(response))
+            if not isinstance(payload, dict) or not isinstance(payload.get("meta"), dict) or not payload.get("data"):
+                raise ValueError("Index MTGJSON vide ou invalide")
+            import_decks(payload, target)
+        except urllib.error.HTTPError as exc:
+            delay = max(_BACKGROUND_PROVIDER_DELAY, _composition_retry_after(exc))
+            exc.close()
+            with closing(_connect(target)) as conn, conn:
+                _write_background_index_retry(conn, time.time() + delay)
+            _LOG.warning("Rafraîchissement de l'index MTGJSON reporté : %s", exc)
+            return delay
+        except (OSError, http.client.HTTPException, lzma.LZMAError, ValueError, sqlite3.Error) as exc:
+            _LOG.warning("Rafraîchissement de l'index MTGJSON reporté : %s", exc)
+            return _BACKGROUND_PROVIDER_DELAY
+        return _BACKGROUND_DECK_DELAY
+    finally:
+        _DECK_INDEX_DOWNLOAD_LOCK.release()
+
+
+def _index_next_deck_composition(db_path: str | Path, catalog_db: str | Path) -> float:
+    if not Path(db_path).is_file():
+        return _background_refresh_deck_index(db_path)
+    placeholders = ",".join("?" for _ in SUPPORTED_DECK_TYPES)
+    with closing(_connect(db_path)) as conn, conn:
+        if not conn.execute("""SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name='deck_composition_retries'""").fetchone():
+            _schema(conn)
+        deck = conn.execute(f"""SELECT d.id FROM decks d
+            LEFT JOIN deck_composition_retries r ON r.deck_id=d.id
+            WHERE d.loaded=0 AND d.file_name<>'' AND d.source='mtgjson'
+              AND d.type IN ({placeholders}) AND (r.retry_after IS NULL OR r.retry_after<=?)
+            ORDER BY r.retry_after,d.release_date DESC,d.id LIMIT 1""",
+            (*SUPPORTED_DECK_TYPES, time.time())).fetchone()
+    if not deck:
+        return _background_refresh_deck_index(db_path)
+    try:
+        _load_missing(db_path, deck, 15, catalog_db, background=True)
+    except (OSError, http.client.HTTPException, lzma.LZMAError, ValueError, sqlite3.Error) as exc:
+        delay = _BACKGROUND_DECK_DELAY
+        if isinstance(exc, urllib.error.HTTPError):
+            if exc.code in {403, 429} or exc.code >= 500:
+                delay = max(_BACKGROUND_PROVIDER_DELAY, _composition_retry_after(exc))
+            exc.close()
+        elif isinstance(exc, (OSError, http.client.HTTPException)):
+            delay = _BACKGROUND_PROVIDER_DELAY
+        with closing(_connect(db_path)) as conn, conn:
+            conn.execute("""INSERT OR REPLACE INTO deck_composition_retries(deck_id,retry_after)
+                SELECT id,? FROM decks WHERE id=? AND loaded=0""",
+                (time.time() + max(_BACKGROUND_RETRY_DELAY, delay), deck["id"]))
+        _LOG.warning("Composition de %s reportée : %s", deck["id"], exc)
+        return delay
+    return _BACKGROUND_DECK_DELAY
+
+
+def run_deck_composition_index(stop_event: threading.Event, db_path: str | Path = DEFAULT_DB, *,
+                               catalog_db_provider: Callable[[], str | Path | None],
+                               network_busy: Callable[[], bool] | None = None) -> None:
+    """Load one missing composition at a time while the local server runs."""
+    delay = _BACKGROUND_START_DELAY
+    while not stop_event.wait(delay):
+        delay = _BACKGROUND_IDLE_DELAY
+        try:
+            if network_busy and network_busy():
+                continue
+            catalog_db = catalog_db_provider()
+            if catalog_db and Path(catalog_db).is_file():
+                delay = _index_next_deck_composition(db_path, catalog_db)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            _LOG.warning("Indexation progressive des decks reportée : %s", exc)
 
 
 def _derive_tokens(deck_id: str, deck_set_code: str | None,
@@ -954,10 +1135,11 @@ def _resolve_provider_ids(rows: list[dict[str, Any]], catalog_db: str | Path | N
                     (str(scryfall_id), row.get("set_code"), row.get("set_code"))).fetchall()
             # A set and collector number uniquely identify the physical printing only when single.
             if not matches and row.get("set_code") and row.get("collector_number"):
-                matches = conn.execute("""SELECT p.printing_id,sr.provider_card_id,sr.lang FROM source_records sr
-                    JOIN printings p USING(printing_id) JOIN editions e USING(set_id)
-                    WHERE upper(e.code)=upper(?) AND p.collector_number=?
-                      AND e.eligibility='eligible'
+                matches = conn.execute("""SELECT p.printing_id,sr.provider_card_id,sr.lang
+                    FROM printings p CROSS JOIN source_records sr USING(printing_id)
+                    WHERE p.set_id IN (SELECT set_id FROM editions WHERE upper(code)=upper(?)
+                                       AND eligibility='eligible')
+                      AND p.collector_number=?
                     ORDER BY CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 ELSE 2 END,sr.provider_card_id""",
                     (row["set_code"], row["collector_number"])).fetchall()
             printing_ids = {match[0] for match in matches}

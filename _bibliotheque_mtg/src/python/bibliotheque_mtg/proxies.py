@@ -97,6 +97,24 @@ class Proxies:
     def associations(self):
         return sqlite3.connect(self.state / "proxy-associations.sqlite")
 
+    def delete(self, identifier):
+        if not isinstance(identifier, str):
+            raise ValueError("Identifiant de proxy invalide.")
+        with self.lock:
+            path = self.files().get(identifier)
+            if path is None:
+                raise FileNotFoundError("Proxy introuvable.")
+            try:
+                if (self.state / "proxy-associations.sqlite").is_file():
+                    with closing(self.associations()) as conn, conn:
+                        conn.execute("DELETE FROM associations WHERE id=?", (identifier,))
+                        path.unlink()
+                else:
+                    path.unlink()
+            finally:
+                self.signature = None
+            return {"deleted": True, "provider_card_id": identifier}
+
     def associate(self, database, identifier, source_id):
         with self.lock:
             if not isinstance(identifier, str) or identifier not in self.files():
@@ -124,7 +142,7 @@ class Proxies:
             return stat.st_ino, stat.st_mtime_ns, stat.st_size
 
         links_path = self.state / "proxy-associations.sqlite"
-        signature = (database, fingerprint(database), tuple(files),
+        signature = (query.catalogue_text_key(database), tuple(files),
                      fingerprint(links_path), fingerprint(links_path.with_suffix(".sqlite-wal")))
         if (*signature, fingerprint(self.database)) == self.signature:
             return
@@ -212,37 +230,38 @@ class Proxies:
 
     def dispatch(self, database, route, params, enrich):
         database = Path(database)
+        offset = max(0, int(params.get("offset", 0)))
+        limit = min(query.MAX_PAGE_SIZE if route == "/api/v2/editions" else 300,
+                    max(1, int(params.get("limit", 50))))
+        if route == "/api/v2/editions":
+            enrich = lambda _db, result: result
+        empty = {"contract_version": query.CONTRACT_VERSION, "items": [], "total": 0, "limit": limit, "offset": offset}
+        local = None
         with self.lock:
             files = self.files()
-            offset = max(0, int(params.get("offset", 0)))
-            limit = min(query.MAX_PAGE_SIZE if route == "/api/v2/editions" else 300,
-                        max(1, int(params.get("limit", 50))))
-            if route == "/api/v2/editions":
-                enrich = lambda _db, result: result
-            empty = {"contract_version": query.CONTRACT_VERSION, "items": [], "total": 0, "limit": limit, "offset": offset}
             if route == "/api/v2/card":
                 identifier = params.get("id")
                 if identifier not in files:
                     return {"contract_version": query.CONTRACT_VERSION, "found": False, "card": None}
                 self._rebuild(database, files)
                 return self._card(identifier)
-            if params.get("official_only") or not files:
-                return empty if route == "/api/v2/proxies" else enrich(database, api.dispatch(database, route, params))
-            self._rebuild(database, files)
-            local_params = {**params, "limit": limit, "offset": offset}
-            if route == "/api/v2/proxies":
-                local = query.edition_cards(self.database, SET, limit=limit, offset=offset, proxy_groups=True)
-            else:
-                local = api.dispatch(self.database, route, local_params)
-            for card in local["items"]:
+            if files and not params.get("official_only"):
+                self._rebuild(database, files)
+                if route == "/api/v2/proxies":
+                    local = query.edition_cards(self.database, SET, limit=limit, offset=offset, proxy_groups=True)
+                else:
+                    local = api.dispatch(self.database, route, {**params, "limit": limit, "offset": offset})
                 if route != "/api/v2/editions":
-                    self._decorate(card)
-            if route == "/api/v2/proxies" or (route == "/api/v2/edition" and params.get("set") == SET):
-                return local
-            remaining = limit - len(local["items"])
-            official = api.dispatch(database, route, {**params, "limit": max(1, remaining),
-                                                      "offset": max(0, offset - local["total"])})
-            if remaining:
-                local["items"].extend(enrich(database, official)["items"])
-            local["total"] += official["total"]
-            return local
+                    for card in local["items"]:
+                        self._decorate(card)
+                if route == "/api/v2/proxies" or (route == "/api/v2/edition" and params.get("set") == SET):
+                    return local
+        if local is None:
+            return empty if route == "/api/v2/proxies" else enrich(database, api.dispatch(database, route, params))
+        remaining = limit - len(local["items"])
+        official = api.dispatch(database, route, {**params, "limit": max(1, remaining),
+                                                  "offset": max(0, offset - local["total"])})
+        if remaining:
+            local["items"].extend(enrich(database, official)["items"])
+        local["total"] += official["total"]
+        return local

@@ -76,6 +76,61 @@ def test_durable_revisions_backup_and_conflict(tmp_path):
         personal.restore_backup(backup, db)
 
 
+def test_deck_groups_migrate_a_legacy_database_and_preserve_compositions(tmp_path):
+    db = tmp_path / "personal.sqlite"
+    deck = personal.create_deck(db, "Ancien deck", ["G"])
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE personal_deck_group_assignments")
+        conn.execute("DROP TABLE personal_deck_groups")
+    assert personal.list_deck_groups(db) == []
+    assert personal.list_decks(db, include_groups=True) == [{**deck, "group_id": None}]
+
+    first = personal.create_deck_group(db, "Favoris")
+    second = personal.create_deck_group(db, "À tester")
+    assert personal.list_deck_groups(db) == [first, second]
+    assert personal.rename_deck_group(db, second["id"], "  Projets  ") == {**second, "name": "Projets"}
+    assert personal.move_deck_to_group(db, deck["id"], first["id"]) == {
+        "id": deck["id"], "group_id": first["id"]}
+    personal.move_deck_to_group(db, deck["id"], second["id"])
+    with pytest.raises(KeyError, match="Section"):
+        personal.move_deck_to_group(db, deck["id"], "absent")
+    current = personal.list_decks(db, include_groups=True)[0]
+    assert current == {**deck, "group_id": second["id"]}
+    assert personal.summary_with_media(current, None)["group_id"] == second["id"]
+
+    backup = tmp_path / "personal-decks-backups/latest.sqlite"
+    restored = personal.restore_backup(backup, tmp_path / "restored.sqlite")
+    assert personal.list_decks(restored, include_groups=True) == [current]
+    assert personal.list_deck_groups(restored) == [first, {**second, "name": "Projets"}]
+
+    personal.delete_deck_group(db, second["id"])
+    assert personal.list_deck_groups(db) == [first]
+    assert personal.list_decks(db, include_groups=True) == [{**deck, "group_id": None}]
+    personal.move_deck_to_group(db, deck["id"], first["id"])
+    personal.move_deck_to_group(db, deck["id"], None)
+    assert personal.list_decks(db, include_groups=True) == [{**deck, "group_id": None}]
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT count(*) FROM personal_deck_revisions").fetchone()[0] == 1
+
+
+def test_create_from_text_preserves_unresolved_cards_and_empty_sections(tmp_path):
+    db = tmp_path / "personal.sqlite"
+    card = {"name": "Carte inconnue", "count": 2, "set_code": "TST", "collector_number": "42"}
+    sections = [{"name": "Commandant", "source_section": "commander", "cards": []},
+                {"name": "Deck principal", "source_section": "mainboard", "cards": [card, card]}]
+    deck = personal.create_deck_from_text(db, "Import", [], sections)
+    assert personal.get_deck(db, deck["id"]) == deck
+    assert deck["revision"] == 1
+    assert deck["sections"][0]["source_section"] == "commander"
+    assert deck["sections"][0]["cards"] == []
+    cards = deck["sections"][1]["cards"]
+    assert [{key: value for key, value in saved.items() if key != "id"} for saved in cards] == [card, card]
+    assert cards[0]["id"] != cards[1]["id"]
+    with pytest.raises(ValueError, match="Quantité"):
+        personal.create_deck_from_text(db, "Invalide", [], [{"name": "Deck", "cards": [{**card, "count": 0}]}])
+    assert personal.list_decks(db) == [deck]
+
+
 def test_exact_identity_quantities_moves_and_nonempty_section_removal(cards, tmp_path):
     db = tmp_path / "personal.sqlite"
     deck = personal.create_deck(db, "Deck", [])
@@ -148,7 +203,7 @@ def test_snapshot_survives_catalogue_card_disappearing(cards, tmp_path):
     assert card["image_status"] == "unresolved"
 
 
-def test_commander_cover_follows_first_commander_independent_of_section_order(cards, tmp_path):
+def test_cover_follows_first_card_across_sections(cards, tmp_path):
     db = tmp_path / "personal.sqlite"
     deck = personal.create_deck(db, "Partners", [], commander=True)
     command = deck["sections"][0]
@@ -156,7 +211,7 @@ def test_commander_cover_follows_first_commander_independent_of_section_order(ca
     deck = personal.add_card(db, deck["id"], cards, "id1", section_id=command["id"])
     deck = personal.add_card(db, deck["id"], cards, "id2", section_id=command["id"])
     assert personal.with_media(deck, cards)["cover_card"]["provider_card_id"] == "id1"
-    # Rename and move the command zone; its stable role remains authoritative.
+    # Moving the command zone after empty sections preserves its first card.
     command = deck["sections"].pop(0)
     command["name"] = "Commandement"
     deck["sections"].append(command)
@@ -165,13 +220,16 @@ def test_commander_cover_follows_first_commander_independent_of_section_order(ca
     media = personal.with_media(deck, cards)
     assert media["cover_card"]["provider_card_id"] == "id2"
     assert media["cover_image_path"] == "assets/webp/fr/p2-0.webp"
-    command = deck["sections"][-1]
-    command["cards"].clear()
-    # An empty command zone has no cover, even with cards in another section.
-    deck = personal.add_card(db, deck["id"], cards, "id1", section_id=deck["sections"][0]["id"])
+    # A nonempty section ahead of the command zone now supplies the cover.
+    deck = personal.add_card(db, deck["id"], cards, "id1", section_id=deck["sections"][1]["id"])
+    assert personal.with_media(deck, cards)["cover_card"]["provider_card_id"] == "id1"
+    # Leading empty sections and an empty command zone do not hide that card.
     deck["sections"][-1]["cards"].clear()
     deck = personal.save_deck(db, deck)
-    assert personal.with_media(deck, cards)["cover_card"] is None
+    assert personal.with_media(deck, cards)["cover_card"]["provider_card_id"] == "id1"
+    assert personal.summary_with_media(deck, cards)["cover_card"]["provider_card_id"] == "id1"
+    deck["sections"][1]["cards"].clear()
+    assert personal.summary_with_media(deck, cards)["cover_card"] is None
 
 
 def test_secondary_backup_failure_does_not_reject_committed_mutation(tmp_path, monkeypatch):
@@ -240,6 +298,15 @@ def test_optional_section_color_persists_and_rejects_invalid_values(tmp_path):
 
 def test_http_origin_routes_and_stale_save(cards, tmp_path, monkeypatch):
     from bibliotheque_mtg import local_app as app
+    with sqlite3.connect(cards) as conn:
+        conn.executescript("""
+            ALTER TABLE editions ADD COLUMN released_at TEXT;
+            ALTER TABLE source_records ADD COLUMN color_identity_json TEXT NOT NULL DEFAULT '[]';
+        """)
+    export = app.personal_deck_text.export_text
+    desktop = tmp_path / "test-desktop"
+    monkeypatch.setattr(app.personal_deck_text, "export_text",
+                        lambda db, deck_id: export(db, deck_id, desktop))
     monkeypatch.setattr(app, "PERSONAL_DECK_DB", tmp_path / "personal.sqlite")
     monkeypatch.setattr(app.LibraryHandler, "db", property(lambda self: cards))
     server = app.LocalServer(("127.0.0.1", 0), app.LibraryHandler)
@@ -280,6 +347,27 @@ def test_http_origin_routes_and_stale_save(cards, tmp_path, monkeypatch):
         assert request("/api/v2/personal-decks/add", {"deck_id": deck["id"], "provider_card_id": "id1"})[0] == 404
         assert request("/api/v2/personal-decks/export", {"deck_id": deck["id"]})[0] == 404
         assert request(delete_url, delete_request)[0] == 404
+
+        status, imported = request("/api/v2/personal-decks/import-text", {
+            "filename": "Liste importée.txt", "text": "Deck\n2 Fire // Ice (TST) id1",
+        })
+        assert status == 200 and imported["imported"] == 2 and imported["unresolved"] == []
+        imported_deck = imported["deck"]
+        assert imported_deck["name"] == "Liste importée" and imported_deck["cover_card"]["printing_id"] == "p1"
+        deck_id = imported_deck["id"]
+        status, result = request("/api/v2/personal-decks/group-create", {"name": "Favoris"})
+        assert status == 200
+        group_id = result["group"]["id"]
+        assert request("/api/v2/personal-decks/group-move", {"deck_id": deck_id, "group_id": group_id}) == (
+            200, {"id": deck_id, "group_id": group_id})
+        listing = request("/api/v2/personal-decks?summary=1")[1]
+        assert listing["groups"] == [{"id": group_id, "name": "Favoris"}]
+        assert listing["items"][0]["group_id"] == group_id
+        status, result = request("/api/v2/personal-decks/export-text", {"deck_id": deck_id})
+        assert status == 200 and result["total"] == 2
+        target = Path(result["path"])
+        assert target.parent == desktop
+        assert "2 Fire // Ice (TST) id1" in target.read_text(encoding="utf-8")
     finally:
         server.shutdown()
         server.server_close()

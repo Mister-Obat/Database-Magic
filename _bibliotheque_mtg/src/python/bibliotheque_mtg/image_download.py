@@ -726,7 +726,9 @@ def _publish_face(db: Path, version: Path, printing: dict, face_index: int, lang
                              "selected_language": language, "quality": "normalized_531x738",
                              "acquisition_mode": "deep_refresh" if deep_refresh else "standard",
                              "source_evidence": source_evidence,
-                             "source_record_id": source_record_id}, ensure_ascii=False, sort_keys=True)
+                             "source_record_id": source_record_id,
+                             "published_at": datetime.now(timezone.utc).timestamp()},
+                            ensure_ascii=False, sort_keys=True)
     temp = output.with_suffix(".webp.part")
     try:
         temp.write_bytes(webp)

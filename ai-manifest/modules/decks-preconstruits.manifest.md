@@ -24,14 +24,14 @@ cartes V2 et de son cycle de publication.
 - L'import accepte MTGJSON `DeckList` (`data` contenant les decks) et le JSON
   communautaire `decks_v2.json` de taw (`cards`, `commander`, `sideboard`,
   `displayCommander`, `planarDeck`, `schemeDeck`). Les champs inconnus sont
-  conservés dans le JSON source de chaque deck ; aucune donnée distante n'est
-  téléchargée par le module.
+  conservés dans le JSON source de chaque deck. L'import de ce JSON
+  utilise uniquement le contenu fourni.
 - `ensure_deck_index(db_path)` initialise l’index local absent depuis le fichier
   MTGJSON `DeckList.json` (environ 656 Ko au 15 novembre 2026) ;
   `refresh_deck_index(db_path)` le met à jour explicitement. Le bouton de mise à
   jour de la page Info appelle cette actualisation après celle du catalogue :
-  les nouveaux produits deviennent consultables, tandis que les compositions
-  restent chargées à la demande. `refresh_deck_index` accepte un callback de
+  les nouveaux produits deviennent consultables et rejoignent la file de
+  chargement progressif. `refresh_deck_index` accepte un callback de
   progression couvrant le téléchargement puis l’import de l’index.
 - `import_decks(source_json, db_path)` importe un index ou une liste de decks
   transactionnellement et retourne les compteurs.
@@ -111,6 +111,24 @@ cartes V2 et de son cycle de publication.
 - `get_deck` peut télécharger uniquement le fichier deck sélectionné depuis
   `https://mtgjson.com/api/v5/decks/<fileName>.json`, puis le mettre en cache ;
   `fetch_missing=False` garde l'appel strictement hors ligne.
+- Après l'ouverture de l'application, un seul travailleur parcourt l'index
+  local des préconstruits. Il traite une composition manquante à la fois en
+  utilisant le fichier individuel MTGJSON `.json.xz`. Le premier passage est
+  différé de 60 secondes et deux tentatives sont espacées d'au moins 120
+  secondes. Les échecs sont reportés par deck dans SQLite pour laisser les
+  autres passer et reprendre après un redémarrage. Un deck en échec est
+  réessayé après au moins une heure. Une erreur réseau, un refus de la source
+  ou une limitation de débit met le travailleur en pause au moins 15 minutes,
+  avec respect de `Retry-After`. Le fichier compressé est borné à 1 Mio et le
+  JSON à 8 Mio. Les jetons sont dérivés du catalogue local selon les règles
+  de résolution existantes. Si l'index est absent ou si la file atteint la
+  fin, le travailleur sollicite `DeckList.json.xz` avec les mêmes bornes.
+  Il enregistre la prochaine tentative avant le transfert, avec au moins
+  sept jours entre deux tentatives de rafraîchissement automatique, même
+  après un échec ou un redémarrage. L'import préserve les compositions
+  déjà chargées et ajoute les nouveaux decks à la file.
+  Les téléchargements manuels, l’indexation des couleurs et la maintenance
+  ont priorité sur les nouvelles requêtes du travailleur.
 - Les identifiants sont reproductibles : `mtgjson:<fileName>` si disponible,
   sinon code d'édition + nom normalisé, avec empreinte déterministe pour
   départager les collisions.
@@ -121,8 +139,9 @@ cartes V2 et de son cycle de publication.
   erreur ne doit pas laisser une base partielle.
 - La navigation par métadonnées utilise l'index local. L'interface peut lancer
   une seule indexation distante des couleurs en tâche de fond si la couverture
-  est incomplète ; l'indexation ne remplace pas les métadonnées locales. Le fetch
-  de composition reste limité au deck explicitement sélectionné.
+  est incomplète ; l'indexation ne remplace pas les métadonnées locales.
+  Le chargement de fond de compositions n'effectue aucun téléchargement
+  d'image, de catalogue d'éditions ou d'archive de decks.
 - Les couleurs sont null tant que la composition n'est pas chargée ; après
   chargement, elles sont calculées depuis les identités de couleur des cartes
   jouables, hors jetons, cartes de plan et machinations. Un jeton dérivé ne

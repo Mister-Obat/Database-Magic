@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sqlite3
 import os
+import re
 import hashlib
 import tempfile
 import threading
@@ -206,8 +207,16 @@ def _set_codes(value):
     return list(dict.fromkeys(codes))
 
 
-def _search_cache_key(db, values):
+def catalogue_text_key(db):
     path = Path(db).resolve()
+    # Published versions replace the catalogue when card data changes. Image
+    # writes can change both SQLite timestamps without changing any candidates.
+    version = path.parent.name
+    if (path.name == "catalogue.sqlite" and path.parent.parent.name == "versions"
+            and re.fullmatch(r"v2-[0-9a-f]{12}", version)):
+        stat = path.stat()
+        if stat.st_ino:
+            return str(path), (stat.st_dev, stat.st_ino)
     fingerprints = []
     for candidate in (path, Path(str(path) + "-wal")):
         try:
@@ -215,7 +224,7 @@ def _search_cache_key(db, values):
             fingerprints.append((stat.st_mtime_ns, stat.st_size))
         except OSError:
             fingerprints.append((None, None))
-    return (str(path), tuple(fingerprints), *values)
+    return str(path), tuple(fingerprints)
 
 
 def search_cards(db, term="", *, set_code=None, language=None, rarity=None, color=None, color_mode="contains", mana_value=None, type_text=None, mana_min=None, mana_max=None, power_min=None, power_max=None, toughness_min=None, toughness_max=None, card_type=None, image_filter="all", result_sort="date", oracle_id=None, printing_id=None, unique=False, limit=50, offset=0):
@@ -228,10 +237,10 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         raise ValueError("Filtre d'image invalide")
     if result_sort not in {"date", "date_asc", "added_asc", "added_desc"} | {f"{field}_{direction}" for field in sort_fields for direction in ("asc", "desc")}:
         raise ValueError("Classement invalide")
-    cache_key = _search_cache_key(db, (str(term), str(set_code or ""), str(language or ""),
+    cache_key = (*catalogue_text_key(db), str(term), str(set_code or ""), str(language or ""),
         str(rarity or ""), str(color or ""), color_mode, str(mana_value), str(type_text or ""),
         str(mana_min), str(mana_max), str(power_min), str(power_max), str(toughness_min),
-        str(toughness_max), str(card_type or ""), image_filter, str(oracle_id or ""), str(printing_id or "")))
+        str(toughness_max), str(card_type or ""), str(oracle_id or ""), str(printing_id or ""))
     match=None if oracle_id or printing_id else _match_term(term, db)
     filters=[]; args=[]
     if oracle_id:
@@ -307,11 +316,6 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         if lower is not None and upper is not None and float(lower) > float(upper):
             raise ValueError("La borne minimale dépasse la borne maximale")
     where=["e.eligibility='eligible'"]+filters
-    if image_filter != "all":
-        ready = "EXISTS (SELECT 1 FROM image_slots ims WHERE ims.printing_id=p.printing_id AND ims.status='ready')"
-        image_clause = ready if image_filter == "with" else "NOT " + ready
-    else:
-        image_clause = "1=1"
     if match is not None and not codes:
         with _connection(db) as c:
             edition_codes = [row[0] for row in c.execute(
@@ -358,23 +362,13 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
     else:
         matches_cte = f"matches AS (SELECT DISTINCT p.printing_id FROM {from_sql} WHERE {clause})"
         matches_args = list(args)
-    language_clause = "AND sr.lang=?" if display_language else ""
+    language_clause = """WHERE EXISTS (SELECT 1 FROM source_records sr
+        WHERE sr.printing_id=m.printing_id AND sr.lang=?)""" if display_language else ""
     language_args = [display_language] if display_language else []
-    ranked = f"""WITH {matches_cte}, ranked_printings AS (
-        SELECT p.printing_id,
-               ROW_NUMBER() OVER (PARTITION BY p.printing_id
-                 ORDER BY CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 WHEN 'ja' THEN 2 ELSE 3 END,
-                          CAST(p.collector_number AS INTEGER),p.collector_number,p.printing_id,sr.provider_card_id) AS language_rank
-        FROM matches m JOIN printings p ON p.printing_id=m.printing_id
-        JOIN source_records sr ON sr.printing_id=p.printing_id
-        WHERE {language_clause[4:] if language_clause else '1=1'} AND {image_clause}
-    ), chosen AS (SELECT printing_id FROM ranked_printings WHERE language_rank=1)"""
-    ranked_args = matches_args + language_args
     with _connection(db) as c:
         has_dates = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='printing_added'").fetchone()
         # Reuse the expensive FTS/filter/grouping candidate set when users change
-        # only sort direction or page. The active database fingerprint invalidates
-        # this small bounded cache when a version or image slot changes.
+        # only sort direction or page. Image eligibility is checked below.
         with _SEARCH_CANDIDATE_LOCK:
             cached_ids = _SEARCH_CANDIDATE_CACHE.get(cache_key)
             if cached_ids is not None:
@@ -394,7 +388,8 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
                     WHERE source_search MATCH ? AND p.oracle_id IS NOT NULL""", (name_match,)).fetchall()
                 c.executemany("INSERT INTO search_oracles VALUES(?)", ((row[0],) for row in oracle_ids))
                 c.execute("INSERT OR IGNORE INTO search_oracles SELECT p.oracle_id FROM search_extra_names x JOIN source_records sr USING(provider_card_id) JOIN printings p USING(printing_id) WHERE p.oracle_id IS NOT NULL")
-            c.execute("CREATE TEMP TABLE chosen_search AS " + ranked + " SELECT printing_id FROM chosen", ranked_args)
+            c.execute(f"CREATE TEMP TABLE chosen_search AS WITH {matches_cte} "
+                      f"SELECT printing_id FROM matches m {language_clause}", matches_args + language_args)
             count = c.execute("SELECT COUNT(*) FROM chosen_search").fetchone()[0]
             if count <= _SEARCH_CANDIDATE_MAX_ROWS:
                 cached_ids = tuple(row[0] for row in c.execute("SELECT printing_id FROM chosen_search"))
@@ -406,6 +401,11 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         else:
             c.execute("CREATE TEMP TABLE chosen_search (printing_id TEXT PRIMARY KEY) WITHOUT ROWID")
             c.executemany("INSERT INTO chosen_search VALUES(?)", ((printing_id,) for printing_id in cached_ids))
+        if image_filter != "all":
+            ready = """EXISTS (SELECT 1 FROM image_slots ims
+                WHERE ims.printing_id=chosen_search.printing_id AND ims.status='ready')"""
+            exclude = "NOT " + ready if image_filter == "with" else ready
+            c.execute("DELETE FROM chosen_search WHERE " + exclude)
         if str(unique).casefold() in {"1", "true", "yes"}:
             c.execute("""CREATE TEMP TABLE unique_search AS
                 SELECT printing_id FROM (
@@ -515,31 +515,37 @@ def edition_cards(db, set_code, *, limit=50, offset=0, proxy_groups=False):
     if not codes:
         return {"contract_version": CONTRACT_VERSION, "total": 0, "limit": limit, "offset": offset, "items": []}
     placeholders = ",".join("?" for _ in codes)
-    ranked = """WITH ranked AS (
-        SELECT sr.provider_card_id,p.printing_id,e.code AS set_code,e.name AS edition,
-               sr.lang,sr.name,sr.printed_name,sr.type_line,sr.printed_type_line,
-               sr.mana_cost,sr.mana_value,sr.rarity,p.collector_number,p.layout,
-               p.identity_status,sr.oracle_text,sr.printed_text,p.variant_attributes_json,
-               ROW_NUMBER() OVER (
-                   PARTITION BY p.printing_id
-                   ORDER BY CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 WHEN 'ja' THEN 2 WHEN 'ph' THEN 3 ELSE 4 END,
-                            CAST(p.collector_number AS INTEGER),p.collector_number,
-                            p.printing_id,sr.provider_card_id
-               ) AS preferred_rank
+    eligible = f"""
         FROM editions e
         CROSS JOIN printings p ON p.set_id=e.set_id
-        CROSS JOIN source_records sr ON sr.printing_id=p.printing_id
-        WHERE e.eligibility='eligible' AND e.code IN (""" + placeholders + """)
-    )"""
+        WHERE e.eligibility='eligible' AND e.code IN ({placeholders})
+        AND EXISTS (SELECT 1 FROM source_records WHERE printing_id=p.printing_id)
+    """
+    association = ",json_extract(p.variant_attributes_json,'$.proxy_source_id') AS proxy_source_id" if proxy_groups else ""
+    order = "proxy_source_id IS NOT NULL," if proxy_groups else ""
+    order += "CAST(collector_number AS INTEGER),collector_number,printing_id"
     with _connection(db) as c:
-        total = c.execute(ranked + " SELECT COUNT(*) FROM ranked WHERE preferred_rank=1", codes).fetchone()[0]
-        association = ",json_extract(variant_attributes_json,'$.proxy_source_id') AS proxy_source_id" if proxy_groups else ""
-        order = "proxy_source_id IS NOT NULL," if proxy_groups else ""
+        total = c.execute("SELECT COUNT(*) " + eligible, codes).fetchone()[0]
         rows = c.execute(
-            ranked + " SELECT provider_card_id,printing_id,set_code,edition,lang,name,printed_name,"
-            "type_line,printed_type_line,mana_cost,mana_value,rarity,collector_number,layout,"
-            "identity_status,oracle_text,printed_text" + association + " FROM ranked WHERE preferred_rank=1 "
-            "ORDER BY " + order + "CAST(collector_number AS INTEGER),collector_number,printing_id LIMIT ? OFFSET ?",
+            f"""WITH page AS (
+                SELECT p.printing_id,p.collector_number,p.layout,p.identity_status,
+                       e.code AS set_code,e.name AS edition{association}
+                {eligible}
+                ORDER BY {order} LIMIT ? OFFSET ?
+            )
+            SELECT sr.provider_card_id,page.*,sr.lang,sr.name,sr.printed_name,
+                   sr.type_line,sr.printed_type_line,sr.mana_cost,sr.mana_value,sr.rarity,
+                   sr.oracle_text,sr.printed_text
+            FROM page
+            CROSS JOIN source_records sr ON sr.provider_card_id=(
+                SELECT candidate.provider_card_id FROM source_records candidate
+                WHERE candidate.printing_id=page.printing_id
+                ORDER BY CASE candidate.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1
+                         WHEN 'ja' THEN 2 WHEN 'ph' THEN 3 ELSE 4 END,
+                         candidate.provider_card_id
+                LIMIT 1
+            )
+            ORDER BY {order}""",
             codes + [limit, offset],
         ).fetchall()
     return {"contract_version": CONTRACT_VERSION, "total": total, "limit": limit,

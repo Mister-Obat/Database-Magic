@@ -2,13 +2,25 @@
 
 ## Cartes proxy
 
-Dans Perso, **Voir les proxies** ouvre une sous-page paginée. Les cartes à
-référencer précèdent les cartes référencées. La visionneuse
+L’onglet **Proxy** ouvre une vue paginée indépendante, entre **Deck perso** et
+**Archives**. Les anciens liens `#perso?proxies=1` restent utilisables.
+**Ouvrir le dossier des proxies** appelle `POST /api/v2/proxies/open-folder`
+pour ouvrir le dossier local configuré. Le serveur n’accepte aucun chemin libre.
+La grille relit le dossier à l’entrée dans la vue et au retour du focus dans
+l’application. Les écritures d’images dans une version publiée ne reconstruisent
+pas l’index proxy. Le verrou de cet index est libéré avant la consultation du
+catalogue officiel. Les cartes à référencer précèdent les cartes référencées. La visionneuse
 affiche l’image locale et propose un choix d’impression réelle par nom et
 édition. La sélection associe les caractéristiques de cette impression à la
 carte de l’édition **Proxy**. Les proxies sont également interrogeables dans
 Recherche et l’édition Proxy arrive en tête d’Éditions tant que le dossier
-contient des images. La recherche d’impression à associer exclut les proxies.
+contient des images. La croix d’une vignette demande une confirmation qui
+mentionne la suppression de l’image du dossier. `POST /api/v2/proxies/delete`
+exige l’origine locale, un identifiant de proxy et une confirmation explicite.
+Le serveur résout cet identifiant dans le dossier configuré, supprime l’image
+et son association. Une composition personnelle qui contenait le proxy
+conserve sa ligne de carte, avec l’image absente. La recherche d’impression
+à associer exclut les proxies.
 Ses résultats montrent les miniatures disponibles localement avec aperçu au
 survol. Pour un proxy associé, la fiche propose de réassocier la carte,
 remplacer l’image par un fichier local, exporter l’image sur le Bureau,
@@ -95,6 +107,10 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   fiche annule de même le chargement précédent. Les réponses obsolètes restent
   ignorées. La fermeture de la connexion n’interrompt pas nécessairement un
   calcul SQLite déjà démarré côté serveur.
+- Aux limites d'une page, une flèche dans la visionneuse peut charger une autre
+  page avant d'ouvrir la carte voisine. Le résultat est ignoré si la fiche est
+  fermée, remplacée ou si une autre navigation a été demandée. Dans Éditions,
+  l'actualisation des images attend la fin d'un chargement de page en cours.
 - Le choix d'image existante et les deux étapes de références IA partagent la
   même position de vignettes et d'aperçu. Les consignes des références sont à
   droite du titre, hors de la sélection. Les images comparées restent visibles
@@ -246,7 +262,16 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   impressions dont toutes les faces ont une image prête sur toutes les
   impressions du catalogue, éditions complètes sur éditions éligibles, decks
   complets sur decks répertoriés dans l'index local. Les trois tuiles occupent
-  leur place dès l'ouverture et seuls leurs chiffres sont mis à jour.
+  leur place dès l'ouverture. Le navigateur restaure les derniers chiffres
+  valides au démarrage et les actualise à l’entrée, au retour de visibilité et
+  toutes les 45 secondes tant que l’Accueil est visible.
+  `background_decks=1` permet de renvoyer indépendamment les compteurs de
+  cartes et d’éditions. Le calcul des decks complets s’effectue en arrière-plan,
+  avec réutilisation du dernier résultat serveur pendant cinq minutes.
+  Entre ces compteurs et la maintenance, `GET /api/v2/recent-activity` alimente
+  jusqu’à sept vignettes des decks personnels modifiés le plus récemment.
+  Chaque vignette reprend la couverture, le nom et les couleurs de Deck perso
+  et ouvre le deck correspondant.
 - `/health` expose `app_api_revision`. Le lanceur réutilise une instance locale
   compatible et ouvre sa page ; il arrête une instance incompatible seulement si
   sa commande exécute exactement `bibliotheque_mtg.local_app`. Un autre programme
@@ -391,6 +416,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   restent vides tant qu'aucune édition n'est choisie. Une page d'édition contient
   au plus 300 cartes ; la recherche utilise la même grille et la même limite. L'encart des
   éditions différées n'apparaît pas sur cette page.
+  La requête d'édition compte et trie les impressions qui ont au moins une ligne
+  source, puis choisit la langue affichée uniquement pour les impressions de la page.
 - Les champs « Rechercher une édition » des vues Recherche, Éditions et Decks
   utilisent la même recherche insensible aux accents, sur les noms français et
   anglais ainsi que sur le code/diminutif de chaque édition. Les résultats
@@ -530,6 +557,13 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   navigation entre onglets conserve les mosaïques déjà chargées. Les changements
   de sélection, la pagination et les actions de rafraîchissement peuvent relire
   les résultats.
+- Le bouton **Rafraîchir la page**, à gauche de la réduction des vignettes,
+  actualise la vue active. Recherche relit les slots des résultats affichés ;
+  Éditions, Proxy et Archives relisent la sélection et la page courantes.
+  Deck préconstruit revérifie les résultats de la recherche ou relit le deck
+  ouvert. Deck perso actualise la liste ou relit la fiche après sauvegarde des
+  changements. Sur Accueil, le bouton actualise les compteurs, les decks
+  récents et l’état de la maintenance.
 - Recherche de cartes et de decks utilisent six sélecteurs visuels W/U/B/R/G/C.
   Les filtres d'édition, de rareté et de type de carte dans Recherche, et
   d'édition, de format et de type de produit dans Decks, acceptent plusieurs
@@ -653,10 +687,12 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
    et choisit une seule ligne de langue par impression : FR puis EN puis JA, et
    pagine au plus 200 résultats dans Recherche. Le panneau filtre les cartes
    ayant au moins un slot image prêt, celles sans aucun slot prêt, ou les deux,
-   avant déduplication des lignes de langue et pagination. La sélection candidate (FTS, filtres,
-   déduplication) est gardée dans un cache mémoire borné, indexé par la version
-   et l'empreinte SQLite ainsi que les critères hors tri/page ; changer le sens
-   du tri ou de page réutilise donc cette sélection. Le tri ajoute l'édition ancienne et
+   avant le retrait des doublons et la pagination. La sélection candidate
+   (FTS et filtres de catalogue) est gardée dans un cache mémoire borné, indexé
+   par le fichier de la version publiée et les critères hors image, tri et page.
+   Pour une base hors publication, l'empreinte SQLite inclut aussi les dates et
+   tailles des fichiers. Les slots image sont filtrés à chaque requête, avant le
+   retrait des doublons, le tri et la pagination. Le tri ajoute l'édition ancienne et
    l'ordre d'ajout croissant ou décroissant. Avec image uniquement, la date
    d'ajout est celle du WebP lié au slot, lue une seule fois par asset pendant
    le classement ; autrement, c'est la première
@@ -715,8 +751,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 
 ## Évolution autorisée — decks personnels (18 novembre 2026)
 
-- Ajouter Perso entre Decks et Archives. L'éditeur conserve le deck actif lors
-  des allers-retours Recherche/Perso ; un retour explicite ouvre la liste.
+- **Deck perso** se trouve entre **Deck préconstruit** et **Proxy**. L'éditeur
+  conserve le deck actif lors des allers-retours avec Recherche ; un retour
+  explicite ouvre la liste. La liste et le sélecteur de deck utilisent la
+  projection `summary=1`, qui résout la couverture seule.
 - Les decks personnels portent un UUID, un nom, des couleurs W/U/B/R/G (vide
   pour incolore), une révision et des sections ordonnées identifiées par UUID.
   Les entrées conservent les identités exactes fournisseur/impression, leur
@@ -725,23 +763,37 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   indépendante des versions du catalogue. Transactions durables, historique des
   révisions et contrôle de concurrence évitent les écrasements silencieux.
 - L'API locale expose liste, création, lecture, sauvegarde, ajout d'une impression,
-  copie d'un préconstruit et export Bureau. Tous les POST suivent le contrôle
-  d'origine existant ; aucune requête ne reçoit de chemin de fichier libre.
+  copie d'un préconstruit, sections de rangement et import/export de listes.
+  Tous les POST suivent le contrôle d'origine existant ; aucune requête ne
+  reçoit de chemin de fichier libre.
 - La visionneuse commune propose un plus entre l'export image et le verso,
   ouvrant la liste des decks personnels. Ajouter une carte ne ferme pas la fiche.
 - L'éditeur offre nom, couleurs, sections ajoutables/renommables/supprimables,
   quantités, retrait des cartes et déplacement par glisser-déposer ou sélecteur
   accessible. Supprimer une section non vide déplace ses cartes vers une section
   conservée ; aucune suppression de section ne détruit implicitement les cartes.
-- La première entrée de la première section représente la couverture. Les sections
+- La première carte de la première section non vide représente la couverture. Les sections
   initiales sont Commandant (si pertinent), Créatures, Rituels, Éphémères,
   Artefacts, Enchantements, Planeswalkers, Terrains, Jetons ; conserver aussi les
   autres sections d'un préconstruit (réserve, etc.) et toutes ses quantités.
 - L'import préconstruit crée une copie indépendante, conserve nom/couleurs et
   identités disponibles, sans téléchargement d'image implicite. Les cartes non
   résolues restent visibles et ne sont jamais supprimées silencieusement.
-- Rechercher la liste personnelle par nom et couleurs. L'export réutilise le
-  parcours PNG sur le Bureau des decks préconstruits et n'écrase aucun fichier.
+- Dans la liste personnelle, **Importer** suit **Créer un deck**.
+  `POST /api/v2/personal-decks/import-text` crée un deck à
+  partir d’une liste texte locale. Le nom vient de la liste ou du nom du fichier.
+  Les quantités, sections et références d’impression sont lues hors ligne ;
+  les lignes qui demandent une vérification sont indiquées après l’import.
+  Le multiplicateur `x` peut être accolé à la quantité ou être un mot distinct ;
+  l’initiale d’un nom comme Xande est conservée.
+  La fiche du deck contient **Exporter les images** et **Exporter en TXT**.
+  Chaque bouton lance directement l’export sur le Bureau.
+  `POST /api/v2/personal-decks/export-text` écrit le TXT sans écraser un fichier.
+- Les sections de rangement de la liste peuvent être ajoutées, renommées et
+  supprimées. Un deck peut être déplacé vers une autre section ou laissé sans
+  section. Supprimer une section rend ses decks « Sans section » et conserve
+  leurs compositions. La recherche par nom et couleurs s’applique aux sections
+  de la liste.
 - Réutiliser HTML/CSS/JS natif, sqlite3 et la palette violette existante ; aucune
   dépendance supplémentaire. Montrer l'état de sauvegarde et les erreurs ; ne
   jamais afficher « enregistré » avant confirmation serveur.
@@ -753,10 +805,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   champs/quantités/retraits/sections ; « Terminer » attend la sauvegarde confirmée.
 - Déplacer les cartes exclusivement par glisser-déposer en édition, dans une
   section ou entre sections. Retirer les flèches haut/bas et sélecteurs de déplacement.
-- Aucune sélection spéciale du commandant : la première carte de la section de
-  commandement identifiée par `source_section=commander` est la couverture, quel
-  que soit l'ordre des sections. Cette zone peut contenir plusieurs cartes.
-  Pour un deck sans zone de commandement, utiliser la première section.
+- La couverture suit l’ordre des sections puis celui des cartes ; les sections
+  vides sont sautées. La zone de commandement suit la même règle.
 - La création manuelle prévoit une zone de commandement sans case à cocher.
   Une fois créé, le deck apparaît dans la liste sans ouvrir son détail.
   L'import d'un deck non Commander ne crée pas cette zone.
@@ -778,7 +828,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - Les compositions personnelles reprennent l’en-tête des préconstruits avec le
   nom et les couleurs, ainsi que leurs séparateurs et titres de section avec le
   nombre de cartes entre parenthèses. Aucun total général n’est affiché.
-  Actualiser relit le deck et les images locales.
+  **Organiser les sections** affiche le formulaire d’ajout sous la barre
+  d’actions et donne accès au renommage et à la suppression des sections.
+  En consultation, ces commandes sont masquées. Dans la liste des decks,
+  le séparateur droit n’apparaît qu’entre deux sections.
 - Réutiliser la présentation des filtres Recherche, avec Incolore exclusif,
   correspondance normale ou exacte et tri. La création est hors des filtres.
 - En édition, le glisser-déposer fait défiler la page près des bords.

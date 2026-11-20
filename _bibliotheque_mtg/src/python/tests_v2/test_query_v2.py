@@ -3,6 +3,8 @@ import unittest
 import sqlite3
 import os
 from pathlib import Path
+from contextlib import closing
+from unittest.mock import patch
 
 from bibliotheque_mtg.v2.catalogue import migrate
 from bibliotheque_mtg.v2.query import _french_type_aliases, _match_term, card_detail, edition_cards, list_editions, search_cards
@@ -270,6 +272,20 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual({'1', '213'}, {item['collector_number'] for item in result['items']})
         self.assertEqual('ph-213', next(item['provider_card_id'] for item in result['items']
                                         if item['collector_number'] == '213'))
+
+    def test_published_search_reuses_candidates_after_an_image_write(self):
+        published = self.db.parent / "versions" / "v2-0123456789ab" / "catalogue.sqlite"
+        published.parent.mkdir(parents=True)
+        self.db.replace(published)
+        self.assertEqual(1, search_cards(published, "Forest", image_filter="without")["total"])
+        with closing(sqlite3.connect(published)) as conn, conn:
+            conn.execute("INSERT INTO image_assets VALUES(?,?,?,?,?,?,?,?)",
+                         ("asset", "card.webp", "image/webp", 7, 531, 738, "en", "{}"))
+            conn.execute("""INSERT INTO image_slots
+                SELECT printing_id,face_index,'fr','en','ready','asset','{}' FROM card_faces""")
+        with patch("bibliotheque_mtg.v2.query._extra_matches", side_effect=AssertionError("Cache miss")):
+            self.assertEqual(1, search_cards(published, "Forest", image_filter="with")["total"])
+            self.assertEqual(0, search_cards(published, "Forest", image_filter="without")["total"])
 
     def test_image_filter_and_added_order_use_local_webp_dates(self):
         conn = sqlite3.connect(self.db)

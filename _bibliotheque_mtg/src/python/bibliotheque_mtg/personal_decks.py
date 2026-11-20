@@ -59,6 +59,11 @@ def _database(path):
             CREATE TABLE IF NOT EXISTS personal_deck_revisions (
                 deck_id TEXT NOT NULL REFERENCES personal_decks(id), revision INTEGER NOT NULL,
                 document TEXT NOT NULL, PRIMARY KEY(deck_id,revision));
+            CREATE TABLE IF NOT EXISTS personal_deck_groups (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS personal_deck_group_assignments (
+                deck_id TEXT PRIMARY KEY REFERENCES personal_decks(id),
+                group_id TEXT NOT NULL REFERENCES personal_deck_groups(id) ON DELETE CASCADE);
         """)
         conn.execute("BEGIN IMMEDIATE")
         yield conn
@@ -141,6 +146,24 @@ def create_deck(path, name, colors, commander=False):
         return _write(conn, _new(name, colors, commander=bool(commander)))
 
 
+def create_deck_from_text(path, name, colors, sections):
+    if not 1 <= len(sections) <= 100:
+        raise ValueError("Conserver de 1 à 100 sections.")
+    prepared = []
+    for section in sections:
+        cards = []
+        for card in section["cards"]:
+            count = card.get("count")
+            if type(count) is not int or not 1 <= count <= 9999:
+                raise ValueError("Quantité de carte invalide.")
+            cards.append({**card, "id": _id()})
+        prepared.append({**section, "id": _id(), "name": _text(section["name"], "Nom de section"),
+                         "cards": cards})
+    deck = _new(name, colors, sections=prepared)
+    with _database(path) as conn:
+        return _write(conn, deck)
+
+
 def duplicate_deck(path, deck_id, name, revision):
     with _database(path) as conn:
         source = _read(conn, deck_id)
@@ -153,18 +176,108 @@ def duplicate_deck(path, deck_id, name, revision):
         return _write(conn, _new(name, source["colors"], sections=source["sections"]))
 
 
+def _read_connection(path):
+    return closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True))
+
+
 def get_deck(path, deck_id):
-    with _database(path) as conn:
+    if not Path(path).is_file():
+        raise KeyError("Deck personnel introuvable.")
+    with _read_connection(path) as conn:
         return _read(conn, deck_id)
 
 
-def list_decks(path, query="", colors=None):
-    with _database(path) as conn:
-        decks = [json.loads(row[0]) for row in conn.execute("SELECT document FROM personal_decks ORDER BY rowid DESC")]
+def list_decks(path, query="", colors=None, *, include_groups=False):
+    if not Path(path).is_file():
+        return []
+    with _read_connection(path) as conn:
+        if include_groups and _has_deck_groups(conn):
+            rows = conn.execute("""
+                SELECT decks.document, assignments.group_id FROM personal_decks AS decks
+                LEFT JOIN personal_deck_group_assignments AS assignments ON assignments.deck_id=decks.id
+                ORDER BY decks.rowid DESC
+            """)
+        else:
+            rows = conn.execute("SELECT document, NULL FROM personal_decks ORDER BY rowid DESC")
+        decks = []
+        for document, group_id in rows:
+            deck = json.loads(document)
+            if include_groups:
+                deck["group_id"] = group_id
+            decks.append(deck)
     needle = str(query).casefold().strip()
     selected = _colors(colors) if colors else []
     return [deck for deck in decks if not deck.get("deleted_at") and needle in deck["name"].casefold()
             and all(c in deck["colors"] for c in selected)]
+
+
+def _has_deck_groups(conn):
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='personal_deck_group_assignments'"
+    ).fetchone()
+    return row is not None
+
+
+def list_deck_groups(path):
+    if not Path(path).is_file():
+        return []
+    with _read_connection(path) as conn:
+        if not _has_deck_groups(conn):
+            return []
+        return [{"id": group_id, "name": name} for group_id, name in conn.execute(
+            "SELECT id, name FROM personal_deck_groups ORDER BY rowid")]
+
+
+def _read_deck_group(conn, group_id):
+    if not isinstance(group_id, str):
+        raise ValueError("Identifiant de section requis.")
+    row = conn.execute("SELECT name FROM personal_deck_groups WHERE id=?", (group_id,)).fetchone()
+    if row is None:
+        raise KeyError("Section de decks introuvable.")
+    return {"id": group_id, "name": row[0]}
+
+
+def create_deck_group(path, name):
+    group = {"id": _id(), "name": _text(name, "Nom de section")}
+    with _database(path) as conn:
+        conn.execute("INSERT INTO personal_deck_groups (id, name) VALUES (?, ?)",
+                     (group["id"], group["name"]))
+    return group
+
+
+def rename_deck_group(path, group_id, name):
+    name = _text(name, "Nom de section")
+    with _database(path) as conn:
+        group = _read_deck_group(conn, group_id)
+        conn.execute("UPDATE personal_deck_groups SET name=? WHERE id=?", (name, group_id))
+        group["name"] = name
+    return group
+
+
+def delete_deck_group(path, group_id):
+    with _database(path) as conn:
+        group = _read_deck_group(conn, group_id)
+        conn.execute("DELETE FROM personal_deck_groups WHERE id=?", (group_id,))
+    return group
+
+
+def move_deck_to_group(path, deck_id, group_id):
+    with _database(path) as conn:
+        _read(conn, deck_id)
+        if group_id is None:
+            conn.execute("DELETE FROM personal_deck_group_assignments WHERE deck_id=?", (deck_id,))
+        else:
+            _read_deck_group(conn, group_id)
+            conn.execute("""
+                INSERT INTO personal_deck_group_assignments (deck_id, group_id) VALUES (?, ?)
+                ON CONFLICT(deck_id) DO UPDATE SET group_id=excluded.group_id
+                WHERE group_id<>excluded.group_id
+            """, (deck_id, group_id))
+    return {"id": deck_id, "group_id": group_id}
+
+
+def recent_decks(path, limit):
+    return sorted(list_decks(path), key=lambda deck: deck.get("updated_at") or "", reverse=True)[:limit]
 
 
 def delete_deck(path, deck_id, revision):
@@ -323,7 +436,7 @@ def import_preconstructed(path, source, catalog_db):
                 section = {"id": _id(), "name": name, "source_section": key, "cards": cards}
                 sections.append(section)
                 by_name[name] = section
-    # The explicit commander is the cover when present, without dropping any section.
+    # Imported decks start with the command zone when one is present.
     sections.sort(key=lambda s: 0 if s.get("source_section") == "commander" else 1)
     colors = source.get("colors") or []
     if isinstance(colors, str):
@@ -332,6 +445,25 @@ def import_preconstructed(path, source, catalog_db):
     deck["source_deck_id"] = source.get("id")
     with _database(path) as conn:
         return _write(conn, deck)
+
+
+def _cover_section(deck):
+    return next((section for section in deck["sections"] if section["cards"]), None)
+
+
+def summary_with_media(deck, catalog_db, proxy_lookup=None):
+    summary = {key: deck.get(key) for key in ("id", "name", "colors", "revision", "updated_at")}
+    if "group_id" in deck:
+        summary["group_id"] = deck["group_id"]
+    section = _cover_section(deck)
+    cover_cards = section["cards"][:1] if section else []
+    cover = None
+    if cover_cards:
+        cover = with_media({"sections": [{**section, "cards": cover_cards}]},
+                           catalog_db, proxy_lookup)["cover_card"]
+    return {**summary, "cover_card": cover,
+            "cover_image_path": cover.get("image_path") if cover else None,
+            "card_count": sum(card["count"] for section in deck["sections"] for card in section["cards"])}
 
 
 def with_media(deck, catalog_db, proxy_lookup=None):
@@ -348,8 +480,7 @@ def with_media(deck, catalog_db, proxy_lookup=None):
                     for key in ("name", "printed_name", "type_line", "mana_value", "collector_number", "image_url"):
                         card[key] = current.get(key)
                     card.update(image_ready=True, image_status="ready")
-    commander = next((s for s in result["sections"] if s.get("source_section") == "commander"), None)
-    cover_section = commander if commander is not None else (result["sections"][0] if result["sections"] else None)
+    cover_section = _cover_section(result)
     first = cover_section["cards"] if cover_section else []
     result["cover_card"] = copy.deepcopy(first[0]) if first else None
     result["cover_image_path"] = first[0].get("image_path") if first else None

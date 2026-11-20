@@ -51,18 +51,25 @@ de même taille et de même trait, intégrées sans dépendance React.
 | Désactivé | Surface sombre et texte atténué. Garder l’emprise du bouton et réserver le survol interactif aux actions disponibles. |
 
 - Rayon de **16 px** pour les boutons principaux, secondaires, les sélecteurs personnalisés et les boutons de la barre. Les contrôles spécialisés, comme les symboles de mana, gardent leur forme. L’ombre portée commune `0 2px 3px #08061140` donne un bord net et un relief discret. Dans la navigation, elle accompagne l’onglet actif ou survolé.
-- Barre supérieure : Fermer et Notifications restent iconographiques et mesurent **46 × 46 px**. Le logo a la même hauteur. Les boutons à icône seule ont un nom accessible.
-- En-têtes de Recherche, Éditions et Decks : les deux actions mesurent **44 px** de haut. Rafraîchir fait **44 × 44 px**. Le libellé du téléchargement reste sur une ligne, même si le groupe se place sous le titre.
+- Barre supérieure : Rafraîchir, les commandes de zoom, Fermer et Notifications
+  mesurent **46 × 46 px**. Rafraîchir est placé à gauche du bouton moins.
+  Le logo a la même hauteur. Les boutons à icône seule ont un nom accessible.
+- En-têtes de Recherche, Éditions et Decks : le bouton de téléchargement mesure
+  **44 px** de haut. Son libellé reste sur une ligne, même sous le titre.
 - Centrer la loupe et le texte de Rechercher comme un seul ensemble. Laisser Rechercher et Effacer les filtres à gauche et le statut à droite. En espace étroit, le statut peut passer dessous en conservant son alignement à droite.
 - Donner un retour visible au survol et au focus, notamment pour Rafraîchir. Les transitions de couleur de **150 ms** s’appliquent lorsque la préférence de mouvement réduit le permet. Éviter les animations décoratives en boucle.
 
 ## Typographie, marges et alignements
 
 - Titres de page en Georgia, avec replis Times New Roman et serif, `clamp(2rem, 4vw, 3.2rem)`, interligne `1.05`. Texte, libellés et commandes en Inter, puis Segoe UI et polices système. Les libellés de filtres sont à `0.9rem`. Les boutons d’en-tête du catalogue et les états secondaires sont à `0.875rem`.
-- Les cinq vues partent du même conteneur `main`, limité à **1 240 px**, centré, avec **2 rem** de marge intérieure haute. Suivre les gouttières responsives existantes du conteneur. Les en-têtes partagent **0,4 rem** entre le surtitre et le titre et **1,25 rem** sous l’en-tête. Le titre n’ajoute pas de marge verticale.
+- Les vues principales partent du même conteneur `main`, limité à **1 240 px**, centré, avec **2 rem** de marge intérieure haute. Suivre les gouttières responsives existantes du conteneur. Les en-têtes partagent **0,4 rem** entre le surtitre et le titre et **1,25 rem** sous l’en-tête. Le titre n’ajoute pas de marge verticale.
 - Panneaux standards avec **1,2 rem** de marge intérieure et **14 px** de rayon. Les lignes de filtres partagent un espacement de **0,8 rem**. Une ligne fine sépare les filtres principaux du tri dans Recherche et Decks. Les symboles de mana et le sélecteur de mode restent compacts.
-- Garder la barre sur une ligne. En dessous de **960 px** ou en portrait, les cinq onglets passent aux pictogrammes avec leurs noms accessibles. Les boutons de droite gardent leur taille.
+- Garder la barre sur une ligne. En dessous de **1 080 px** ou en portrait, les onglets passent aux pictogrammes avec leurs noms accessibles. Les boutons de droite gardent leur taille.
 - Réserver l’emprise des compteurs dès l’ouverture d’Accueil. Les états et résultats vides ne doivent pas créer de grandes zones de blanc sous les commandes.
+- L’Accueil affiche les decks perso récemment modifiés dans la largeur du
+  panneau. Les vignettes de Deck perso occupent sept colonnes égales en
+  fenêtre large, quatre en fenêtre intermédiaire et deux en fenêtre étroite.
+  Le réglage de zoom des vignettes ne modifie pas cette grille.
 
 ## Vérification d’une retouche
 

@@ -1,10 +1,155 @@
 import pytest
+import io
 import json
+import lzma
 import sqlite3
+from urllib.error import HTTPError
 from unittest.mock import patch
 
+from bibliotheque_mtg import decks
 from bibliotheque_mtg.decks import get_deck, import_decks, list_decks, index_deck_colors
 from bibliotheque_mtg.decks import deck_facets, _resolve_provider_ids
+
+
+def test_composition_worker_skips_loaded_and_retries_after_other_decks(tmp_path, monkeypatch):
+    db = tmp_path / "decks.sqlite"
+    catalog = tmp_path / "catalog.sqlite"
+    catalog.touch()
+    product = {"code": "TST", "type": "Commander Deck"}
+    import_decks({"meta": {}, "data": [
+        dict(product, fileName="Recent", name="Recent", releaseDate="2026-01-02"),
+        dict(product, fileName="Older", name="Older", releaseDate="2026-01-01"),
+        dict(product, fileName="Cached", name="Cached", mainBoard=[{"name": "Cached card"}]),
+        dict(product, fileName="Bundle", name="Bundle", type="Bundle"),
+    ]}, db)
+    fetched = []
+    now = 10000
+    monkeypatch.setattr(decks.time, "time", lambda: now)
+    with sqlite3.connect(db) as conn:
+        decks._write_background_index_retry(conn, now + 86400)
+
+    class Response(io.BytesIO):
+        status = 200
+
+    def fetch(request, timeout):
+        filename = request.full_url.rsplit("/", 1)[-1]
+        fetched.append(filename)
+        if filename == "Recent.json.xz" and len(fetched) == 1:
+            return Response(b"damaged archive")
+        payload = {"data": {"mainBoard": [{"name": "Card", "colorIdentity": ["U"]}]}}
+        return Response(lzma.compress(json.dumps(payload).encode()))
+
+    monkeypatch.setattr(decks.urllib.request, "urlopen", fetch)
+    assert decks._index_next_deck_composition(db, catalog) == 120
+    assert decks._index_next_deck_composition(db, catalog) == 120
+    assert decks._index_next_deck_composition(db, catalog) == 300
+    assert fetched == ["Recent.json.xz", "Older.json.xz"]
+    now += 3600
+    assert decks._index_next_deck_composition(db, catalog) == 120
+    assert fetched[-1] == "Recent.json.xz"
+    loaded = get_deck(db, "mtgjson:Recent", fetch_missing=False)["deck"]
+    assert loaded["colors"] == ["U"]
+    assert loaded["tokens_loaded"]
+    assert loaded["sections"]["mainboard"][0]["name"] == "Card"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT count(*) FROM deck_composition_retries").fetchone()[0] == 0
+
+
+def test_composition_worker_honors_startup_delay_busy_and_shutdown(tmp_path, monkeypatch):
+    catalog = tmp_path / "catalog.sqlite"
+    catalog.touch()
+    waits = []
+    reads = []
+    busy = iter([True, False])
+
+    class Stop:
+        def wait(self, delay):
+            waits.append(delay)
+            return len(waits) == 3
+
+    def index_next(db, catalog_db):
+        reads.append((db, catalog_db))
+        return 120
+
+    db = tmp_path / "deck.sqlite"
+    monkeypatch.setattr(decks, "_index_next_deck_composition", index_next)
+    decks.run_deck_composition_index(Stop(), db, catalog_db_provider=lambda: catalog,
+                                     network_busy=lambda: next(busy))
+    assert waits == [60, 300, 120]
+    assert reads == [(db, catalog)]
+
+
+def test_composition_worker_waits_for_provider_retry_after(tmp_path, monkeypatch):
+    db = tmp_path / "decks.sqlite"
+    catalog = tmp_path / "catalog.sqlite"
+    catalog.touch()
+    import_decks({"meta": {}, "data": [
+        {"code": "TST", "type": "Commander Deck", "fileName": "Example", "name": "Example"},
+    ]}, db)
+    monkeypatch.setattr(decks.time, "time", lambda: 10000)
+    with sqlite3.connect(db) as conn:
+        decks._write_background_index_retry(conn, 20000)
+    error = HTTPError("https://mtgjson.com", 429, "Throttled", {"Retry-After": "5400"}, None)
+    with patch.object(decks.urllib.request, "urlopen", side_effect=error) as fetch:
+        assert decks._index_next_deck_composition(db, catalog) == 5400
+        assert decks._index_next_deck_composition(db, catalog) == 300
+    fetch.assert_called_once()
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT retry_after FROM deck_composition_retries").fetchone()[0] == 15400
+
+
+def test_composition_worker_refreshes_index_only_once_per_week(tmp_path, monkeypatch):
+    db = tmp_path / "state" / "decks.sqlite"
+    catalog = tmp_path / "catalog.sqlite"
+    catalog.touch()
+    now = 10000
+    monkeypatch.setattr(decks.time, "time", lambda: now)
+    fetched = []
+
+    class Response(io.BytesIO):
+        status = 200
+
+    def fetch(request, timeout):
+        filename = request.full_url.rsplit("/", 1)[-1]
+        fetched.append(filename)
+        if filename == "DeckList.json.xz":
+            products = [
+                {"name": name, "code": "TST", "fileName": name, "type": "Commander Deck"}
+                for name in (["First"] if len(fetched) == 1 else ["First", "Second"])
+            ]
+            payload = {"meta": {}, "data": products}
+        else:
+            payload = {"data": {"mainBoard": [{"name": filename}]}}
+        return Response(lzma.compress(json.dumps(payload).encode()))
+
+    monkeypatch.setattr(decks.urllib.request, "urlopen", fetch)
+    assert decks._index_next_deck_composition(db, catalog) == 120
+    assert decks._index_next_deck_composition(db, catalog) == 120
+    assert decks._index_next_deck_composition(db, catalog) == 300
+    assert fetched == ["DeckList.json.xz", "First.json.xz"]
+
+    now += 7 * 24 * 3600
+    assert decks._index_next_deck_composition(db, catalog) == 120
+    assert decks._index_next_deck_composition(db, catalog) == 120
+    assert decks._index_next_deck_composition(db, catalog) == 300
+    assert fetched == ["DeckList.json.xz", "First.json.xz", "DeckList.json.xz", "Second.json.xz"]
+    first = get_deck(db, "mtgjson:First", fetch_missing=False)["deck"]
+    assert first["sections"]["mainboard"][0]["name"] == "First.json.xz"
+
+
+def test_composition_worker_persists_failed_index_refresh(tmp_path, monkeypatch):
+    db = tmp_path / "decks.sqlite"
+    catalog = tmp_path / "catalog.sqlite"
+    catalog.touch()
+    now = 10000
+    retry_after = 8 * 24 * 3600
+    monkeypatch.setattr(decks.time, "time", lambda: now)
+    error = HTTPError("https://mtgjson.com", 429, "Throttled", {"Retry-After": str(retry_after)}, None)
+    with patch.object(decks.urllib.request, "urlopen", side_effect=error) as fetch:
+        assert decks._index_next_deck_composition(db, catalog) == retry_after
+        now += 7 * 24 * 3600
+        assert decks._index_next_deck_composition(db, catalog) == 300
+    fetch.assert_called_once()
 
 
 def test_deck_printing_resolution_excludes_deferred_editions(tmp_path):

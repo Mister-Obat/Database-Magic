@@ -4,6 +4,7 @@ import json
 import base64
 import hashlib
 import io
+import logging
 import sqlite3
 import mimetypes
 import os
@@ -17,6 +18,7 @@ import webbrowser
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import lru_cache
 from collections import OrderedDict
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 
@@ -31,12 +33,13 @@ from .version_history import VersionHistoryError, activate_version, list_version
 from .image_download import (download_printing, ensure_catalogue_wal,
                              refresh_printing_deep, preview_printing_candidate,
                              publish_preview_candidate, import_local_image, is_temporary_image_error)
-from .decks import (_SET_NAMES_FR, deck_facets, ensure_deck_index, get_deck,
-                    index_deck_colors, list_decks, refresh_deck_index)
+from .decks import (_SET_NAMES_FR, _resolve_provider_ids, deck_facets, ensure_deck_index, get_deck,
+                    index_deck_colors, list_decks, refresh_deck_index,
+                    run_deck_composition_index)
 from .deck_media import enrich_deck_media, export_deck_to_desktop
 from .list_import import resolve_list, parse_list
 from .list_export import export_card_to_desktop, export_list_to_desktop, export_local_card_image
-from . import personal_decks
+from . import personal_decks, personal_deck_text
 from .v2.card_generation import (generate_card_candidate, extract_card_text_reference,
                                  CardGenerationError)
 import tempfile
@@ -58,11 +61,15 @@ DECK_DB = OPS_ROOT / "state" / "preconstructed-decks.sqlite"
 PERSONAL_DECK_DB = OPS_ROOT / "state" / "personal-decks.sqlite"
 PROXIES = Proxies(OPS_ROOT.parent / "proxy", OPS_ROOT / "state")
 PROXY_ASSOCIATE = "/api/v2/proxies/associate"
+PROXY_OPEN_FOLDER = "/api/v2/proxies/open-folder"
+PROXY_DELETE = "/api/v2/proxies/delete"
 PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
-                        ("create", "save", "add", "import", "export", "delete", "duplicate")}
+                        ("create", "save", "add", "import", "export", "delete", "duplicate",
+                         "import-text", "export-text", "group-create", "group-rename",
+                         "group-delete", "group-move")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 35
+APP_API_REVISION = 38
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -1264,8 +1271,117 @@ def _image_slots_for_printings(db: Path, printing_ids: list[str]) -> dict[str, l
     return by_printing
 
 
-def _stats(db: Path) -> dict:
-    with connect(db) as conn:
+def _count_complete_decks(db: Path, deck_db: Path, deck_ids: list[str]) -> int:
+    resolved = {}
+    readiness = {}
+    complete = 0
+    for deck_id in deck_ids:
+        deck = get_deck(deck_db, deck_id, fetch_missing=False, include_tokens=True).get("deck")
+        if not deck:
+            continue
+        unresolved = {}
+        cards_and_keys = []
+        for section in deck["sections"].values():
+            for card in section:
+                raw = card.get("raw") or {}
+                scryfall_id = raw.get("scryfall_id") or raw.get("identifiers", {}).get("scryfallId")
+                key = (str(scryfall_id) if scryfall_id else None, card.get("set_code"), card.get("collector_number"))
+                cards_and_keys.append((card, key))
+                if key not in resolved:
+                    unresolved.setdefault(key, card)
+        if unresolved:
+            _resolve_provider_ids(list(unresolved.values()), db)
+            resolved.update((key, card["provider_card_id"]) for key, card in unresolved.items())
+        for card, key in cards_and_keys:
+            card["provider_card_id"] = resolved[key]
+        entries = _deck_entries(deck)
+        if not entries or any(not card["provider_card_id"] for card in entries):
+            continue
+        media_cards = {(card["provider_card_id"], card.get("set_code")): card for card in entries}
+        if any(readiness.get(key) is False for key in media_cards):
+            continue
+        unchecked = {key: card for key, card in media_cards.items() if key not in readiness}
+        if unchecked:
+            media = enrich_deck_media({"sections": {"stats": list(unchecked.values())}}, db)
+            readiness.update((key, item["image_ready"])
+                             for key, item in zip(unchecked, media["sections"]["stats"]))
+        complete += all(readiness[key] for key in media_cards)
+    return complete
+
+
+_STATS_LOCK = threading.Lock()
+_STATS_CACHE: tuple[Path, float, dict] | None = None
+_DECK_STATS_CONDITION = threading.Condition()
+_DECK_STATS_BUSY = False
+_DECK_STATS_CACHE: tuple[tuple[Path, Path], frozenset[str], float, int] | None = None
+
+
+def _cached_catalogue_stats(db: Path) -> dict:
+    global _STATS_CACHE
+    with _STATS_LOCK:
+        if _STATS_CACHE and _STATS_CACHE[0] == db and time.monotonic() - _STATS_CACHE[1] < 15:
+            return _STATS_CACHE[2]
+        result = _catalogue_stats(db)
+        _STATS_CACHE = (db, time.monotonic(), result)
+        return result
+
+
+def _calculate_complete_decks(key: tuple[Path, Path], deck_ids: list[str]) -> int:
+    global _DECK_STATS_BUSY, _DECK_STATS_CACHE
+    try:
+        count = _count_complete_decks(*key, deck_ids)
+        with _DECK_STATS_CONDITION:
+            _DECK_STATS_CACHE = (key, frozenset(deck_ids), time.monotonic(), count)
+        return count
+    finally:
+        with _DECK_STATS_CONDITION:
+            _DECK_STATS_BUSY = False
+            _DECK_STATS_CONDITION.notify_all()
+
+
+def _refresh_complete_decks(key: tuple[Path, Path], deck_ids: list[str]) -> None:
+    try:
+        _calculate_complete_decks(key, deck_ids)
+    except Exception:
+        logging.exception("Calcul du nombre de decks complets impossible")
+
+
+def _cached_complete_decks(db: Path, deck_db: Path, deck_ids: list[str], *, background: bool) -> int | None:
+    global _DECK_STATS_BUSY
+    if not deck_ids:
+        return 0
+    current_ids = frozenset(deck_ids)
+    key = (db, deck_db)
+    with _DECK_STATS_CONDITION:
+        while True:
+            cached = _DECK_STATS_CACHE
+            stale = None
+            if cached and cached[0] == key and cached[1].issubset(current_ids):
+                if time.monotonic() - cached[2] < 300:
+                    return cached[3]
+                stale = cached[3]
+            if not _DECK_STATS_BUSY:
+                _DECK_STATS_BUSY = True
+                break
+            if background:
+                return stale
+            _DECK_STATS_CONDITION.wait()
+    if not background:
+        return _calculate_complete_decks(key, deck_ids)
+    thread = threading.Thread(target=_refresh_complete_decks, args=(key, deck_ids),
+                              name="magic-home-deck-stats", daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        with _DECK_STATS_CONDITION:
+            _DECK_STATS_BUSY = False
+            _DECK_STATS_CONDITION.notify_all()
+        raise
+    return stale
+
+
+def _catalogue_stats(db: Path) -> dict:
+    with closing(connect(db)) as conn:
         editions = conn.execute(
             "SELECT eligibility,COUNT(*) n FROM editions GROUP BY eligibility ORDER BY eligibility"
         ).fetchall()
@@ -1283,20 +1399,6 @@ def _stats(db: Path) -> dict:
             (SELECT 1 FROM printings p WHERE p.set_id=e.set_id)
             AND NOT EXISTS (SELECT 1 FROM printings p JOIN image_slots s USING(printing_id)
             WHERE p.set_id=e.set_id AND s.status!='ready')""").fetchone()[0]
-    complete_decks = 0
-    loaded_decks = 0
-    decks_total = 0
-    if DECK_DB.is_file():
-        with sqlite3.connect(DECK_DB) as deck_conn:
-            decks_total = deck_conn.execute("SELECT COUNT(*) FROM decks").fetchone()[0]
-            deck_ids = [row[0] for row in deck_conn.execute(
-                "SELECT id FROM decks WHERE loaded=1 AND tokens_loaded=1")]
-        loaded_decks = len(deck_ids)
-        for deck_id in deck_ids:
-            deck = _deck_with_media(get_deck(DECK_DB, deck_id, catalog_db=db,
-                                               fetch_missing=False, include_tokens=True), db).get("deck")
-            if deck and deck["media_summary"]["total"] and not deck["media_summary"]["missing"]:
-                complete_decks += 1
     status_counts = {str(row[0]): row[1] for row in slots}
     return {
         "version_id": resolve_current(CATALOGUE_ROOT)["version_id"],
@@ -1308,12 +1410,24 @@ def _stats(db: Path) -> dict:
         "image_slots": status_counts,
         "image_assets": assets,
         "complete_editions": complete_editions,
-        "complete_decks": complete_decks,
-        "loaded_decks": loaded_decks,
-        "decks_total": decks_total,
         "missing_images": sum(n for status, n in status_counts.items() if status != "ready"),
         "downloaded_images": status_counts.get("ready", 0),
     }
+
+
+def _stats(db: Path, *, background_decks: bool = False) -> dict:
+    catalogue = _cached_catalogue_stats(db)
+    deck_db = DECK_DB
+    decks_total = 0
+    deck_ids = []
+    if deck_db.is_file():
+        with closing(sqlite3.connect(deck_db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            decks_total = conn.execute("SELECT COUNT(*) FROM decks").fetchone()[0]
+            deck_ids = [row[0] for row in conn.execute(
+                "SELECT id FROM decks WHERE loaded=1 AND tokens_loaded=1")]
+    complete_decks = _cached_complete_decks(db, deck_db, deck_ids, background=background_decks)
+    return {**catalogue, "complete_decks": complete_decks,
+            "loaded_decks": len(deck_ids), "decks_total": decks_total}
 
 
 def _deferred(db: Path) -> list[dict]:
@@ -1556,12 +1670,21 @@ class LibraryHandler(BaseHTTPRequestHandler):
             if route == "/api/v2/card/usage":
                 self._json(_card_usage(self.db, params.get("id", "")))
                 return
+            if route == "/api/v2/recent-activity":
+                database = self.db
+                self._json({"personal_decks": [
+                    personal_decks.summary_with_media(deck, database, lambda identifier: PROXIES.linked(database, identifier))
+                    for deck in personal_decks.recent_decks(PERSONAL_DECK_DB, 7)]})
+                return
             if route == "/api/v2/personal-decks":
                 items = personal_decks.list_decks(PERSONAL_DECK_DB, params.get("q", ""),
-                                                  list(params.get("colors", "")))
+                                                  list(params.get("colors", "")), include_groups=True)
                 database = self.db
-                self._json({"items": [personal_decks.with_media(
-                    deck, database, lambda identifier: PROXIES.linked(database, identifier)) for deck in items]})
+                with_media = (personal_decks.summary_with_media if params.get("summary") == "1"
+                              else personal_decks.with_media)
+                self._json({"items": [with_media(
+                    deck, database, lambda identifier: PROXIES.linked(database, identifier)) for deck in items],
+                    "groups": personal_decks.list_deck_groups(PERSONAL_DECK_DB)})
                 return
             if route == "/api/v2/personal-deck":
                 deck = personal_decks.get_deck(PERSONAL_DECK_DB, params.get("id", ""))
@@ -1669,7 +1792,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 self._json({"status": "ok", "version_id": resolve_current(CATALOGUE_ROOT)["version_id"],
                             "app_api_revision": APP_API_REVISION})
             elif route == "/api/v2/stats":
-                self._json(_stats(self.db))
+                self._json(_stats(self.db, background_decks=params.get("background_decks") == "1"))
             elif route == "/api/v2/maintenance/update":
                 self._json(_maintenance_snapshot())
             elif route == "/api/v2/maintenance/versions":
@@ -1898,7 +2021,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _LIST_TASK, _BATCH_TASK
         route = urllib.parse.urlsplit(self.path).path
-        if route not in PERSONAL_POST_ROUTES and route not in {PROXY_ASSOCIATE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
+        if route not in PERSONAL_POST_ROUTES and route not in {PROXY_ASSOCIATE, PROXY_OPEN_FOLDER, PROXY_DELETE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
             self._json({"error": "route_not_found"}, 404)
             return
         expected_origin = f"http://127.0.0.1:{self.server.server_port}"
@@ -1907,7 +2030,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
         if origin and origin not in {expected_origin, local_origin}:
             self._json({"error": "origin_rejected"}, 403)
             return
-        if route == "/api/v2/app/shutdown" and origin not in {expected_origin, local_origin}:
+        if route in {"/api/v2/app/shutdown", PROXY_OPEN_FOLDER, PROXY_DELETE} and origin not in {expected_origin, local_origin}:
             self._json({"error": "origin_required"}, 403)
             return
         try:
@@ -1944,14 +2067,58 @@ class LibraryHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json({"error": "json_object_required"}, 400)
                 return
+            if route == PROXY_OPEN_FOLDER:
+                if payload:
+                    raise ValueError("La demande d’ouverture du dossier proxy doit être vide.")
+                PROXIES.root.mkdir(parents=True, exist_ok=True)
+                os.startfile(PROXIES.root)
+                self._json({"opened": True})
+                return
             if route == PROXY_ASSOCIATE:
                 self._json(PROXIES.associate(self.db, payload.get("provider_card_id"), payload.get("source_id")))
                 return
+            if route == PROXY_DELETE:
+                if set(payload) != {"provider_card_id", "confirmed"} or payload["confirmed"] is not True:
+                    raise ValueError("La suppression du fichier proxy doit être confirmée.")
+                try:
+                    result = PROXIES.delete(payload["provider_card_id"])
+                except FileNotFoundError:
+                    self._json({"error": "proxy_not_found", "detail": "Proxy introuvable dans le dossier."}, 404)
+                    return
+                except OSError as exc:
+                    raise ValueError("Le fichier du proxy n’a pas pu être supprimé.") from exc
+                self._json(result)
+                return
             if route in PERSONAL_POST_ROUTES:
                 action = route.rsplit("/", 1)[1]
+                if action == "group-create":
+                    self._json({"group": personal_decks.create_deck_group(PERSONAL_DECK_DB, payload.get("name"))})
+                    return
+                if action == "group-rename":
+                    self._json({"group": personal_decks.rename_deck_group(
+                        PERSONAL_DECK_DB, payload.get("group_id"), payload.get("name"))})
+                    return
+                if action == "group-delete":
+                    self._json({"group": personal_decks.delete_deck_group(PERSONAL_DECK_DB, payload.get("group_id"))})
+                    return
+                if action == "group-move":
+                    if set(payload) != {"deck_id", "group_id"}:
+                        raise ValueError("Le deck et sa section doivent être indiqués.")
+                    self._json(personal_decks.move_deck_to_group(PERSONAL_DECK_DB, payload["deck_id"], payload["group_id"]))
+                    return
+                if action == "export-text":
+                    result = personal_deck_text.export_text(PERSONAL_DECK_DB, payload.get("deck_id"))
+                    self._json({**result, "path": result["file"]})
+                    return
                 database = self.db
                 def proxy_lookup(identifier):
                     return PROXIES.linked(database, identifier)
+                if action == "import-text":
+                    result = personal_deck_text.import_text(
+                        PERSONAL_DECK_DB, database, payload.get("text"), payload.get("filename", ""))
+                    result["deck"] = personal_decks.summary_with_media(result["deck"], database, proxy_lookup)
+                    self._json(result)
+                    return
                 if action == "create":
                     deck = personal_decks.create_deck(PERSONAL_DECK_DB, payload.get("name"),
                             payload.get("colors", []), payload.get("commander", False))
@@ -2609,6 +2776,12 @@ def open_existing_or_start(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *
     return server
 
 
+def _deck_index_network_busy() -> bool:
+    with _COLOR_INDEX_LOCK:
+        colors_running = bool(_COLOR_INDEX_TASK and _COLOR_INDEX_TASK.get("status") in {"queued", "running"})
+    return colors_running or _maintenance_is_active() or bool(_maintenance_busy_reason())
+
+
 def main():
     host = DEFAULT_HOST
     port = int(os.environ.get("MAGIC_LIBRARY_PORT", DEFAULT_PORT))
@@ -2621,11 +2794,20 @@ def main():
         return
     print(f"Bibliothèque Magic : http://{host}:{port}/")
     print("Serveur local lié uniquement à 127.0.0.1. Ctrl+C pour arrêter.")
+    stop_deck_index = threading.Event()
+    threading.Thread(
+        name="deck-composition-index", target=run_deck_composition_index, daemon=True,
+        args=(stop_deck_index, DECK_DB), kwargs={
+            "catalog_db_provider": lambda: resolve_current(CATALOGUE_ROOT)["database"],
+            "network_busy": _deck_index_network_busy,
+        },
+    ).start()
     try:
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
+        stop_deck_index.set()
         server.server_close()
 
 

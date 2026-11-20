@@ -66,7 +66,9 @@ appelle `image_download.py`.
    fichier enregistré mesure exactement 531×738 ; la provenance distingue les
    dimensions source et sortie.
 6. `_publish_face` remplace le fichier de contenu, actualise `images.json`, puis
-   met à jour `image_assets` et `image_slots` dans SQLite.
+   met à jour `image_assets` et `image_slots` dans SQLite. La provenance du
+   slot date la publication réussie. Pour l’activité de l’accueil, les images
+   téléchargées avant cet ajout utilisent la date de modification du WebP.
 
 ### Relance approfondie ciblée
 

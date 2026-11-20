@@ -143,7 +143,7 @@ const SEARCH_PAGE_SIZE = 200;
 const PROXY_PAGE_SIZE = SEARCH_PAGE_SIZE;
 const PROXY_SET_CODE = "proxy";
 const proxyImageRevisions = new Map();
-const ROUTE_VIEWS = new Set(["info", "recherche", "editions", "decks", "perso", "archives"]);
+const ROUTE_VIEWS = new Set(["info", "recherche", "editions", "decks", "perso", "proxy", "archives"]);
 let imageDemoMode = location.pathname === "/1" ? "existing" : location.pathname === "/2" ? "ai" : null;
 let imageDemoCandidate = null;
 let imageDemoCardId = null;
@@ -398,10 +398,9 @@ function viewRoute(view = state.view) {
   } else if (view === "archives") {
     add("status", $("archive-status").value); add("page", state.archivePage + 1, 1);
   } else if (view === "perso") {
-    if (proxyState.open) {
-      add("proxies", 1);
-      add("page", proxyState.page + 1, 1);
-    } else add("deck", personalState.deck?.id);
+    add("deck", personalState.deck?.id);
+  } else if (view === "proxy") {
+    add("page", proxyState.page + 1, 1);
   }
   return `#${view}${query.size ? `?${query}` : ""}`;
 }
@@ -418,19 +417,19 @@ function routePage(query) {
   return Number.isSafeInteger(value) && value > 0 && value <= 100000 ? value - 1 : 0;
 }
 let routeRestoreRequest = 0;
-let initialInfo, initialEditions;
 async function restoreRoute() {
   const request = ++routeRestoreRequest;
   const routeView = location.hash.slice(1).split("?", 1)[0];
-  if (["recherche", "editions"].includes(routeView) && initialEditions) await initialEditions;
+  if (["recherche", "editions"].includes(routeView)) await ensureEditions();
   if (request !== routeRestoreRequest) return;
   const pendingUserDraft = !initialRouteRestored && searchDraftTouched ? captureSearchDraft() : null;
   const pendingStoredDraft = readSearchDraft();
   const fragment = location.hash.slice(1);
   const separator = fragment.indexOf("?");
   const candidate = separator < 0 ? fragment : fragment.slice(0, separator);
-  const view = ROUTE_VIEWS.has(candidate) ? candidate : "info";
   const query = new URLSearchParams(separator < 0 ? "" : fragment.slice(separator + 1));
+  const legacyProxyRoute = candidate === "perso" && query.get("proxies") === "1";
+  const view = legacyProxyRoute ? "proxy" : ROUTE_VIEWS.has(candidate) ? candidate : "info";
   if (view === "recherche") {
     state.searchExecuted = query.has("searched") || query.size > 0;
     $("query").value = query.get("q") || ""; setMultiValue("filter-set", query.get("set"));
@@ -473,12 +472,8 @@ async function restoreRoute() {
     state.deckAppliedFilters = state.deckExecuted ? deckResultFilters() : null;
   } else if (view === "archives") {
     $("archive-status").value = query.get("status") || ""; state.archivePage = routePage(query);
-  } else if (view === "perso" && query.get("proxies") === "1") {
-    proxyState.open = true;
+  } else if (view === "proxy") {
     proxyState.page = routePage(query);
-    void renderPersonalProxies();
-  } else if (view === "perso" && proxyState.open) {
-    renderPersonalList();
   }
   initialRouteRestored = true;
   const restoreDeckScroll = view === "decks" && state.deckExecuted && !query.has("deck") && state.openDeckId
@@ -490,13 +485,13 @@ async function restoreRoute() {
   }
   setView(view, null);
   if (view === "recherche" && query.get("auto") === "1") { void runSearch(); return; }
-  if (view === "perso" && !proxyState.open && query.get("deck") && personalState.deck?.id !== query.get("deck"))
+  if (view === "perso" && query.get("deck") && personalState.deck?.id !== query.get("deck"))
     void openPersonalDeck(query.get("deck"));
   if (restoreDeckScroll) scrollToDeckList();
   if (view === "recherche" && !state.searchItems.length) {
     setText($("search-status"), "Cliquez sur Rechercher pour lancer la recherche.");
   }
-  if (!ROUTE_VIEWS.has(candidate)) syncRoute();
+  if (legacyProxyRoute || !ROUTE_VIEWS.has(candidate)) syncRoute();
 }
 async function getJSON(path, query = {}, options = {}) {
   const response = await fetch(path + (Object.keys(query).length ? `?${params(query)}` : ""), { headers: { Accept: "application/json" }, ...options });
@@ -530,9 +525,12 @@ function setView(view, urlMode = "push") {
   if (view === "recherche" && previousView !== view) void ensureEditions(true);
   if (view === "decks" && !state.openDeckId) void loadDeckFacets().then(() => { if (state.deckExecuted) ensureDeckPage(); });
   if (view === "perso" && !$("personal-content").hasChildNodes() && !new URLSearchParams(location.hash.split("?")[1] || "").has("deck")) void showPersonalDecks();
-  if (view === "perso" && urlMode && previousView !== view && proxyState.open) void renderPersonalProxies();
+  if (view === "proxy") void renderProxies({ quiet: view === previousView && Boolean(urlMode) });
   if (view === "archives") void ensureArchivePage();
-  if (view === "info") void loadMaintenanceStatus();
+  if (view === "info") {
+    void loadHome();
+    void loadMaintenanceStatus();
+  }
   if (view !== previousView) {
     window.scrollTo({ top: viewScrollPositions.get(view) ?? 0, behavior: "instant" });
   }
@@ -609,28 +607,81 @@ function renderEditionItems(container, items, emptyText = "Aucune carte dans cet
   for (const item of items) container.append(editionTile(item));
 }
 
-async function loadHome() {
+const HOME_STATS_KEY = "database-magic-home-stats-v1";
+const HOME_COUNTER_IDS = ["stat-cards", "stat-editions", "stat-decks"];
+let homeStatsRequest, homeActivityRequest, homeActivitySnapshot, homeDeckCounter;
+function renderHomeCounters(counters) {
+  if (!Array.isArray(counters) || counters.length !== HOME_COUNTER_IDS.length ||
+      !counters.every((pair, index) => Array.isArray(pair) && pair.length === 2 &&
+        (Number.isFinite(pair[0]) || (index === 2 && pair[0] === null)) &&
+        Number.isFinite(pair[1]))) return false;
+  if (counters[2][0] !== null) homeDeckCounter = counters[2];
+  counters.forEach(([present, total], index) => {
+    const counter = $(HOME_COUNTER_IDS[index]);
+    const text = `${present === null ? "—" : formatNumber(present)} / ${formatNumber(total)}`;
+    if (counter.textContent !== text) setText(counter, text);
+  });
+  return true;
+}
+function restoreHomeCounters() {
+  try { renderHomeCounters(JSON.parse(localStorage.getItem(HOME_STATS_KEY))); }
+  catch { /* Storage may be unavailable. */ }
+}
+async function refreshHomeStats() {
   const grid = $("stats");
   grid.setAttribute("aria-busy", "true");
   try {
-    const stats = await getJSON("/api/v2/stats");
-    if (!["complete_cards", "printings", "complete_editions", "complete_decks", "decks_total"].every(key => Number.isFinite(stats[key])) || !Number.isFinite(stats.editions?.eligible)) {
+    const stats = await getJSON("/api/v2/stats", { background_decks: 1 });
+    const counters = [
+      [stats.complete_cards, stats.printings],
+      [stats.complete_editions, stats.editions?.eligible],
+      (stats.complete_decks === null && homeDeckCounter) || [stats.complete_decks, stats.decks_total],
+    ];
+    if (!renderHomeCounters(counters)) {
       throw new Error("Le serveur local est une ancienne version. Fermez-le puis relancez la Bibliothèque Magic.");
     }
-    const counters = [
-      ["stat-cards", stats.complete_cards, stats.printings],
-      ["stat-editions", stats.complete_editions, stats.editions.eligible],
-      ["stat-decks", stats.complete_decks, stats.decks_total],
-    ];
-    for (const [id, present, total] of counters) {
-      setText($(id), `${formatNumber(present)} / ${formatNumber(total)}`);
-    }
+    try { localStorage.setItem(HOME_STATS_KEY, JSON.stringify(counters)); }
+    catch { /* Storage may be unavailable. */ }
     setText($("stats-error"), "");
   } catch (error) {
     setText($("stats-error"), error.message);
   } finally {
     grid.setAttribute("aria-busy", "false");
   }
+}
+async function refreshHomeActivity() {
+  const errorBox = $("home-activity-error");
+  try {
+    const { personal_decks: decks } = await getJSON("/api/v2/recent-activity");
+    const snapshot = JSON.stringify(decks);
+    if (snapshot !== homeActivitySnapshot) {
+      const recentDecks = decks.map(deck => {
+        const tile = deckCoverTile(deck.name, deck.colors || [], deck.cover_card, () => {
+          location.hash = `#perso?deck=${encodeURIComponent(deck.id)}`;
+        });
+        tile.title = deck.name;
+        return tile;
+      });
+      $("home-recent-decks").replaceChildren(...(recentDecks.length ? recentDecks :
+        [node("p", "muted", "Aucun deck personnel.")]));
+      homeActivitySnapshot = snapshot;
+    }
+    errorBox.hidden = true;
+  } catch (error) {
+    if (homeActivitySnapshot === undefined) {
+      $("home-recent-decks").replaceChildren();
+    }
+    setText(errorBox, `Activité récente indisponible : ${error.message}`);
+    errorBox.hidden = false;
+  }
+}
+function loadHome() {
+  homeStatsRequest ||= refreshHomeStats().finally(() => { homeStatsRequest = null; });
+  homeActivityRequest ||= refreshHomeActivity().finally(() => { homeActivityRequest = null; });
+  return Promise.all([homeStatsRequest, homeActivityRequest]);
+}
+function refreshVisibleHome() {
+  if (state.view === "info" && !document.hidden) void loadHome();
 }
 function maintenanceElapsed(task) {
   const measured = Number(task.seconds);
@@ -857,7 +908,7 @@ async function loadEditions() {
     if (id === "filter-set") renderMultiFilter(id);
   }
   renderEditionSuggestions();
-  setText($("edition-count"), `${formatNumber(grouped.length)} groupes d’éditions · ${formatNumber(all.length)} séries interrogeables.`);
+  setText($("edition-count"), "");
 }
 async function ensureEditions(refreshProxies = false) {
   if (refreshProxies && editionsPromise) {
@@ -1097,7 +1148,6 @@ async function runSearch(updateDraft = true) {
   const controller = new AbortController();
   state.searchController = controller;
   const request = ++state.searchRequest;
-  $("refresh-search-results").disabled = true;
   $("search-status").replaceChildren(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", "Recherche…"));
   try {
     const data = await getJSON("/api/v2/search", searchFilters(), { signal: controller.signal });
@@ -1116,17 +1166,15 @@ async function runSearch(updateDraft = true) {
   catch (error) { if (request === state.searchRequest) { showError($("results"), error.message); setText($("search-status"), "La recherche a échoué."); } }
   finally {
     if (state.searchController === controller) state.searchController = null;
-    if (request === state.searchRequest) $("refresh-search-results").disabled = false;
   }
 }
 async function refreshSearchImages() {
-  const button = $("refresh-search-results"), items = state.searchItems, request = state.searchRequest;
+  const items = state.searchItems, request = state.searchRequest;
+  if (state.searchController) return;
   const printings = [...new Set(items.filter(item => !item.proxy).map(item => item.printing_id).filter(Boolean))];
   if (!printings.length) return;
-  state.searchController?.abort();
   const controller = new AbortController();
   state.searchController = controller;
-  button.disabled = true;
   setText($("search-status"), "Actualisation des images locales…");
   try {
     const data = await postJSON("/api/v2/search/image-slots", {
@@ -1141,7 +1189,6 @@ async function refreshSearchImages() {
       setText($("search-status"), `Actualisation des images impossible : ${error.message}`);
     }
   } finally {
-    if (request === state.searchRequest && items === state.searchItems) button.disabled = false;
     if (state.searchController === controller) state.searchController = null;
   }
 }
@@ -1258,19 +1305,31 @@ async function pollBatchDownload() {
     status.prepend(node("strong", "", task.status === "complete" ? "Terminé · " : task.status === "cancelled" ? "Annulé · " : "Échec · "));
     batchTaskId = null; batchMode = null; updateBatchButtons();
     if (state.view === "recherche" && state.searchItems.length) void refreshSearchImages();
-    if (state.view === "editions") void renderEditionPage();
+    if (state.view === "editions") void refreshEditionPage();
     if (state.view === "decks") void renderDeckPage();
   } catch (error) { batchPollTimer = setTimeout(pollBatchDownload, 3000); }
 }
 function openEdition(code) { $("edition-query").value = ""; hideEditionSuggestions(); state.exactEditionCode = null; $("edition-select").value = groupedEditionCode(code); state.activeSet = $("edition-select").value; state.editionPage = 0; setView("editions"); }
 let editionPageKey = null;
+let editionController = null;
+let editionRefreshPending = false;
 function editionSelectionKey() {
   return JSON.stringify([$("edition-select").value, state.editionPage]);
 }
 function ensureEditionPage() {
   if (state.view === "editions" && editionPageKey !== editionSelectionKey()) return renderEditionPage();
 }
-async function renderEditionPage() {
+function refreshEditionPage() {
+  if (editionController) {
+    editionRefreshPending = true;
+    return;
+  }
+  return renderEditionPage(true);
+}
+async function renderEditionPage(background = false) {
+  editionController?.abort();
+  editionController = null;
+  editionRefreshPending = false;
   editionPageKey = editionSelectionKey();
   if (state.view === "editions") syncRoute();
   const request = ++state.editionRequest;
@@ -1278,12 +1337,28 @@ async function renderEditionPage() {
   $("download-edition-results").disabled = true;
   $("edition-pager").hidden = !code;
   if (!code) { container.replaceChildren(); state.editionCardsTotal = 0; setText($("edition-page-status"), ""); updateBatchButtons(); return; }
-  container.replaceChildren(node("p", "muted", "Chargement…"));
-  try { const data = await getJSON("/api/v2/edition", { set: code, limit: EDITION_PAGE_SIZE, offset: state.editionPage * EDITION_PAGE_SIZE }); if (request !== state.editionRequest) return; state.editionCardsTotal = data.total; renderEditionItems(container, data.items); updateEditionPager(); updateBatchButtons(); }
+  const controller = new AbortController();
+  editionController = controller;
+  if (!background) container.replaceChildren(node("p", "muted", "Chargement…"));
+  try {
+    const data = await getJSON("/api/v2/edition", { set: code, limit: EDITION_PAGE_SIZE, offset: state.editionPage * EDITION_PAGE_SIZE }, { signal: controller.signal });
+    if (request !== state.editionRequest) return;
+    state.editionCardsTotal = data.total;
+    renderEditionItems(container, data.items);
+    updateEditionPager();
+    updateBatchButtons();
+  }
   catch (error) {
     if (request === state.editionRequest) {
       editionPageKey = null;
-      showError(container, error.message);
+      if (!background) showError(container, error.message);
+    }
+  } finally {
+    if (editionController === controller) {
+      editionController = null;
+      const refresh = editionRefreshPending;
+      editionRefreshPending = false;
+      if (refresh && state.view === "editions" && editionPageKey === editionSelectionKey()) void refreshEditionPage();
     }
   }
 }
@@ -1312,7 +1387,7 @@ function galleryContextFor(providerId) {
     for (const [, cards] of ordered) for (const card of cards) if (card.provider_card_id) rows.push(card);
     return { kind: "deck", rows: galleryRecords(rows), current: id };
   }
-  if (state.view === "perso" && proxyState.open)
+  if (state.view === "proxy")
     return { kind: "proxy", page: proxyState.page, total: proxyState.total, rows: galleryRecords(visible("#personal-proxy-grid .edition-card-tile")), current: id };
   if (state.view === "perso" && personalState.deck) {
     const cards = personalState.deck.sections.flatMap(section => section.cards).filter(card => card.provider_card_id);
@@ -1327,8 +1402,12 @@ function galleryContextFor(providerId) {
   }
   return { kind: "single", rows: [{ provider_card_id: id, printing_id: id }], current: id };
 }
+let galleryNavigation = 0;
 async function galleryNeighbor(direction) {
   const ctx = state.cardGallery; if (!ctx) return;
+  const navigation = ++galleryNavigation;
+  const request = state.cardRequest;
+  const isCurrent = () => navigation === galleryNavigation && request === state.cardRequest && $("card-dialog").open;
   let rows = ctx.rows || [], index = rows.findIndex(x => String(x.provider_card_id) === ctx.current);
   if (["search", "edition", "proxy"].includes(ctx.kind)) {
     const pageSize = { search: SEARCH_PAGE_SIZE, edition: EDITION_PAGE_SIZE, proxy: PROXY_PAGE_SIZE }[ctx.kind];
@@ -1339,7 +1418,9 @@ async function galleryNeighbor(direction) {
       return galleryRecords(data.items);
     };
     rows = ctx.rows || await getPage(ctx.page);
+    if (!isCurrent()) return;
     index = rows.findIndex(x => ctx.currentPrinting ? x.printing_id === ctx.currentPrinting : String(x.provider_card_id) === ctx.current);
+    if (index < 0) return;
     let page = ctx.page, target = index + direction;
     while (true) {
       if (target >= 0 && target < rows.length && rows[target].printing_id !== ctx.currentPrinting) break;
@@ -1352,6 +1433,7 @@ async function galleryNeighbor(direction) {
         if ((page + 1) * pageSize >= ctx.total) return;
         page++; rows = await getPage(page); target = 0;
       }
+      if (!isCurrent()) return;
     }
     ctx.page = page; ctx.rows = rows; await openCard(rows[target].provider_card_id, ctx);
   } else if (rows[index + direction]) await openCard(rows[index + direction].provider_card_id, ctx);
@@ -1429,7 +1511,10 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
   state.cardController = controller;
   const request = ++state.cardRequest;
   const id = String(providerId);
-  const context = gallery || galleryContextFor(providerId); context.current = id; state.cardGallery = context;
+  const context = gallery || galleryContextFor(providerId);
+  context.current = id;
+  context.currentPrinting = null;
+  state.cardGallery = context;
   hoverPreview.hidden = true;
   dialog.querySelector(".proxy-association-preview")?.remove();
   let stage = target.dataset.providerId === id ? target.querySelector(".card-image-stage") : null;
@@ -2193,7 +2278,7 @@ async function openAIReviewTask(taskId, summary = {}) {
   }
 }
 function refreshCurrentCollection(proxyImage = false) {
-  if (state.view === "editions") void renderEditionPage();
+  if (state.view === "editions") void refreshEditionPage();
   else if (state.view === "recherche") {
     if (proxyImage) void runSearch(false);
     else void refreshSearchImages();
@@ -2202,9 +2287,9 @@ function refreshCurrentCollection(proxyImage = false) {
     void renderDeckPage();
     if (state.selectedDeck?.id) void openDeck(state.selectedDeck.id);
   } else if (state.view === "info") void loadHome();
+  else if (state.view === "proxy" && proxyImage) void renderProxies();
   else if (state.view === "perso" && proxyImage) {
-    if (proxyState.open) void renderPersonalProxies();
-    else if (personalState.deck) renderPersonalEditor();
+    if (personalState.deck) renderPersonalEditor();
     else renderPersonalList();
   }
 }
@@ -2234,18 +2319,17 @@ function renderVerifiedFrenchText(container, frenchText, provenance = null) {
   container.append(block);
 }
 async function refreshDeckResults() {
-  if (!state.deckExecuted) return;
-  const button = $("refresh-deck-results"), status = $("deck-batch-status");
-  button.disabled = true;
+  if (!state.deckExecuted) return loadDeckFacets(true);
+  const status = $("deck-batch-status");
+  const filters = state.deckAppliedFilters;
   setText(status, "Vérification des decks de la recherche active…");
   try {
-    const result = await postJSON("/api/v2/decks/recalculate", state.deckAppliedFilters);
-    await renderDeckPage();
-    if (state.selectedDeck?.id) await openDeck(state.selectedDeck.id);
+    const result = await postJSON("/api/v2/decks/recalculate", filters);
+    if (state.view === "decks" && state.deckAppliedFilters === filters && !state.openDeckId) await renderDeckPage();
     setText(status, `${formatNumber(result.total || 0)} decks vérifiés.`);
   } catch (error) {
     setText(status, `Rafraîchissement impossible : ${error.message}`);
-  } finally { button.disabled = false; }
+  }
 }
 function deckPageQuery() {
   return { ...state.deckAppliedFilters, limit: DECK_PAGE_SIZE, offset: state.deckPage * DECK_PAGE_SIZE };
@@ -2862,13 +2946,38 @@ $("search-unique").addEventListener("change", () => {
 $("download-search-results").addEventListener("click", () => void startBatchDownload("search"));
 $("download-edition-results").addEventListener("click", () => void startBatchDownload("edition"));
 $("download-deck-results").addEventListener("click", () => void startBatchDownload("decks"));
-$("refresh-search-results").addEventListener("click", () => void refreshSearchImages());
-$("refresh-edition-results").addEventListener("click", async () => {
-  await ensureEditions(true);
-  if (state.view === "editions") void renderEditionPage();
+async function refreshVisibleView() {
+  switch (state.view) {
+    case "info":
+      return Promise.all([loadHome(), loadMaintenanceStatus()]);
+    case "recherche":
+      if (state.searchController) return;
+      if (state.searchItems.some(item => !item.proxy && item.printing_id)) return refreshSearchImages();
+      return state.searchExecuted ? runSearch(false) : ensureEditions(true);
+    case "editions":
+      await ensureEditions(true);
+      if (state.view === "editions") return refreshEditionPage();
+      return;
+    case "decks":
+      return state.openDeckId ? openDeck(state.openDeckId, null) : refreshDeckResults();
+    case "perso":
+      return personalState.deck ? refreshOpenPersonalDeck() : personalState.refreshList?.(true);
+    case "proxy":
+      return renderProxies();
+    case "archives":
+      return renderArchivePage();
+  }
+}
+$("refresh-view").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    await refreshVisibleView();
+  } finally {
+    button.disabled = false;
+  }
 });
-$("refresh-deck-results").addEventListener("click", () => void refreshDeckResults());
-$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("refresh-search-results").disabled = false; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
+$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
 $("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
 $("query").addEventListener("focus", renderRecentSearches);
 $("query").addEventListener("click", renderRecentSearches);
@@ -3019,7 +3128,8 @@ document.addEventListener("keydown", event => {
   if (!$("card-dialog").open || $("image-choice-dialog").open || event.target.closest?.(".personal-picker, .proxy-association") || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
   const target = event.target;
   if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "") || event.defaultPrevented) return;
-  event.preventDefault(); galleryNeighbor(event.key === "ArrowLeft" ? -1 : 1);
+  event.preventDefault();
+  void galleryNeighbor(event.key === "ArrowLeft" ? -1 : 1).catch(error => console.error("Impossible de changer de carte.", error));
 });
 $("image-choice-dialog").querySelector(".comparison-dialog-close").addEventListener("click",() => $("image-choice-dialog").close());
 $("image-choice-dialog").addEventListener("close", () => {
@@ -3033,8 +3143,9 @@ $("back-to-deck-list").addEventListener("click", () => closeDeck());
 const initialView = location.hash.slice(1).split("?", 1)[0];
 setupMultiFilters();
 activateView(ROUTE_VIEWS.has(initialView) ? initialView : "info");
-initialInfo = loadHome();
-initialEditions = ensureEditions();
+restoreHomeCounters();
+setInterval(refreshVisibleHome, 45000);
+document.addEventListener("visibilitychange", refreshVisibleHome);
 if (imageDemoMode) {
   void (async () => {
     try {
@@ -3050,8 +3161,8 @@ if (imageDemoMode) {
 }
 
 // Personal compositions live outside the versioned catalogue. Drafts survive navigation/reload.
-const personalState = { editing: false, deck: null, change: 0, saved: 0, saving: null, error: null, timer: null, listRequest: 0, drag: null };
-const proxyState = { open: false, page: 0, total: 0, request: 0 };
+const personalState = { editing: false, sectionOrganization: null, deck: null, change: 0, saved: 0, saving: null, error: null, timer: null, listRequest: 0, refreshList: null, drag: null };
+const proxyState = { page: 0, total: 0, request: 0, loading: false, deleting: false, snapshot: null };
 const PERSONAL_CURRENT_KEY = "database-magic-personal-current-v1";
 function personalButton(label, action, primary = false) {
     const b = node("button", primary ? "primary-button" : "secondary-button", label);
@@ -3059,17 +3170,50 @@ function personalButton(label, action, primary = false) {
     b.addEventListener("click", action);
     return b;
 }
-async function renderPersonalProxies() {
+function personalRemoveButton(label, action) {
+    const button = personalButton("", action);
+    button.setAttribute("aria-label", label);
+    button.classList.add("personal-card-remove");
+    button.append(cardActionIcon("close"));
+    return button;
+}
+function removableProxyTile(item) {
+    const entry = node("article", "personal-list-entry");
+    const name = item.printed_name || item.name;
+    const remove = personalRemoveButton(`Supprimer le proxy ${name}`, async () => {
+        if (proxyState.deleting) return;
+        proxyState.deleting = true;
+        const status = $("proxy-folder-status");
+        try {
+            if (!window.confirm(`Supprimer définitivement le proxy « ${name} » ? L’image sera supprimée du dossier des proxies et le proxy disparaîtra de l’application.`)) return;
+            remove.disabled = true;
+            await postJSON("/api/v2/proxies/delete", { provider_card_id: item.provider_card_id, confirmed: true });
+            if (state.searchItems.some(card => card.provider_card_id === item.provider_card_id)) {
+                state.searchItems = state.searchItems.filter(card => card.provider_card_id !== item.provider_card_id);
+                state.searchTotal = Math.max(0, state.searchTotal - 1);
+                renderEditionItems($("results"), state.searchItems);
+                updateSearchPager();
+                updateBatchButtons();
+            }
+            status.classList.remove("error-state");
+            setText(status, `Proxy « ${name} » supprimé.`);
+            void ensureEditions(true);
+            if (state.view === "proxy") await renderProxies();
+        } catch (error) {
+            status.classList.add("error-state");
+            setText(status, error.message);
+            remove.disabled = false;
+        } finally {
+            proxyState.deleting = false;
+        }
+    });
+    entry.append(editionTile(item), remove);
+    return entry;
+}
+async function renderProxies({ quiet = false } = {}) {
     const request = ++proxyState.request;
-    const root = $("personal-content");
-    $("personal-heading-content").replaceChildren(...deckTitleContent(
-        "Cartes personnelles", "Proxies", null, "personal-title"));
-    personalStatus("");
-    const toolbar = node("div", "personal-toolbar");
-    toolbar.append(personalButton("Retour aux decks personnels", () => {
-        renderPersonalList();
-        syncRoute("push");
-    }));
+    const root = $("proxy-content");
+    proxyState.loading = true;
     const grid = node("div", "personal-proxy-groups");
     grid.id = "personal-proxy-grid";
     grid.setAttribute("aria-live", "polite");
@@ -3077,34 +3221,37 @@ async function renderPersonalProxies() {
     const changePage = delta => {
         proxyState.page += delta;
         syncRoute();
-        void renderPersonalProxies();
+        void renderProxies();
     };
     const prev = personalButton("Précédent", () => changePage(-1));
     const next = personalButton("Suivant", () => changePage(1));
     const pageLabel = node("span", "muted");
     pager.hidden = true;
     pager.append(prev, pageLabel, next);
-    grid.append(node("p", "muted", "Chargement…"));
-    root.replaceChildren(toolbar, grid, pager);
+    if (!quiet) {
+        proxyState.snapshot = null;
+        root.replaceChildren(node("p", "muted", "Chargement…"));
+    }
     try {
         const data = await getJSON("/api/v2/proxies", { limit: PROXY_PAGE_SIZE, offset: proxyState.page * PROXY_PAGE_SIZE });
-        if (request !== proxyState.request || !grid.isConnected) return;
+        if (request !== proxyState.request) return;
         proxyState.total = data.total;
         const pages = Math.max(1, Math.ceil(data.total / PROXY_PAGE_SIZE));
         if (proxyState.page >= pages) {
             proxyState.page = pages - 1;
-            if (state.view === "perso") syncRoute();
-            await renderPersonalProxies();
+            if (state.view === "proxy") syncRoute();
+            await renderProxies({ quiet });
             return;
         }
-        grid.replaceChildren();
+        const snapshot = JSON.stringify(data);
+        if (snapshot === proxyState.snapshot) return;
         for (const [title, linked] of [["À référencer", false], ["Référencés", true]]) {
             const items = data.items.filter(item => Boolean(item.proxy_source_id) === linked);
             if (!items.length) continue;
             const section = node("section", "deck-section");
             const cards = node("div", "results-grid personal-proxy-cards");
             section.append(node("h3", "", title), cards);
-            renderEditionItems(cards, items);
+            cards.append(...items.map(removableProxyTile));
             grid.append(section);
         }
         if (!data.total) grid.append(node("p", "empty-state", "Aucun proxy dans la collection."));
@@ -3112,12 +3259,38 @@ async function renderPersonalProxies() {
         prev.disabled = proxyState.page === 0;
         next.disabled = proxyState.page + 1 >= pages;
         setText(pageLabel, `Page ${proxyState.page + 1} sur ${pages} · ${formatNumber(data.total)} proxies`);
+        root.replaceChildren(grid, pager);
+        proxyState.snapshot = snapshot;
     } catch (error) {
-        if (request !== proxyState.request || !grid.isConnected) return;
+        if (request !== proxyState.request || quiet) return;
         showError(grid, error.message);
-        toolbar.append(personalButton("Réessayer", () => void renderPersonalProxies()));
+        root.replaceChildren(grid, personalButton("Réessayer", () => void renderProxies()));
+    } finally {
+        if (request === proxyState.request) proxyState.loading = false;
     }
 }
+
+function refreshProxiesOnReturn() {
+    if (!document.hidden && state.view === "proxy" && !proxyState.loading && !proxyState.deleting && !$("card-dialog").open) {
+        void renderProxies({ quiet: true });
+    }
+}
+window.addEventListener("focus", refreshProxiesOnReturn);
+document.addEventListener("visibilitychange", refreshProxiesOnReturn);
+
+$("proxy-open-folder").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const status = $("proxy-folder-status");
+    button.disabled = true;
+    status.textContent = "";
+    try {
+        await postJSON("/api/v2/proxies/open-folder", {});
+    } catch (error) {
+        status.textContent = `Impossible d’ouvrir le dossier des proxies. ${error.message}`;
+    } finally {
+        button.disabled = false;
+    }
+});
 
 function proxyAssociationPanel(card, gallery) {
     const panel = node("section", "proxy-association");
@@ -3197,7 +3370,7 @@ function proxyAssociationPanel(card, gallery) {
             editionPageKey = null;
             if (state.searchExecuted && state.searchBaseFilters) void runSearch(false);
             if (state.view === "editions") void renderEditionPage();
-            if (proxyState.open && state.view === "perso") void renderPersonalProxies();
+            if (state.view === "proxy") void renderProxies();
             if (panel.isConnected && $("card-dialog").open && gallery.current === card.provider_card_id) {
                 await openCard(card.provider_card_id, gallery);
             }
@@ -3401,9 +3574,9 @@ async function showPersonalDecks() {
     renderPersonalList();
 }
 async function refreshPersonalOnFocus() {
-    if (document.hidden || state.view !== "perso" || proxyState.open) return;
+    if (document.hidden || state.view !== "perso") return;
     const deck = personalState.deck;
-    if (!deck) { renderPersonalList(); return; }
+    if (!deck) { personalState.refreshList?.(); return; }
     if (personalState.saving || personalState.change !== personalState.saved) return;
     try {
         const result = await getJSON("/api/v2/personal-deck", { id: deck.id });
@@ -3417,6 +3590,19 @@ async function refreshPersonalOnFocus() {
         renderPersonalEditor();
         personalStatus("Deck actualisé depuis un autre onglet.");
     } catch (error) { personalStatus(`Actualisation impossible : ${error.message}`, true); }
+}
+async function refreshOpenPersonalDeck() {
+    const deck = personalState.deck;
+    try {
+        if (!await flushPersonal() || personalState.deck !== deck || state.view !== "perso") return;
+        const { deck: fresh } = await getJSON("/api/v2/personal-deck", { id: deck.id });
+        if (personalState.deck !== deck || state.view !== "perso" || personalState.saved !== personalState.change) return;
+        personalState.deck = fresh;
+        renderPersonalEditor();
+        personalStatus("Deck actualisé.");
+    } catch (error) {
+        if (personalState.deck === deck && state.view === "perso") personalStatus(error.message, true);
+    }
 }
 window.addEventListener("focus", () => void refreshPersonalOnFocus());
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshPersonalOnFocus(); });
@@ -3434,19 +3620,93 @@ function deckCoverTile(name, colors, cover, open) {
     if (symbols) tile.append(symbols);
     return tile;
 }
-function renderPersonalList(initialDecks = null) {
-    proxyState.open = false;
+async function readPersonalTextFile(file) {
+    const maxBytes = 200 * 1024;
+    if (file.size > 2 * maxBytes) throw new Error("Le fichier de deck dépasse 200 Kio de texte.");
+    const data = new Uint8Array(await file.arrayBuffer());
+    let text;
+    if (data[0] === 0xff && data[1] === 0xfe) text = new TextDecoder("utf-16le").decode(data);
+    else if (data[0] === 0xfe && data[1] === 0xff) text = new TextDecoder("utf-16be").decode(data);
+    else {
+        try { text = new TextDecoder("utf-8", { fatal: true }).decode(data); }
+        catch { text = new TextDecoder("windows-1252").decode(data); }
+    }
+    if (new TextEncoder().encode(text).byteLength > maxBytes) throw new Error("Le fichier de deck dépasse 200 Kio de texte.");
+    return text;
+}
+function renderPersonalList() {
     updatePersonalHeading();
     const root = $("personal-content");
-    let decks = initialDecks;
-    const create = personalButton("Créer un deck", () => renderPersonalCreate(() => decks), true);
+    let decks = null, groups = [], organizing = false, importing = false;
+    let busy = false, draggedDeck = null, latestLoad = 0;
+    const create = personalButton("Créer un deck", renderPersonalCreate, true);
     const actions = node("div", "personal-toolbar");
-    actions.append(create, personalButton("Voir les proxies", () => {
-        proxyState.open = true;
-        proxyState.page = 0;
-        syncRoute("push");
-        void renderPersonalProxies();
-    }));
+    const filePicker = node("input");
+    filePicker.type = "file";
+    filePicker.accept = ".txt,.dec,text/plain";
+    filePicker.hidden = true;
+    const importText = personalButton("Importer", () => {
+        if (busy) return;
+        importing = true;
+        filePicker.click();
+    });
+    const organize = personalButton("Organiser les sections", () => {
+        organizing = !organizing;
+        organize.setAttribute("aria-pressed", String(organizing));
+        setText(organize, organizing ? "Terminer l’organisation" : "Organiser les sections");
+        groupForm.hidden = !organizing;
+        render();
+    });
+    organize.setAttribute("aria-pressed", "false");
+    importText.disabled = true;
+    organize.disabled = true;
+    actions.append(create, importText, organize, filePicker);
+    const importReport = node("div", "personal-import-report");
+    const groupForm = node("form", "personal-section-form");
+    const groupName = node("input");
+    groupName.required = true;
+    groupName.maxLength = 200;
+    groupName.setAttribute("aria-label", "Nom de la nouvelle section");
+    groupName.placeholder = "Nom de la nouvelle section";
+    const addGroup = node("button", "primary-button", "Ajouter une section");
+    addGroup.type = "submit";
+    groupForm.append(groupName, addGroup);
+    groupForm.hidden = true;
+    groupForm.addEventListener("submit", event => {
+        event.preventDefault();
+        const name = groupName.value.trim();
+        if (!name) return;
+        void mutate(async () => {
+            const { group } = await postJSON("/api/v2/personal-decks/group-create", { name });
+            groups.push(group);
+            groupForm.reset();
+        }, addGroup);
+    });
+    filePicker.addEventListener("cancel", () => { importing = false; });
+    filePicker.addEventListener("change", () => {
+        const file = filePicker.files[0];
+        filePicker.value = "";
+        if (!file) { importing = false; return; }
+        void mutate(async () => {
+            importReport.replaceChildren();
+            personalStatus("Import du deck…");
+            const result = await postJSON("/api/v2/personal-decks/import-text", {
+                filename: file.name, text: await readPersonalTextFile(file),
+            });
+            await load(true);
+            const unresolved = result.unresolved || [];
+            personalStatus(`Deck « ${result.deck.name} » importé · ${formatNumber(result.imported)} carte(s).`);
+            if (unresolved.length) {
+                const report = node("details");
+                const lines = node("ul");
+                for (const row of unresolved) {
+                    lines.append(node("li", "", `Ligne ${row.line} · ${row.input} · ${row.reason}`));
+                }
+                report.append(node("summary", "", `${formatNumber(unresolved.length)} ligne(s) à vérifier`), lines);
+                importReport.append(report);
+            }
+        }, importText).finally(() => { importing = false; });
+    });
     const form = node("form", "search-form"), row = node("div", "search-primary-row personal-filter-row");
     const nameLabel = node("label", "", "Nom du deck"), name = node("input");
     name.type = "search";
@@ -3480,8 +3740,11 @@ function renderPersonalList(initialDecks = null) {
         render();
     }));
     form.append(row, refine, controls);
-    const list = node("div", "personal-deck-grid");
-    root.replaceChildren(actions, form, list);
+    const list = node("div", "personal-list-groups");
+    root.replaceChildren(actions, importReport, form, groupForm, list);
+    personalState.refreshList = (manual = false) => {
+        if (list.isConnected && !busy && !importing && (manual || !organizing)) return load(!manual);
+    };
     personalStatus("");
     const normalize = value => value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("fr").trim();
     function render() {
@@ -3500,37 +3763,165 @@ function renderPersonalList(initialDecks = null) {
             items.reverse();
         }
         list.replaceChildren();
-        for (const deck of items) {
-            const entry = node("article", "personal-list-entry");
-            const tile = deckCoverTile(deck.name, deck.colors || [], deck.cover_card, () => void openPersonalDeck(deck.id));
-            const remove = personalButton("", async () => {
-                if (!window.confirm(`Supprimer le deck « ${deck.name} » ?`)) return;
-                remove.disabled = true;
-                try {
-                    await postJSON("/api/v2/personal-decks/delete", { deck_id: deck.id, revision: deck.revision });
-                    decks = decks.filter(item => item.id !== deck.id);
-                    personalStatus(`Deck « ${deck.name} » supprimé.`);
-                    render();
-                } catch (error) {
-                    personalStatus(error.message, true);
-                    remove.disabled = false;
-                }
-            });
-            remove.setAttribute("aria-label", `Supprimer le deck ${deck.name}`);
-            remove.classList.add("personal-card-remove");
-            remove.append(cardActionIcon("close"));
-            entry.append(tile, remove);
-            list.append(entry);
+        const groupsById = new Map(groups.map(group => [group.id, []]));
+        const ungrouped = [];
+        for (const deck of items) (groupsById.get(deck.group_id) || ungrouped).push(deck);
+        if (groups.length || organizing) {
+            for (const group of groups) list.append(renderGroup(group, groupsById.get(group.id)));
+            if (ungrouped.length || organizing) list.append(renderGroup(null, ungrouped));
+        } else if (ungrouped.length) {
+            const grid = node("div", "personal-deck-grid");
+            grid.append(...ungrouped.map(renderDeck));
+            list.append(grid);
         }
-        if (!items.length) list.append(node("p", "empty-state", "Aucun deck personnel pour cette sélection."));
+        if (!items.length && !groups.length && !organizing)
+            list.append(node("p", "empty-state", "Aucun deck personnel pour cette sélection."));
     }
-    async function load() {
-        list.replaceChildren(node("p", "muted", "Chargement…"));
+    function renderDeck(deck) {
+        const entry = node("article", "personal-list-entry");
+        const tile = deckCoverTile(deck.name, deck.colors || [], deck.cover_card, () => void openPersonalDeck(deck.id));
+        const remove = personalRemoveButton(`Supprimer le deck ${deck.name}`, () => {
+            if (!window.confirm(`Supprimer le deck « ${deck.name} » ?`)) return;
+            void mutate(async () => {
+                await postJSON("/api/v2/personal-decks/delete", { deck_id: deck.id, revision: deck.revision });
+                decks = decks.filter(item => item.id !== deck.id);
+                personalStatus(`Deck « ${deck.name} » supprimé.`);
+            }, remove);
+        });
+        entry.append(tile, remove);
+        if (organizing && groups.length) {
+            tile.draggable = true;
+            tile.addEventListener("dragstart", event => {
+                if (busy) { event.preventDefault(); return; }
+                draggedDeck = deck;
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", deck.id);
+            });
+            tile.addEventListener("dragend", () => { draggedDeck = null; });
+            const label = node("label", "personal-deck-group-choice", "Déplacer vers");
+            const select = node("select");
+            select.setAttribute("aria-label", `Section du deck ${deck.name}`);
+            select.append(new Option("Sans section", ""), ...groups.map(group => new Option(group.name, group.id)));
+            select.value = deck.group_id || "";
+            select.addEventListener("change", () => {
+                const next = select.value || null;
+                select.value = deck.group_id || "";
+                moveDeck(deck, next);
+            });
+            label.append(select);
+            entry.append(label);
+        }
+        return entry;
+    }
+    function moveDeck(deck, groupId) {
+        if ((deck.group_id || null) === groupId) return;
+        void mutate(async () => {
+            const result = await postJSON("/api/v2/personal-decks/group-move", { deck_id: deck.id, group_id: groupId });
+            deck.group_id = result.group_id;
+        });
+    }
+    function renderGroup(group, items) {
+        const section = node("section", "deck-section personal-list-group");
+        const heading = node("div", "personal-section-heading");
+        const title = node("h3", "", `${group?.name || "Sans section"} (${formatNumber(items.length)})`);
+        heading.append(title);
+        section.append(heading);
+        if (organizing && group) {
+            const renameForm = node("form", "personal-section-form");
+            const field = node("input");
+            field.required = true;
+            field.maxLength = 200;
+            field.setAttribute("aria-label", "Nom de la section");
+            renameForm.hidden = true;
+            const edit = personalButton("Modifier", () => {
+                heading.hidden = true;
+                renameForm.hidden = false;
+                field.value = group.name;
+                field.focus();
+                field.select();
+            });
+            const cancel = personalButton("Annuler", () => {
+                renameForm.hidden = true;
+                heading.hidden = false;
+                edit.focus();
+            });
+            const save = node("button", "primary-button", "Valider");
+            save.type = "submit";
+            renameForm.append(field, save, cancel);
+            renameForm.addEventListener("submit", event => {
+                event.preventDefault();
+                const name = field.value.trim();
+                if (!name) return;
+                void mutate(async () => {
+                    const result = await postJSON("/api/v2/personal-decks/group-rename", { group_id: group.id, name });
+                    group.name = result.group.name;
+                }, save);
+            });
+            const remove = personalButton("Supprimer", () => {
+                if (!window.confirm(`Supprimer la section « ${group.name} » ? Ses decks seront déplacés dans « Sans section ».`)) return;
+                void mutate(async () => {
+                    await postJSON("/api/v2/personal-decks/group-delete", { group_id: group.id });
+                    groups = groups.filter(item => item.id !== group.id);
+                    for (const deck of decks) if (deck.group_id === group.id) deck.group_id = null;
+                }, remove);
+            });
+            heading.append(edit, remove);
+            section.append(renameForm);
+        }
+        const grid = node("div", "personal-deck-grid");
+        grid.append(...items.map(renderDeck));
+        if (!items.length) grid.append(node("p", "empty-state", organizing ? "Déposez un deck ici." : "Aucun deck dans cette section."));
+        section.append(grid);
+        if (organizing) {
+            const groupId = group?.id || null;
+            section.addEventListener("dragover", event => {
+                if (!draggedDeck || (draggedDeck.group_id || null) === groupId) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                section.classList.add("personal-list-drop-target");
+            });
+            section.addEventListener("dragleave", event => {
+                if (!section.contains(event.relatedTarget)) section.classList.remove("personal-list-drop-target");
+            });
+            section.addEventListener("drop", event => {
+                if (!draggedDeck) return;
+                event.preventDefault();
+                section.classList.remove("personal-list-drop-target");
+                moveDeck(draggedDeck, groupId);
+                draggedDeck = null;
+            });
+        }
+        return section;
+    }
+    async function mutate(action, button) {
+        if (busy) return;
+        busy = true;
+        ++latestLoad;
+        if (button) button.disabled = true;
         try {
-            const response = await getJSON("/api/v2/personal-decks");
+            personalStatus("");
+            await action();
+            if (list.isConnected) render();
+        } catch (error) {
+            if (list.isConnected) personalStatus(error.message, true);
+        } finally {
+            if (button) button.disabled = false;
+            busy = false;
+        }
+    }
+    async function load(quiet = false) {
+        const request = ++latestLoad;
+        if (!quiet) list.replaceChildren(node("p", "muted", "Chargement…"));
+        try {
+            const response = await getJSON("/api/v2/personal-decks", { summary: 1 });
+            if (request !== latestLoad || !list.isConnected) return;
             decks = response.items;
+            groups = response.groups || [];
+            importText.disabled = false;
+            organize.disabled = false;
             render();
         } catch (error) {
+            if (request !== latestLoad || !list.isConnected || quiet) return;
             showError(list, error.message);
             list.append(personalButton("Réessayer", () => void load()));
         }
@@ -3538,10 +3929,9 @@ function renderPersonalList(initialDecks = null) {
     form.addEventListener("submit", event => { event.preventDefault(); render(); });
     for (const select of [mode, sort, order]) select.addEventListener("change", render);
     name.addEventListener("input", render);
-    if (decks) render();
-    else void load();
+    void load();
 }
-function renderPersonalCreate(previousDecks) {
+function renderPersonalCreate() {
     const root = $("personal-content"), form = node("form", "panel personal-create"), label = node("label", "", "Nom du deck"), name = node("input");
     name.required = true;
     name.maxLength = 200;
@@ -3549,7 +3939,7 @@ function renderPersonalCreate(previousDecks) {
     let colors = [];
     const submit = node("button", "primary-button", "Créer le deck"), errorBox = node("p", "error-state");
     submit.type = "submit";
-    const back = personalButton("Retour à la liste", () => renderPersonalList(previousDecks()));
+    const back = personalButton("Retour à la liste", renderPersonalList);
     errorBox.hidden = true;
     errorBox.setAttribute("role", "alert");
     form.append(label, personalColorField([], value => {
@@ -3561,9 +3951,8 @@ function renderPersonalCreate(previousDecks) {
         back.disabled = true;
         errorBox.hidden = true;
         try {
-            const result = await postJSON("/api/v2/personal-decks/create", { name: name.value.trim(), colors, commander: true });
-            const decks = previousDecks();
-            renderPersonalList(decks ? [result.deck, ...decks.filter(deck => deck.id !== result.deck.id)] : null);
+            await postJSON("/api/v2/personal-decks/create", { name: name.value.trim(), colors, commander: true });
+            if (form.isConnected) renderPersonalList();
         }
         catch (error) {
             errorBox.textContent = error.message;
@@ -3576,8 +3965,8 @@ function renderPersonalCreate(previousDecks) {
     name.focus();
 }
 function adoptPersonalDeck(deck) {
-    proxyState.open = false;
     personalState.editing = false;
+    personalState.sectionOrganization = null;
     personalState.deck = deck;
     personalState.change = 0;
     personalState.saved = 0;
@@ -3594,6 +3983,10 @@ async function openPersonalDeck(id) {
     try {
         const result = await getJSON("/api/v2/personal-deck", { id });
         if (!loading.isConnected) return;
+        if (personalState.deck && personalState.deck.id !== id && personalState.saved < personalState.change) {
+            await flushPersonal();
+            if (!loading.isConnected) return;
+        }
         const draft = personalRead(`personal-draft-${id}`);
         adoptPersonalDeck(result.deck);
         if (draft) {
@@ -3699,7 +4092,7 @@ function personalMove(sourceId, cardId, targetId, beforeId = null) {
 function updatePersonalHeading(deck = null, editButton = null) {
     const [eyebrow, heading] = deckTitleContent(
         deck ? "Deck personnel" : "Votre collection de compositions",
-        deck?.name || "Decks personnels",
+        deck?.name || "Deck perso",
         deck ? deck.colors || [] : null,
         "personal-title",
     );
@@ -3708,6 +4101,7 @@ function updatePersonalHeading(deck = null, editButton = null) {
 }
 function renderPersonalEditor() {
     const deck = personalState.deck, root = $("personal-content"), editing = personalState.editing;
+    const sectionOrganization = personalState.sectionOrganization;
     hoverPreview.hidden = true;
     if (!deck)
         return;
@@ -3723,22 +4117,29 @@ function renderPersonalEditor() {
         else
             back.disabled = false;
     }, true);
-    const exportButton = personalButton("Exporter le deck sur le Bureau", async () => {
-        exportButton.disabled = true;
-        try {
-            if (!await flushPersonal())
-                return;
-            const result = await postJSON("/api/v2/personal-decks/export", { deck_id: deck.id });
-            personalStatus(`Export terminé : ${result.folder || result.path || "Bureau"}`);
-        }
-        catch (error) {
-            personalStatus(`Export impossible : ${error.message}`, true);
-        }
-        finally {
-            exportButton.disabled = false;
-        }
-    });
-    actions.append(back, exportButton);
+    function deckExportButton(label, route, pendingMessage, successMessage) {
+        const button = personalButton(label, async () => {
+            button.disabled = true;
+            try {
+                if (!await flushPersonal() || personalState.deck?.id !== deck.id) return;
+                personalStatus(pendingMessage);
+                const result = await postJSON(route, { deck_id: deck.id });
+                if (personalState.deck?.id === deck.id) personalStatus(successMessage(result));
+            } catch (error) {
+                if (personalState.deck?.id === deck.id) personalStatus(`Export impossible : ${error.message}`, true);
+            } finally {
+                button.disabled = false;
+            }
+        });
+        return button;
+    }
+    actions.append(
+        back,
+        deckExportButton("Exporter les images", "/api/v2/personal-decks/export",
+            "Préparation des images…", result => `Export terminé : ${result.folder || result.path || "Bureau"}`),
+        deckExportButton("Exporter en TXT", "/api/v2/personal-decks/export-text",
+            "Écriture du fichier TXT…", result => `Fichier créé sur le Bureau · ${result.file || result.path}`),
+    );
     const editButton = personalButton("Modifier", () => {
         personalState.editing = { name: deck.name, colors: [...(deck.colors || [])] };
         renderPersonalEditor();
@@ -3747,32 +4148,44 @@ function renderPersonalEditor() {
     editButton.classList.add("personal-heading-edit");
     editButton.setAttribute("aria-label", "Modifier le nom et les couleurs");
     updatePersonalHeading(deck, editing ? null : editButton);
-    const refresh = personalButton("", async () => {
-        refresh.disabled = true;
-        try {
-            if (!await flushPersonal()) return;
-            const { deck: fresh } = await getJSON("/api/v2/personal-deck", { id: deck.id });
-            if (personalState.deck !== deck || personalState.saved !== personalState.change) return;
-            personalState.deck = fresh;
-            renderPersonalEditor();
-            personalStatus("Deck actualisé.");
-        } catch (error) {
-            personalStatus(error.message, true);
-        } finally {
-            refresh.disabled = false;
-        }
+    const organize = personalButton(sectionOrganization ? "Terminer l’organisation" : "Organiser les sections", () => {
+        personalState.sectionOrganization = sectionOrganization ? null : { name: "" };
+        renderPersonalEditor();
+        const nextFocus = $(sectionOrganization ? "personal-organize-sections" : "personal-new-section-name");
+        nextFocus?.focus();
     });
-    refresh.classList.add("search-header-button", "search-header-icon-button");
-    refresh.setAttribute("aria-label", "Actualiser le deck");
-    refresh.title = "Actualiser le deck";
-    const refreshIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    refreshIcon.setAttribute("class", "search-icon"); refreshIcon.setAttribute("aria-hidden", "true");
-    const refreshUse = document.createElementNS("http://www.w3.org/2000/svg", "use");
-    refreshUse.setAttribute("href", "#search-icon-refresh"); refreshIcon.append(refreshUse); refresh.append(refreshIcon);
+    organize.id = "personal-organize-sections";
+    organize.setAttribute("aria-pressed", String(Boolean(sectionOrganization)));
+    organize.setAttribute("aria-expanded", String(Boolean(sectionOrganization)));
     const editActions = node("div", "search-header-actions personal-edit-actions");
-    editActions.append(personalButton("Dupliquer", () => duplicatePersonalDeck(deck)), refresh);
+    editActions.append(personalButton("Dupliquer", () => duplicatePersonalDeck(deck)), organize);
     actions.append(editActions);
     root.append(actions);
+    if (sectionOrganization) {
+        const form = node("form", "personal-section-form personal-section-organizer-form");
+        const name = node("input");
+        name.id = "personal-new-section-name";
+        name.required = true;
+        name.maxLength = 200;
+        name.placeholder = "Nom de la nouvelle section";
+        name.setAttribute("aria-label", name.placeholder);
+        name.value = sectionOrganization.name;
+        name.addEventListener("input", () => { sectionOrganization.name = name.value; });
+        const add = node("button", "primary-button", "Ajouter une section");
+        add.type = "submit";
+        form.append(name, add);
+        form.addEventListener("submit", event => {
+            event.preventDefault();
+            const sectionName = name.value.trim();
+            if (!sectionName) { name.focus(); return; }
+            deck.sections.push({ id: crypto.randomUUID(), name: sectionName, cards: [] });
+            sectionOrganization.name = "";
+            personalChanged();
+            renderPersonalEditor();
+            $(name.id)?.focus();
+        });
+        root.append(form);
+    }
     if (editing) {
         const fields = node("form", "panel personal-toolbar personal-deck-fields"), label = node("label", "", "Nom du deck"), name = node("input");
         name.value = editing.name;
@@ -3823,7 +4236,8 @@ function renderPersonalEditor() {
         };
         const modify = personalButton("Modifier", () => setSectionEditing(true));
         modify.setAttribute("aria-label", `Modifier la section ${section.name}`);
-        heading.append(title, modify);
+        heading.append(title);
+        if (sectionOrganization) heading.append(modify);
         const saveSection = node("button", "primary-button", "Valider");
         saveSection.type = "submit";
         form.addEventListener("submit", event => {
@@ -3851,7 +4265,8 @@ function renderPersonalEditor() {
         });
         remove.disabled = deck.sections.length < 2;
         form.append(field, saveSection, personalButton("Annuler", () => setSectionEditing(false)), remove);
-        container.append(heading, form);
+        container.append(heading);
+        if (sectionOrganization) container.append(form);
         const cards = node("div", "deck-cards personal-cards-edit");
         container.addEventListener("dragover", e => {
             if (personalState.drag) {
@@ -3967,11 +4382,7 @@ function renderPersonalEditor() {
     top.title = "Remonter en haut";
     top.setAttribute("aria-label", top.title);
     top.append(cardActionIcon("arrowUp"));
-    footer.append(personalButton("Ajouter une section", () => {
-            deck.sections.push({ id: crypto.randomUUID(), name: "Nouvelle section", cards: [] });
-            personalChanged();
-            renderPersonalEditor();
-    }), top);
+    footer.append(top);
     root.append(footer);
 }
 function duplicatePersonalDeck(deck) {
@@ -4123,7 +4534,7 @@ async function choosePersonalDeck(card) {
         }
     });
     try {
-        const { items } = await getJSON("/api/v2/personal-decks");
+        const { items } = await getJSON("/api/v2/personal-decks", { summary: 1 });
         report(items.length ? "Cliquez sur un deck pour y ajouter la carte." : "Créez un deck pour y ajouter cette carte.");
         list.append(...items.map(deckButton));
     } catch (error) {
