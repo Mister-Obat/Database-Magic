@@ -15,6 +15,8 @@ La visionneuse de carte, la recherche et la sélection d’images, la générati
 La visionneuse et son voile sombre apparaissent et disparaissent ensemble sur
 130 ms. Le voile conserve sa teinte violette sans flou. Avec la préférence
 système de réduction des animations, l’ouverture et la fermeture sont immédiates.
+Le visuel est contenu dans un cadre au ratio 531 × 738 dimensionné par l’espace
+disponible. En fenêtre étroite ou basse, les actions passent sous l’image.
 
 | Élément | Référence |
 | --- | --- |

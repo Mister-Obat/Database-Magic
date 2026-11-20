@@ -408,10 +408,23 @@ select[hidden]{display:none!important}
 .proxy-association-thumbnail.deck-card-image-empty { font-size:.68rem; }
 .proxy-association-description { display:grid; gap:.2rem; overflow-wrap:anywhere; }
 .proxy-association-result .muted { font-size:.82rem; }
-@media(max-width:700px){.card-dialog{width:96vw}.card-viewer-body{grid-template-columns:1fr;grid-template-rows:minmax(220px,48%) minmax(0,1fr);gap:.6rem}.card-facts{padding:1rem}.card-viewer-art,.card-viewer-missing{max-height:100%}}
+@media(max-width:700px){.card-dialog{width:96vw}.card-viewer-body{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1.2fr) minmax(0,1fr);gap:.6rem}.card-facts{padding:1rem}}
 .card-viewer-image{position:relative;display:grid;grid-template-rows:minmax(0,1fr);justify-items:center;width:100%;min-height:0;padding:0 0 0 3.2rem;gap:.35rem}
-.card-image-stage{display:grid;place-items:center;width:100%;height:auto;min-height:0;align-self:stretch;position:relative}
-.card-viewer-art,.card-viewer-missing{width:auto;height:100%;max-width:100%;max-height:100%;aspect-ratio:531 / 738;object-fit:contain;border-radius:3.1% / 2.2%;box-shadow:0 8px 34px #0009;background:#111711}
+.card-image-stage{display:grid;place-items:center;width:100%;min-height:0;align-self:stretch;position:relative;container-type:size}
+.card-viewer-art,.card-viewer-missing{width:100%;height:100%;aspect-ratio:531 / 738;min-width:0;min-height:0;object-fit:contain;box-shadow:0 8px 34px #0009;background:#111711}
+@supports (width:1cqh){
+  .card-viewer-art,.card-viewer-missing{width:min(100cqw,calc(100cqh * 531 / 738));height:auto}
+}
+@media (max-width:700px),(max-height:560px){
+  .card-viewer-image{grid-template-rows:minmax(0,1fr) auto;padding:0}
+  .card-viewer-image .card-image-actions{position:static;width:100%}
+  .card-viewer-image .card-image-actions > :is(.card-image-search,.card-image-icon){
+    position:relative;inset:auto;width:2rem;height:2rem
+  }
+  .card-viewer-image .card-image-actions :is(button,a):is(:hover,:focus-visible)::after{
+    left:50%;top:auto;bottom:calc(100% + .4rem);transform:translateX(-50%)
+  }
+}
 .card-viewer-missing{display:grid;place-items:center;color:var(--muted);border:1px dashed var(--line);font-size:1.05rem;margin:auto}
 .card-loading-spinner{width:2.2rem;height:2.2rem;border:3px solid #ffffff33;border-top-color:var(--green2);border-radius:50%;animation:card-spin .8s linear infinite}
 @keyframes card-spin{to{transform:rotate(360deg)}}
