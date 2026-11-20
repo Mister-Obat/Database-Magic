@@ -17,6 +17,8 @@ traductions de l’impression source dans l’index local, avec des identifiants
 propres, le code d’édition `proxy` et l’image du dossier. La base publiée reste
 en lecture seule pour ce parcours. La suppression du fichier retire le proxy
 du catalogue.
+Le cache est reconstruit lorsque le fichier des associations ou l’index
+dérivé change sur disque. Les associations restent la source de vérité.
 
 Le remplacement depuis la fiche réencode l’image dans le format de son fichier
 local et conserve son identifiant et son association. Les decks personnels

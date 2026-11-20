@@ -116,24 +116,36 @@ class Proxies:
             return {"status": "saved"}
 
     def _rebuild(self, database, files):
-        signature = (database, database.stat().st_mtime_ns, tuple(files))
-        if signature == self.signature and self.database.is_file():
+        def fingerprint(path):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                return None
+            return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+        links_path = self.state / "proxy-associations.sqlite"
+        signature = (database, fingerprint(database), tuple(files),
+                     fingerprint(links_path), fingerprint(links_path.with_suffix(".sqlite-wal")))
+        if (*signature, fingerprint(self.database)) == self.signature:
             return
         self.state.mkdir(parents=True, exist_ok=True)
         links = {}
-        if (self.state / "proxy-associations.sqlite").exists():
+        if links_path.exists():
             with closing(self.associations()) as conn:
                 links = dict(conn.execute("SELECT id,source_id FROM associations"))
-        draft = self.database.with_suffix(".tmp")
-        draft.unlink(missing_ok=True)
-        with closing(query.connect(database)) as source, closing(sqlite3.connect(draft)) as out, out:
-            out.executescript((Path(__file__).parent / "v2" / "schema.sql").read_text(encoding="utf-8"))
-            out.execute("INSERT INTO editions VALUES (?,?,?,?,?,?,?,?,?)",
-                        (SET, SET, "Proxy", SET, None, 0, len(files), "eligible", None))
-            for number, (identifier, path) in enumerate(files.items(), 1):
-                self._insert(source, out, identifier, number, path, links.get(identifier))
-        draft.replace(self.database)
-        self.signature = signature
+        with NamedTemporaryFile(dir=self.state, prefix="proxies-", suffix=".tmp", delete=False) as tmp:
+            draft = Path(tmp.name)
+        try:
+            with closing(query.connect(database)) as source, closing(sqlite3.connect(draft)) as out, out:
+                out.executescript((Path(__file__).parent / "v2" / "schema.sql").read_text(encoding="utf-8"))
+                out.execute("INSERT INTO editions VALUES (?,?,?,?,?,?,?,?,?)",
+                            (SET, SET, "Proxy", SET, None, 0, len(files), "eligible", None))
+                for number, (identifier, path) in enumerate(files.items(), 1):
+                    self._insert(source, out, identifier, number, path, links.get(identifier))
+            self.signature = (*signature, fingerprint(draft))
+            draft.replace(self.database)
+        finally:
+            draft.unlink(missing_ok=True)
 
     @staticmethod
     def _insert(source, out, identifier, number, path, source_id):

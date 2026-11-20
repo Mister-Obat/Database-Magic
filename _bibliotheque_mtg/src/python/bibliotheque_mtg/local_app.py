@@ -62,7 +62,7 @@ PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                         ("create", "save", "add", "import", "export", "delete", "duplicate")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 34
+APP_API_REVISION = 35
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
