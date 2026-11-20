@@ -614,7 +614,7 @@ def test_interrupted_attempt_resumes_and_double_click_deduplicates(tmp_path, ima
     ledger = ops / "ledger.json"; session = OneInterruption()
     interrupted = download_printing("provider-fr", catalogue_root=ops, ledger_path=ledger, session=session,
                                     test_hosts={"127.0.0.1"}, face_indexes=[0])
-    assert interrupted["results"][0]["status"] == "missing"
+    assert interrupted["results"][0]["status"] == "retry_later"
     resumed = download_printing("provider-fr", catalogue_root=ops, ledger_path=ledger, session=session,
                                 test_hosts={"127.0.0.1"}, face_indexes=[0])
     assert resumed["results"][0]["status"] == "ready"
@@ -673,3 +673,42 @@ def test_active_download_can_be_cancelled_without_publishing(tmp_path, image_ser
     assert conn.execute("SELECT status FROM image_slots").fetchone()[0] == "missing"
     assert conn.execute("SELECT COUNT(*) FROM image_assets").fetchone()[0] == 0
     conn.close()
+
+
+@pytest.mark.parametrize("parallel_fetch", [False, True])
+def test_temporary_errors_preserve_retry_budget(tmp_path, image_server, monkeypatch, parallel_fetch):
+    ops, _, _, _ = make_catalogue(tmp_path, image_server)
+    path = ops / "ledger.json"
+    key = "printing-demo:0:fr"
+    path.write_text(json.dumps({"schema_version": 1, "faces": {
+        key: {"gets": 3, "errors": ["image_invalide", "erreur_reseau:ConnectionError",
+                                    "erreur_reseau:ReadTimeout"]}
+    }}), encoding="utf-8")
+    fetch = image_download._fetch
+    monkeypatch.setattr(image_download, "_fetch", lambda *args, **kwargs: (None, "http_503", None))
+    kwargs = dict(catalogue_root=ops, ledger_path=path, test_hosts={"127.0.0.1"},
+                  parallel_fetch=parallel_fetch)
+    failed = download_printing("provider-fr", **kwargs)
+    assert failed["results"] == [{"face_index": 0, "status": "retry_later", "reason": "http_503"}]
+    entry = json.loads(path.read_text(encoding="utf-8"))["faces"][key]
+    assert entry["gets"] == 1
+    assert entry["errors"][-1] == "http_503"
+
+    monkeypatch.setattr(image_download, "_fetch", fetch)
+    recovered = download_printing("provider-fr", **kwargs)
+    assert recovered["results"][0]["status"] == "ready"
+    assert recovered["results"][0]["language"] == "fr"
+    assert json.loads(path.read_text(encoding="utf-8"))["faces"][key]["gets"] == 2
+
+
+def test_klingon_only_printing_keeps_the_source_language(tmp_path, image_server):
+    ops, _, db, _ = make_catalogue(tmp_path, image_server)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM source_records WHERE lang='fr'")
+        conn.execute("UPDATE source_records SET lang='tlh', "
+                     "raw_json=json_set(raw_json,'$.lang','tlh') WHERE lang='en'")
+    report = download_printing("provider-en", catalogue_root=ops, ledger_path=ops / "ledger.json",
+                               test_hosts={"127.0.0.1"})
+    assert report["results"][0]["status"] == "ready"
+    assert report["results"][0]["language"] == "tlh"
+    assert report["results"][0]["relative_path"].startswith("assets/webp/tlh/")

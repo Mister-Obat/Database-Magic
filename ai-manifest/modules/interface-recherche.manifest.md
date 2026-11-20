@@ -204,6 +204,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   `printing_id` et `unique` transmis par la recherche courante.
   Le lot emploie au plus quatre workers pour les téléchargements d'impressions,
   avec au plus quatre départs de requêtes d'images Scryfall par seconde.
+  Le suivi affiche les motifs d’échec. Le lot s’arrête après huit impressions
+  consécutives ayant une erreur réseau ou HTTP 5xx et peut être relancé.
   Tant que le total des impressions manquantes n'est pas calculé, le suivi
   affiche une analyse en cours avec un indicateur animé, plutôt que « 0/0 ».
   Dès que ce total est connu, le suivi affiche près des impressions traitées

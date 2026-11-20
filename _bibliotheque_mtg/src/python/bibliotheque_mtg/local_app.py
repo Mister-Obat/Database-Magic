@@ -30,7 +30,7 @@ from .maintenance import MaintenanceCancelled, refresh_v2
 from .version_history import VersionHistoryError, activate_version, list_version_candidates
 from .image_download import (download_printing, ensure_catalogue_wal,
                              refresh_printing_deep, preview_printing_candidate,
-                             publish_preview_candidate, import_local_image)
+                             publish_preview_candidate, import_local_image, is_temporary_image_error)
 from .decks import (_SET_NAMES_FR, deck_facets, ensure_deck_index, get_deck,
                     index_deck_colors, list_decks, refresh_deck_index)
 from .deck_media import enrich_deck_media, export_deck_to_desktop
@@ -1066,23 +1066,26 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
         with _BATCH_LOCK:
             _BATCH_TASK.update(total=len(selected), unavailable=unavailable,
                                processing_started_at=time.time())
-        def download_one(provider_id: str) -> tuple[bool, str]:
+        def download_one(provider_id: str) -> tuple[bool, str, bool]:
             if _BATCH_CANCEL.is_set():
-                return False, "annulé"
+                return False, "annulé", False
             if resolve_current(CATALOGUE_ROOT)["database"] != catalog_db:
                 raise RuntimeError("La version du catalogue a changé pendant le téléchargement")
             try:
                 report = download_printing(provider_id, catalogue_root=CATALOGUE_ROOT,
                     ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.json",
                     cancel_event=_BATCH_CANCEL, parallel_fetch=True)
-                statuses = [item.get("status") for item in report.get("results", [])]
-                success = bool(statuses) and all(status in {"ready", "already_ready"} for status in statuses)
-                detail = ", ".join(statuses) if statuses else "aucun emplacement image"
+                results = report.get("results", [])
+                success = bool(results) and all(item["status"] in {"ready", "already_ready"} for item in results)
+                reasons = [item.get("reason") or item["status"] for item in results]
+                detail = ", ".join(dict.fromkeys(reasons)) or "aucun emplacement image"
+                return success, detail, any(is_temporary_image_error(reason) for reason in reasons)
             except Exception as exc:
-                success, detail = False, str(exc)
-            return success, detail
+                return False, str(exc), False
 
         remaining = iter(selected)
+        consecutive_temporary_errors = 0
+        stopped_for_network = False
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="magic-image-batch") as executor:
             pending = {}
             def enqueue() -> None:
@@ -1100,7 +1103,11 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
                 done, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in done:
                     name = pending.pop(future)
-                    success, detail = future.result()
+                    success, detail, temporary_error = future.result()
+                    consecutive_temporary_errors = consecutive_temporary_errors + 1 if temporary_error else 0
+                    if consecutive_temporary_errors >= 8 and not _BATCH_CANCEL.is_set():
+                        stopped_for_network = True
+                        _BATCH_CANCEL.set()
                     with _BATCH_LOCK:
                         _BATCH_TASK["completed"] += 1
                         _BATCH_TASK["last_progress_at"] = time.time()
@@ -1110,7 +1117,10 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
                             _BATCH_TASK["errors"].append(f"{name} : {detail}")
                     enqueue()
         with _BATCH_LOCK:
-            _BATCH_TASK.update(status="cancelled" if _BATCH_CANCEL.is_set() else "complete", current="")
+            if stopped_for_network:
+                _BATCH_TASK["errors"].insert(0, "Lot arrêté après huit échecs réseau ou serveur consécutifs. Relancez après rétablissement de la connexion.")
+            status = "failed" if stopped_for_network else "cancelled" if _BATCH_CANCEL.is_set() else "complete"
+            _BATCH_TASK.update(status=status, current="")
     except Exception as exc:
         with _BATCH_LOCK:
             _BATCH_TASK.update(status="failed", current="", errors=[*_BATCH_TASK["errors"], str(exc)])

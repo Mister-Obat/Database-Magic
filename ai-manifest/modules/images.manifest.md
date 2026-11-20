@@ -3,7 +3,8 @@
 ## Responsabilité
 
 Pour une impression et une face existantes, chercher une image française puis
-anglaise puis japonaise puis phyrexiane dans les URL Scryfall de ses enregistrements source, valider le fichier,
+anglaise puis japonaise puis phyrexiane, puis dans les autres langues présentes
+pour la même impression dans le catalogue local. Valider le fichier,
 le convertir en WebP et publier son état local. Aucune image blanche n’est créée
 pour un échec.
 Si la ligne française Scryfall manque, le téléchargement normal peut utiliser
@@ -49,9 +50,11 @@ appelle `image_download.py`.
 
 1. `download_printing(provider_id, catalogue_root, ledger_path, face_indexes, repair, ...)`
    résout l’ID fournisseur en `printing_id` et exige une édition éligible.
-2. Le module charge les lignes source FR, EN, JA et PH de la même impression, puis les
+2. Le module charge les lignes source de la même impression, puis les
    `image_uris` de la face demandée.
-3. Il tente FR avant EN puis JA, avec au plus trois GET par langue et par face. Les deux
+3. Il tente FR, EN, JA, PH, puis les autres langues de l'impression, avec au
+   plus trois GET par langue et face à chaque opération. Le téléchargement normal
+   privilégie le format plein cadre WebP `display` du catalogue quand il existe. Les deux
    dimensions source doivent dépasser 400 px et l’image ne doit pas être presque
    unicolore. Le premier candidat français conforme est préféré ; sinon le premier
    candidat anglais conforme est retenu, puis japonais ou phyrexian si nécessaire.
@@ -156,9 +159,11 @@ appelle `image_download.py`.
   de la prochaine action de téléchargement/réparation sur cette impression.
 - 403 bloque la source, 429 différera selon `Retry-After`; HTML, contenu corrompu,
   redirection et URL hors liste sont rejetés.
-- Le ledger persiste les GET et erreurs pour permettre la reprise. La politique
-  après épuisement des trois GET mérite une décision explicite, voir
-  [audit](../audit.md).
+- Le ledger persiste les GET et erreurs pour permettre la reprise. Les erreurs réseau,
+  les réponses HTTP 5xx et les annulations restent au journal et ne consomment
+  pas le budget. Les échecs historiques correspondants sont déduits au premier
+  accès à chaque entrée. Si les autres formats essayés ne donnent aucune image valide, une erreur
+  temporaire reporte la face à une relance.
 - Un échec local de publication SQLite après une image valide ne doit pas
   épuiser définitivement le budget réseau de cette image ; le téléchargement
   peut reprendre une fois le verrou résolu.
