@@ -103,7 +103,7 @@
         <section class="catalogue-refine" id="search-refine-panel" aria-label="Tri et filtres complémentaires">
           <div id="search-refine-fields" class="catalogue-refine-fields">
           <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-image"></use></svg>Images</span><select id="refine-images"><option value="all">Toutes les cartes</option><option value="with">Avec image uniquement</option><option value="without">Sans image uniquement</option></select></label>
-          <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-sort"></use></svg>Trier par</span><select id="refine-sort"><option value="date">Édition</option><option value="added">Ajout récent</option><option value="mana">Valeur de mana</option><option value="power">Force</option><option value="toughness">Endurance</option></select></label>
+          <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-sort"></use></svg>Trier par</span><select id="refine-sort"><option value="date">Édition</option><option value="name">Nom</option><option value="added">Ajout récent</option><option value="mana">Valeur de mana</option><option value="power">Force</option><option value="toughness">Endurance</option></select></label>
           <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-order"></use></svg>Ordre</span><select id="refine-order"><option value="desc">Décroissant</option><option value="asc">Croissant</option></select></label>
           <fieldset><legend><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-mana"></use></svg>Valeur de mana</span></legend><label>Minimum<input id="refine-mana-min" type="number" min="0" step="0.5"></label><label>Maximum<input id="refine-mana-max" type="number" min="0" step="0.5"></label></fieldset>
           <fieldset><legend><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-power"></use></svg>Force</span></legend><label>Minimum<input id="refine-power-min" type="number" step="1"></label><label>Maximum<input id="refine-power-max" type="number" step="1"></label></fieldset>
@@ -160,11 +160,9 @@
     <section id="view-perso" class="view catalogue-view" aria-labelledby="personal-title"><div class="personal-heading"><div id="personal-heading-content"><p class="eyebrow">Votre collection de compositions</p><h1 id="personal-title">Deck perso</h1></div><p id="personal-save-status" role="status" aria-live="polite"></p></div><div id="personal-content"></div></section>
     <section id="view-proxy" class="view catalogue-view" aria-labelledby="proxy-title">
       <div class="page-heading">
-        <div class="heading-action"><h1 id="proxy-title">Proxy</h1></div>
-      </div>
-      <div class="personal-toolbar proxy-toolbar">
-        <button id="proxy-open-folder" class="secondary-button" type="button">Ouvrir le dossier des proxies</button>
-        <p id="proxy-folder-help" class="small-note">Déposez vos images dans ce dossier. Elles seront détectées automatiquement à votre retour dans l’application.</p>
+        <p class="eyebrow">Cartes importées</p>
+        <div class="heading-action"><h1 id="proxy-title">Proxy</h1><button id="proxy-import" class="secondary-button" type="button">Importer</button></div>
+        <input id="proxy-file" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,.avif,.bmp" hidden>
       </div>
       <p id="proxy-folder-status" class="small-note" role="status"></p>
       <div id="proxy-content"></div>

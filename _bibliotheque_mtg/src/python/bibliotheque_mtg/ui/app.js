@@ -90,9 +90,12 @@ document.addEventListener("pointerdown", event => {
   panel.hidden = true;
   notificationButton.setAttribute("aria-expanded", "false");
 });
+let notificationRequest = 0;
 async function refreshNotifications() {
+  const request = ++notificationRequest;
   try {
     const response = await getJSON("/api/v2/notifications");
+    if (request !== notificationRequest) return;
     const items = (response.items || []).filter(item => !["complete", "cancelled", "ready"].includes(item.status));
     const count = items.filter(item => ["queued", "running", "needs_review", "error", "failed"].includes(item.status)).length;
     document.getElementById("notification-count").textContent = String(count);
@@ -128,12 +131,31 @@ async function refreshNotifications() {
         const cancel = node("button", "secondary-button", "Annuler"); cancel.addEventListener("click", async event => { event.stopPropagation(); await postJSON("/api/v2/deck/cancel", {task_id:item.task_id}); void refreshNotifications(); }); row.append(cancel);
       } else if (item.kind === "maintenance" && ["queued", "running"].includes(item.status)) {
         const cancel = node("button", "secondary-button", "Annuler"); cancel.addEventListener("click", async event => { event.stopPropagation(); await postJSON("/api/v2/maintenance/update/cancel", {task_id:item.task_id}); void refreshNotifications(); }); row.append(cancel);
-      } else if (["ai_generation", "image_preview"].includes(item.kind) && ["queued", "running"].includes(item.status)) {
-        const cancel = node("button", "secondary-button", "Annuler"); cancel.addEventListener("click", async event => { event.stopPropagation(); await postJSON("/api/v2/image/task/cancel", { task_id: item.task_id }); void refreshNotifications(); }); row.append(cancel);
+      } else if ((["ai_generation", "image_preview"].includes(item.kind) && ["queued", "running"].includes(item.status))
+          || (item.kind === "ai_generation" && item.status === "error")) {
+        const cancel = node("button", "secondary-button", "Annuler");
+        cancel.type = "button";
+        cancel.addEventListener("click", async () => {
+          cancel.disabled = true;
+          try { await cancelImageTask(item.task_id); }
+          catch (error) {
+            setText(open.querySelector(".notification-detail"), `Annulation impossible : ${error.message}`);
+            cancel.disabled = false;
+          }
+        });
+        row.append(cancel);
       }
       list.append(row);
     }
-  } catch { document.getElementById("notification-count").textContent = "!"; }
+  } catch {
+    if (request === notificationRequest) document.getElementById("notification-count").textContent = "!";
+  }
+}
+async function cancelImageTask(taskId) {
+  const task = await postJSON("/api/v2/image/task/cancel", { task_id: taskId });
+  if (task.status === "cancelled") imageTaskHandlers.delete(taskId);
+  void refreshNotifications();
+  return task;
 }
 function notificationStatusLabel(status) { return ({ queued: "En attente", running: "En cours", cancelling: "Annulation…", needs_review: "À vérifier", ready: "Terminé", error: "Erreur", failed: "Échec", cancelled: "Annulé" })[status] || status || "En cours"; }
 setInterval(() => { void refreshNotifications(); }, 2500);
@@ -310,6 +332,8 @@ function cardActionIcon(name) {
     minus: [["path", { d: "M5 12h14" }]],
     close: [["path", { d: "m18 6-12 12M6 6l12 12" }]],
     arrowUp: [["path", { d: "M12 19V5m-7 7 7-7 7 7" }]],
+    arrowLeft: [["path", { d: "m12 19-7-7 7-7" }], ["path", { d: "M19 12H5" }]],
+    arrowRight: [["path", { d: "M5 12h14" }], ["path", { d: "m12 5 7 7-7 7" }]],
     plus: [["path", { d: "M5 12h14" }], ["path", { d: "M12 5v14" }]],
     upload: [["path", { d: "M12 3v12" }], ["path", { d: "m17 8-5-5-5 5" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }]],
     download: [["path", { d: "M12 15V3" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }], ["path", { d: "m7 10 5 5 5-5" }]],
@@ -457,6 +481,8 @@ async function restoreRoute() {
     else $("edition-select").value = groupedEditionCode(query.get("set"));
     renderEditionSuggestions();
     state.editionPage = routePage(query);
+    pendingEditionFocus = query.get("focus");
+    if (pendingEditionFocus) editionPageKey = null;
   } else if (view === "decks") {
     await loadDeckFacets();
     if (request !== routeRestoreRequest) return;
@@ -484,11 +510,32 @@ async function restoreRoute() {
     else if (id !== state.openDeckId) void openDeck(id, null);
   }
   setView(view, null);
-  if (view === "recherche" && query.get("auto") === "1") { void runSearch(); return; }
+  if (view === "recherche") {
+    if (state.searchExecuted) {
+      if (state.searchResultKey !== params(searchFilters())) {
+        if (state.searchSnapshot && state.searchSnapshotFilters === searchFilterKey()) {
+          await loadSearchPage(state.searchSnapshot);
+        } else await runSearch(false);
+      }
+      if (request !== routeRestoreRequest || state.view !== view) return;
+      restoreViewScroll(view);
+    } else {
+      state.searchController?.abort();
+      state.searchController = null;
+      ++state.searchRequest;
+      state.searchResultKey = null;
+      state.searchSnapshot = null;
+      state.searchItems = [];
+      state.searchTotal = 0;
+      $("results").replaceChildren();
+      updateSearchPager();
+      updateBatchButtons();
+    }
+  }
   if (view === "perso" && query.get("deck") && personalState.deck?.id !== query.get("deck"))
     void openPersonalDeck(query.get("deck"));
   if (restoreDeckScroll) scrollToDeckList();
-  if (view === "recherche" && !state.searchItems.length) {
+  if (view === "recherche" && !state.searchExecuted) {
     setText($("search-status"), "Cliquez sur Rechercher pour lancer la recherche.");
   }
   if (legacyProxyRoute || !ROUTE_VIEWS.has(candidate)) syncRoute();
@@ -515,25 +562,194 @@ function setView(view, urlMode = "push") {
   if (!ROUTE_VIEWS.has(view)) return;
   if (urlMode) routeRestoreRequest++;
   const previousView = state.view;
+  if (view !== previousView) cancelPagePrefetch();
+  const navigation = routeRestoreRequest;
+  let clampedScroll = null;
+  const restoreAfterLoad = () => {
+    if (clampedScroll !== null && navigation === routeRestoreRequest
+        && state.view === view && window.scrollY === clampedScroll) restoreViewScroll(view);
+  };
   if (view !== previousView) viewScrollPositions.set(previousView, window.scrollY);
   activateView(view);
   if (urlMode) syncRoute(urlMode);
   if (view === "editions") {
     if (previousView !== view && $("edition-select").value === PROXY_SET_CODE) editionPageKey = null;
-    void ensureEditions(previousView !== view).then(ensureEditionPage);
+    void ensureEditions(previousView !== view).then(ensureEditionPage).then(restoreAfterLoad);
   }
   if (view === "recherche" && previousView !== view) void ensureEditions(true);
-  if (view === "decks" && !state.openDeckId) void loadDeckFacets().then(() => { if (state.deckExecuted) ensureDeckPage(); });
+  if (view === "decks" && !state.openDeckId) {
+    void loadDeckFacets().then(ensureDeckPage).then(restoreAfterLoad);
+  }
   if (view === "perso" && !$("personal-content").hasChildNodes() && !new URLSearchParams(location.hash.split("?")[1] || "").has("deck")) void showPersonalDecks();
-  if (view === "proxy") void renderProxies({ quiet: view === previousView && Boolean(urlMode) });
-  if (view === "archives") void ensureArchivePage();
+  if (view === "proxy") void renderProxies({ quiet: $("proxy-content").hasChildNodes() }).then(restoreAfterLoad);
+  if (view === "archives") void Promise.resolve(ensureArchivePage()).then(restoreAfterLoad);
   if (view === "info") {
     void loadHome();
     void loadMaintenanceStatus();
   }
   if (view !== previousView) {
-    window.scrollTo({ top: viewScrollPositions.get(view) ?? 0, behavior: "instant" });
+    restoreViewScroll(view);
+    if (window.scrollY < (viewScrollPositions.get(view) ?? 0)) clampedScroll = window.scrollY;
+    const path = { recherche: "/api/v2/search/page", editions: "/api/v2/edition", decks: "/api/v2/decks",
+      archives: "/api/v2/archive" }[view];
+    cataloguePageCaches.get(path)?.resume?.();
   }
+}
+function restoreViewScroll(view) {
+  window.scrollTo({ top: viewScrollPositions.get(view) ?? 0, behavior: "instant" });
+}
+function scrollTopFooter(targetId) {
+  const footer = node("div", "personal-deck-footer");
+  const button = personalButton("", () => {
+    const title = $(targetId);
+    title?.setAttribute("tabindex", "-1");
+    title?.focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: "instant" });
+  });
+  button.classList.add("personal-scroll-top");
+  button.title = "Remonter en haut";
+  button.setAttribute("aria-label", button.title);
+  button.append(cardActionIcon("arrowUp"));
+  footer.append(button);
+  return footer;
+}
+function attachScrollTop(pager, targetId, always = false) {
+  const footer = scrollTopFooter(targetId);
+  footer.classList.add("catalogue-page-footer");
+  if (!always) footer.classList.add("hide-with-pager");
+  pager.before(footer);
+  footer.prepend(pager);
+}
+function pageLoading(label) {
+  const waiting = node("p", "muted search-loading-state page-loading-state");
+  waiting.setAttribute("role", "status");
+  waiting.append(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", label));
+  return waiting;
+}
+const pageControls = new Map();
+function makePager(pager, previous, label, next, changePage) {
+  const input = node("input", "page-number");
+  input.type = "text";
+  input.inputMode = "numeric";
+  input.setAttribute("aria-label", "Numéro de page");
+  const range = node("span");
+  label.replaceChildren("Page ", input, range);
+  let page = 0, pages = 1;
+  const go = target => {
+    input.value = String(page + 1);
+    if (!Number.isSafeInteger(target) || target < 0 || target >= pages || target === page) return;
+    changePage(target);
+  };
+  input.addEventListener("keydown", event => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    const value = input.value.trim();
+    go(/^\d+$/.test(value) ? Number(value) - 1 : NaN);
+  });
+  input.addEventListener("blur", () => { input.value = String(page + 1); });
+  previous.onclick = () => go(page - 1);
+  next.onclick = () => go(page + 1);
+  return (index, count, details = "") => {
+    page = index;
+    pages = count;
+    pager.hidden = pages <= 1;
+    previous.disabled = page <= 0;
+    next.disabled = page >= pages - 1;
+    input.value = String(page + 1);
+    input.size = String(pages).length + 1;
+    setText(range, ` sur ${pages}${details ? ` · ${details}` : ""}`);
+  };
+}
+function registerPager(id, previousId, labelId, nextId, gridId, changePage, duplicate = true) {
+  const footer = $(id);
+  const controls = [makePager(footer, $(previousId), $(labelId), $(nextId), changePage)];
+  if (duplicate) {
+    const top = node("div", "pager catalogue-top-pager");
+    top.id = `${id}-top`;
+    top.hidden = true;
+    const previous = node("button", "secondary-button", $(previousId).textContent);
+    const next = node("button", "secondary-button", $(nextId).textContent);
+    previous.type = next.type = "button";
+    const label = node("span", "muted");
+    top.append(previous, label, next);
+    $(gridId).before(top);
+    controls.push(makePager(top, previous, label, next, changePage));
+  }
+  pageControls.set(id, (...values) => controls.forEach(update => update(...values)));
+}
+function jumpToCataloguePage(changePage) {
+  return page => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+    void changePage(page);
+  };
+}
+
+const cataloguePageCaches = new Map();
+function cancelPagePrefetch() {
+  for (const cache of cataloguePageCaches.values()) {
+    cache.generation++;
+    cache.prefetch?.abort();
+    cache.prefetch = null;
+  }
+}
+function invalidatePageCache(path) {
+  cancelPagePrefetch();
+  if (path) {
+    cataloguePageCaches.delete(path);
+    if (path === "/api/v2/search") cataloguePageCaches.delete("proxy-association");
+  } else cataloguePageCaches.clear();
+}
+function pageCache(path, query) {
+  const scope = query.official_only ? "proxy-association" : path;
+  const key = params({ ...query, offset: null, focus: null });
+  if (cataloguePageCaches.get(scope)?.key !== key) {
+    cataloguePageCaches.set(scope, { key, generation: 0, pages: new Map(), prefetch: null });
+  }
+  return cataloguePageCaches.get(scope);
+}
+async function fetchCataloguePage(path, query, options = {}) {
+  const cache = pageCache(path, query);
+  const offset = query.offset || 0;
+  if (!query.focus && cache.pages.has(offset)) return cache.pages.get(offset);
+  const data = await getJSON(path, query, options);
+  if (!options.signal?.aborted) cache.pages.set(data.offset ?? offset, data);
+  return data;
+}
+function prefetchNeighbourPages(path, query, total, grid, isCurrent) {
+  const cache = pageCache(path, query);
+  const generation = cache.generation;
+  const current = () => isCurrent() && generation === cache.generation;
+  cache.resume = () => {
+    if (isCurrent()) prefetchNeighbourPages(path, query, total, grid, isCurrent);
+  };
+  const offsets = [query.offset + query.limit, query.offset - query.limit]
+    .filter(offset => offset >= 0 && offset < total);
+  for (const offset of cache.pages.keys()) {
+    if (offset !== query.offset && !offsets.includes(offset)) cache.pages.delete(offset);
+  }
+  if (offsets.every(offset => cache.pages.has(offset))) return;
+  requestAnimationFrame(() => requestAnimationFrame(async () => {
+    if (!current()) return;
+    const visibleImages = [...grid.querySelectorAll("img")].filter(image => {
+      const box = image.getBoundingClientRect();
+      return box.bottom > 0 && box.top < window.innerHeight;
+    });
+    await Promise.allSettled(visibleImages.map(image => image.decode()));
+    const warm = async () => {
+      if (!current()) return;
+      const controller = new AbortController();
+      cache.prefetch = controller;
+      try {
+        for (const offset of offsets) {
+          if (!current()) break;
+          await fetchCataloguePage(path, { ...query, offset }, { signal: controller.signal, priority: "low" });
+        }
+      } catch { /* Foreground navigation retries missing pages. */ }
+      finally { if (cache.prefetch === controller) cache.prefetch = null; }
+    };
+    if (window.requestIdleCallback) window.requestIdleCallback(warm);
+    else setTimeout(warm, 0);
+  }));
 }
 function showError(container, message) { container.replaceChildren(node("p", "empty-state error-state", `Erreur : ${message}`)); }
 function imageNode(slot, className = "card-preview") {
@@ -809,6 +1025,7 @@ function pollMaintenanceTask() {
   }, 2000);
 }
 async function refreshAfterMaintenanceUpdate() {
+  invalidatePageCache();
   state.deckFacetsLoaded = false;
   editionsPromise = null;
   await Promise.all([loadHome(), ensureEditions()]);
@@ -1139,8 +1356,18 @@ function searchFilters() {
   const { result_order, ...backendRefined } = refined;
   return { ...(state.searchBaseFilters || mainSearchFilters()), ...backendRefined, result_sort: resultSort, limit: SEARCH_PAGE_SIZE, offset: state.searchPage * SEARCH_PAGE_SIZE };
 }
-async function runSearch(updateDraft = true) {
+const SEARCH_PAGE_ROUTE = "/api/v2/search/page";
+function searchFilterKey() {
+  return params({ ...searchFilters(), offset: null });
+}
+function runSearch(updateDraft = true) {
   state.searchExecuted = true;
+  state.searchSnapshot = null;
+  state.searchSnapshotFilters = null;
+  invalidatePageCache(SEARCH_PAGE_ROUTE);
+  return loadSearchPage(null, updateDraft);
+}
+async function loadSearchPage(snapshot, updateDraft = false) {
   if (state.view === "recherche") syncRoute();
   if (updateDraft) persistSearchDraft();
   hideRecentSearches();
@@ -1148,24 +1375,51 @@ async function runSearch(updateDraft = true) {
   const controller = new AbortController();
   state.searchController = controller;
   const request = ++state.searchRequest;
-  $("search-status").replaceChildren(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", "Recherche…"));
+  $("search-status").replaceChildren(node("span", "card-loading-spinner search-loading-spinner"),
+    node("span", "", snapshot ? "Chargement de la page…" : "Recherche…"));
+  const filters = searchFilters();
+  const pageQuery = { snapshot, limit: filters.limit, offset: filters.offset };
+  cancelPagePrefetch();
+  state.searchResultKey = null;
+  if (snapshot || updateDraft || !$("results").hasChildNodes()) {
+    pageControls.get("search-pager")(0, 1);
+    $("results").replaceChildren(pageLoading("Chargement des cartes…"));
+  }
   try {
-    const data = await getJSON("/api/v2/search", searchFilters(), { signal: controller.signal });
+    const options = { signal: controller.signal };
+    const fromCache = snapshot && pageCache(SEARCH_PAGE_ROUTE, pageQuery).pages.has(pageQuery.offset);
+    const data = snapshot ? await fetchCataloguePage(SEARCH_PAGE_ROUTE, pageQuery, options)
+      : await getJSON("/api/v2/search", { ...filters, snapshot: 1 }, options);
     if (request !== state.searchRequest) return;
-    const lastPage = Math.max(0, Math.ceil(data.total / SEARCH_PAGE_SIZE) - 1);
-    if (!updateDraft && state.searchPage > lastPage) {
-      state.searchPage = lastPage;
-      return runSearch(false);
-    }
+    state.searchPage = Math.floor(data.offset / SEARCH_PAGE_SIZE);
+    state.searchSnapshot = data.snapshot;
+    state.searchSnapshotFilters = searchFilterKey();
+    state.searchResultKey = params(searchFilters());
+    if (state.view === "recherche") syncRoute();
     state.searchTotal = data.total;
     state.searchItems = data.items || [];
     renderEditionItems($("results"), state.searchItems);
     updateSearchPager(); updateBatchButtons();
     setText($("search-status"), `${formatNumber(data.total)} résultat(s)`);
+    const activeQuery = { ...pageQuery, snapshot: data.snapshot, offset: data.offset };
+    pageCache(SEARCH_PAGE_ROUTE, activeQuery).pages.set(data.offset, data);
+    if (fromCache) {
+      state.searchController = null;
+      await refreshSearchImages();
+    }
+    if (request === state.searchRequest) prefetchNeighbourPages(SEARCH_PAGE_ROUTE, activeQuery, data.total, $("results"),
+      () => state.view === "recherche" && request === state.searchRequest);
+  } catch (error) {
+    if (request === state.searchRequest) {
+      showError($("results"), error.message);
+      setText($("search-status"), snapshot ? "Chargement de la page impossible." : "La recherche a échoué.");
+    }
   }
-  catch (error) { if (request === state.searchRequest) { showError($("results"), error.message); setText($("search-status"), "La recherche a échoué."); } }
   finally {
-    if (state.searchController === controller) state.searchController = null;
+    if (state.searchController === controller) {
+      state.searchController = null;
+      updateSearchPager();
+    }
   }
 }
 async function refreshSearchImages() {
@@ -1192,7 +1446,10 @@ async function refreshSearchImages() {
     if (state.searchController === controller) state.searchController = null;
   }
 }
-function updateSearchPager() { const pages = Math.max(1, Math.ceil(state.searchTotal / SEARCH_PAGE_SIZE)); $("search-pager").hidden = pages <= 1; setText($("page-status"), `Page ${state.searchPage + 1} sur ${pages} · ${formatNumber(state.searchTotal)} résultats`); $("previous-page").disabled = state.searchPage === 0; $("next-page").disabled = (state.searchPage + 1) * SEARCH_PAGE_SIZE >= state.searchTotal; }
+function updateSearchPager() {
+  const pages = Math.max(1, Math.ceil(state.searchTotal / SEARCH_PAGE_SIZE));
+  pageControls.get("search-pager")(state.searchPage, pages, `${formatNumber(state.searchTotal)} résultats`);
+}
 let batchTaskId = null, batchMode = null, batchPollTimer = null;
 const BATCH_BASELINE_SECONDS_PER_IMAGE = 8 * 3600 / 11376;
 function batchTimeRemaining(task) {
@@ -1306,11 +1563,12 @@ async function pollBatchDownload() {
     batchTaskId = null; batchMode = null; updateBatchButtons();
     if (state.view === "recherche" && state.searchItems.length) void refreshSearchImages();
     if (state.view === "editions") void refreshEditionPage();
-    if (state.view === "decks") void renderDeckPage();
+    if (state.view === "decks") void renderDeckPage(true);
   } catch (error) { batchPollTimer = setTimeout(pollBatchDownload, 3000); }
 }
 function openEdition(code) { $("edition-query").value = ""; hideEditionSuggestions(); state.exactEditionCode = null; $("edition-select").value = groupedEditionCode(code); state.activeSet = $("edition-select").value; state.editionPage = 0; setView("editions"); }
 let editionPageKey = null;
+let pendingEditionFocus = null;
 let editionController = null;
 let editionRefreshPending = false;
 function editionSelectionKey() {
@@ -1331,22 +1589,46 @@ async function renderEditionPage(background = false) {
   editionController = null;
   editionRefreshPending = false;
   editionPageKey = editionSelectionKey();
-  if (state.view === "editions") syncRoute();
+  if (state.view === "editions" && !pendingEditionFocus) syncRoute();
   const request = ++state.editionRequest;
   const code = $("edition-select").value; state.activeSet = code; const container = $("edition-cards");
+  const focus = pendingEditionFocus;
+  pendingEditionFocus = null;
+  if (background) invalidatePageCache("/api/v2/edition");
+  else cancelPagePrefetch();
   $("download-edition-results").disabled = true;
-  $("edition-pager").hidden = !code;
-  if (!code) { container.replaceChildren(); state.editionCardsTotal = 0; setText($("edition-page-status"), ""); updateBatchButtons(); return; }
+  if (!code) {
+    container.replaceChildren();
+    state.editionCardsTotal = 0;
+    updateEditionPager();
+    updateBatchButtons();
+    return;
+  }
   const controller = new AbortController();
   editionController = controller;
-  if (!background) container.replaceChildren(node("p", "muted", "Chargement…"));
+  if (!background) {
+    pageControls.get("edition-pager")(0, 1);
+    container.replaceChildren(pageLoading("Chargement des cartes…"));
+  }
   try {
-    const data = await getJSON("/api/v2/edition", { set: code, limit: EDITION_PAGE_SIZE, offset: state.editionPage * EDITION_PAGE_SIZE }, { signal: controller.signal });
+    const path = "/api/v2/edition";
+    const query = { set: code, limit: EDITION_PAGE_SIZE, offset: state.editionPage * EDITION_PAGE_SIZE };
+    if (focus) invalidatePageCache(path);
+    const data = await fetchCataloguePage(path, focus ? { ...query, focus } : query, { signal: controller.signal });
     if (request !== state.editionRequest) return;
+    if (focus) {
+      query.offset = data.offset;
+      state.editionPage = Math.floor(data.offset / EDITION_PAGE_SIZE);
+      editionPageKey = editionSelectionKey();
+      if (state.view === "editions") syncRoute();
+    }
     state.editionCardsTotal = data.total;
     renderEditionItems(container, data.items);
     updateEditionPager();
     updateBatchButtons();
+    const current = () => state.view === "editions" && request === state.editionRequest;
+    const prefetch = () => prefetchNeighbourPages(path, query, data.total, container, current);
+    if (!focus || !current() || !revealEditionCard(container, focus, current, prefetch)) prefetch();
   }
   catch (error) {
     if (request === state.editionRequest) {
@@ -1356,13 +1638,38 @@ async function renderEditionPage(background = false) {
   } finally {
     if (editionController === controller) {
       editionController = null;
+      updateEditionPager();
       const refresh = editionRefreshPending;
       editionRefreshPending = false;
       if (refresh && state.view === "editions" && editionPageKey === editionSelectionKey()) void refreshEditionPage();
     }
   }
 }
-function updateEditionPager() { const pages = Math.max(1, Math.ceil(state.editionCardsTotal / EDITION_PAGE_SIZE)); $("edition-pager").hidden = !state.activeSet || pages <= 1; setText($("edition-page-status"), `Page ${state.editionPage + 1} sur ${pages} · ${formatNumber(state.editionCardsTotal)} cartes`); $("edition-prev").disabled = state.editionPage === 0; $("edition-next").disabled = (state.editionPage + 1) * EDITION_PAGE_SIZE >= state.editionCardsTotal; }
+function updateEditionPager() {
+  const pages = Math.max(1, Math.ceil(state.editionCardsTotal / EDITION_PAGE_SIZE));
+  pageControls.get("edition-pager")(state.editionPage, pages, `${formatNumber(state.editionCardsTotal)} cartes`);
+}
+function revealEditionCard(container, printing, isCurrent, afterScroll) {
+  const tile = container.querySelector(`[data-printing-id="${CSS.escape(printing)}"]`);
+  if (!tile) return false;
+  requestAnimationFrame(() => {
+    if (!isCurrent() || !tile.isConnected) return;
+    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const highlight = () => {
+      clearTimeout(fallback);
+      document.removeEventListener("scrollend", highlight);
+      if (!isCurrent() || !tile.isConnected) return;
+      tile.classList.add("edition-target");
+      setTimeout(() => tile.classList.remove("edition-target"), 2600);
+      afterScroll();
+    };
+    const fallback = setTimeout(highlight, 700);
+    tile.scrollIntoView({ block: "center", behavior: reducedMotion ? "instant" : "smooth" });
+    if (reducedMotion || Math.abs(tile.getBoundingClientRect().top + tile.offsetHeight / 2 - innerHeight / 2) < 2) highlight();
+    else document.addEventListener("scrollend", highlight, { once: true });
+  });
+  return true;
+}
 function galleryRecords(items) {
   const byPrinting = new Map();
   for (const item of items || []) {
@@ -1378,7 +1685,7 @@ function galleryContextFor(providerId) {
   const visible = selector => [...document.querySelectorAll(selector)].map(el => ({ provider_card_id: el.dataset.providerId, printing_id: el.dataset.printingId, lang: el.dataset.lang }));
   if (state.view === "info" && document.querySelector(`#list-import-results .edition-card-tile[data-provider-id="${CSS.escape(id)}"]`))
     return { kind: "list", rows: galleryRecords(visible("#list-import-results .edition-card-tile")), current: id };
-  if (state.view === "recherche") return { kind: "search", page: state.searchPage, query: searchFilters(), total: state.searchTotal, rows: galleryRecords(visible("#results .edition-card-tile")), current: id };
+  if (state.view === "recherche") return { kind: "search", page: state.searchPage, snapshot: state.searchSnapshot, total: state.searchTotal, rows: galleryRecords(visible("#results .edition-card-tile")), current: id };
   if (state.view === "editions" && state.activeSet) return { kind: "edition", page: state.editionPage, set: state.activeSet, total: state.editionCardsTotal, rows: galleryRecords(visible("#edition-cards .edition-card-tile")), current: id };
   if (state.view === "decks" && state.selectedDeck) {
     const rows = [];
@@ -1403,6 +1710,10 @@ function galleryContextFor(providerId) {
   return { kind: "single", rows: [{ provider_card_id: id, printing_id: id }], current: id };
 }
 let galleryNavigation = 0;
+const galleryPageSizes = { search: SEARCH_PAGE_SIZE, edition: EDITION_PAGE_SIZE, proxy: PROXY_PAGE_SIZE };
+function navigateCardGallery(direction) {
+  void galleryNeighbor(direction).catch(error => console.error("Impossible de changer de carte.", error));
+}
 async function galleryNeighbor(direction) {
   const ctx = state.cardGallery; if (!ctx) return;
   const navigation = ++galleryNavigation;
@@ -1410,11 +1721,16 @@ async function galleryNeighbor(direction) {
   const isCurrent = () => navigation === galleryNavigation && request === state.cardRequest && $("card-dialog").open;
   let rows = ctx.rows || [], index = rows.findIndex(x => String(x.provider_card_id) === ctx.current);
   if (["search", "edition", "proxy"].includes(ctx.kind)) {
-    const pageSize = { search: SEARCH_PAGE_SIZE, edition: EDITION_PAGE_SIZE, proxy: PROXY_PAGE_SIZE }[ctx.kind];
+    const pageSize = galleryPageSizes[ctx.kind];
     const getPage = async page => {
-      const path = { search: "/api/v2/search", edition: "/api/v2/edition", proxy: "/api/v2/proxies" }[ctx.kind];
-      const values = { ...(ctx.kind === "search" ? ctx.query : { set: ctx.set }), limit: pageSize, offset: page * pageSize };
-      const data = await getJSON(path, values);
+      const path = { search: SEARCH_PAGE_ROUTE, edition: "/api/v2/edition", proxy: "/api/v2/proxies" }[ctx.kind];
+      const values = { ...(ctx.kind === "search" ? { snapshot: ctx.snapshot } : { set: ctx.set }),
+        limit: pageSize, offset: page * pageSize };
+      if (ctx.kind === "proxy") delete values.set;
+      const cache = cataloguePageCaches.get(path);
+      const key = params({ ...values, offset: null });
+      const cached = cache?.key === key ? cache.pages.get(values.offset) : null;
+      const data = cached || await getJSON(path, values);
       return galleryRecords(data.items);
     };
     rows = ctx.rows || await getPage(ctx.page);
@@ -1484,7 +1800,7 @@ async function showCardUsages(card) {
     const renderScope = scope => {
       const entries = data[scope] || data;
       content.replaceChildren(
-        group("Éditions", entries.editions, e => `#editions?set=${encodeURIComponent(e.code)}&exact=1`, e => `${e.name_fr || e.name || e.code} (${e.code.toUpperCase()})`, e => {
+        group("Éditions", entries.editions, e => `#editions?${params({ set: e.code, exact: 1, focus: e.printing_id })}`, e => `${e.name_fr || e.name || e.code} (${e.code.toUpperCase()})`, e => {
           if (!e.edition_icon_url) return null;
           const image = node("img", "card-usages-edition-icon");
           image.src = e.edition_icon_url; image.alt = ""; image.loading = "lazy";
@@ -1506,6 +1822,7 @@ async function showCardUsages(card) {
 }
 async function openCard(providerId, gallery = null, preferredFace = null, resumedPreview = null) {
   const dialog = $("card-dialog"), target = $("card-detail");
+  const focusedDirection = gallery ? document.activeElement?.dataset.cardGalleryDirection : null;
   state.cardController?.abort();
   const controller = new AbortController();
   state.cardController = controller;
@@ -1536,7 +1853,24 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     const card = data.card; context.currentPrinting = card.printing_id || card.provider_card_id;
     const shell = node("section", "card-viewer");
     const header = node("header", "card-viewer-header");
-    header.append(node("p", "eyebrow", [card.edition || card.set_code, card.collector_number && `n° ${card.collector_number}`].filter(Boolean).join(" · ")));
+    const rows = context.rows || [];
+    const pageSize = galleryPageSizes[context.kind];
+    const index = rows.findIndex(row => pageSize ? row.printing_id === context.currentPrinting : String(row.provider_card_id) === context.current);
+    const navigationButton = (direction, label, icon) => {
+      const button = node("button", "secondary-button card-gallery-arrow");
+      button.type = "button";
+      button.dataset.cardGalleryDirection = String(direction);
+      button.setAttribute("aria-label", label);
+      button.title = label;
+      button.append(cardActionIcon(icon));
+      const hasAdjacentPage = pageSize && (direction < 0 ? context.page > 0 : (context.page + 1) * pageSize < context.total);
+      button.disabled = index < 0 || (!rows[index + direction] && !hasAdjacentPage);
+      button.addEventListener("click", () => navigateCardGallery(direction));
+      return button;
+    };
+    const previousCard = navigationButton(-1, "Carte précédente", "arrowLeft");
+    const nextCard = navigationButton(1, "Carte suivante", "arrowRight");
+    header.append(previousCard, node("p", "eyebrow", [card.edition || card.set_code, card.collector_number && `n° ${card.collector_number}`].filter(Boolean).join(" · ")), nextCard);
     const imageArea = node("div", `card-viewer-image${card.proxy ? (card.proxy_source_id ? " linked-proxy-image" : " unlinked-proxy-image") : ""}`);
     const slots = (card.image_slots || []).slice().sort((a,b) => a.face_index - b.face_index);
     let selectedFace = preferredFace !== null && slots.some(x => x.face_index === preferredFace)
@@ -1809,7 +2143,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           const errorPane = node("div", "ai-generation-error"); errorPane.hidden = true;
           const errorTitle = node("h3", "", "Génération impossible");
           const errorMessage = node("p", "error-state");
-          const acknowledgeError = node("button", "primary-button", "Compris, revenir aux images"); acknowledgeError.type = "button";
+          const acknowledgeError = node("button", "primary-button", "Annuler la génération"); acknowledgeError.type = "button";
           errorPane.append(errorTitle, errorMessage, acknowledgeError);
           const acceptAI = node("button", "primary-button", "Valider et remplacer l’image"); acceptAI.type = "button"; acceptAI.disabled = true;
           const cancelAI = node("button", "secondary-button", "Annuler"); cancelAI.type = "button";
@@ -1906,12 +2240,14 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           cancelWaiting.addEventListener("click", async () => {
             if (!aiTaskId) return;
             cancelWaiting.disabled = true;
-            try { await postJSON("/api/v2/image/task/cancel", { task_id: aiTaskId }); setText(aiProgressMessage, "Annulation demandée…"); }
+            try { await cancelImageTask(aiTaskId); setText(aiProgressMessage, "Annulation demandée…"); }
             catch (error) { setText(aiProgressMessage, `Annulation impossible : ${error.message}`); cancelWaiting.disabled = false; }
           });
           const runAIGeneration = async (promptOverride = null) => {
             const visual=options.find(item=>String(item.index)===visualSelect.value),text=options.find(item=>String(item.index)===textSelect.value);
             if (!visual || textMode === "image" && (!text || !(text.language === "fr" || text.text_reference_only || text.local_original_reference) || !(visual.printing_id===text.printing_id&&visual.face_index===text.face_index || text.text_reference_only || text.local_original_reference))) { setText(aiStatus, "Choisissez une référence visuelle, puis une image française, l’original intégré ou une image du même nom."); return; }
+            aiTaskId = null;
+            cancelWaiting.disabled = false;
             setWizardStep("generating"); retryAI.disabled = true; acceptAI.disabled = true; aiStage.replaceChildren(node("div", "card-loading-spinner")); setText(aiStatus, "Génération de la carte… cela peut prendre quelques minutes.");
             if (textMode === "online") textStage.replaceChildren(node("p", "muted", "Recherche du texte français vérifié…"));
             try {
@@ -1925,7 +2261,8 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
                 return;
               }
               if (!result.task_id) throw new Error("Le serveur n’a pas retourné l’identifiant de la tâche.");
-              aiTaskId = result.task_id;
+              const taskId = result.task_id;
+              aiTaskId = taskId;
               const openTask = async () => {
                 if (choiceDialog.open) choiceDialog.close();
                 await openCard(card.provider_card_id, context, selectedFace);
@@ -1938,10 +2275,11 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
               cancelWaiting.hidden = false; leaveWaiting.hidden = false;
               void refreshNotifications();
               const poll = async () => {
-                if (!aiTaskId) return;
+                if (aiTaskId !== taskId) return;
                 try {
-                  const task = await getJSON("/api/v2/image/task", { task_id: aiTaskId });
-              if (["queued", "running", "cancelling"].includes(task.status)) { setText(aiProgressMessage, task.status === "cancelling" ? "Annulation demandée…" : task.detail || "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications."); void refreshNotifications(); setTimeout(poll, 1200); return; }
+                  const task = await getJSON("/api/v2/image/task", { task_id: taskId });
+                  if (aiTaskId !== taskId) return;
+                  if (["queued", "running", "cancelling"].includes(task.status)) { setText(aiProgressMessage, task.status === "cancelling" ? "Annulation demandée…" : task.detail || "Génération en cours. Vous pouvez quitter cette page; résultat dans notifications."); void refreshNotifications(); setTimeout(poll, 1200); return; }
                   if (task.status === "needs_review" || task.status === "ready") {
                     const value = task.result || task;
                     aiId = value.id || value.candidate_id;
@@ -1955,7 +2293,16 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
                     setText(aiStatus, "Comparez le texte français et le graphisme avant de valider."); acceptAI.disabled = false; retryAI.disabled = false; setWizardStep("review");
                     cancelWaiting.hidden = true; void refreshNotifications(); return;
                   }
-                  if (["cancelled", "canceled"].includes(task.status)) { setText(errorMessage, "La génération a été annulée."); setWizardStep("error"); cancelWaiting.hidden = true; void refreshNotifications(); return; }
+                  if (task.status === "cancelled") {
+                    imageTaskHandlers.delete(aiTaskId);
+                    aiTaskId = null;
+                    setText(errorMessage, "La génération a été annulée.");
+                    setText(acknowledgeError, "Revenir aux images");
+                    setWizardStep("error");
+                    cancelWaiting.hidden = true;
+                    void refreshNotifications();
+                    return;
+                  }
                   throw new Error(task.detail || task.error || "La génération n’a pas abouti.");
                 } catch (error) {
                   setText(errorMessage, error.message || "La génération n’a pas abouti."); setWizardStep("error"); cancelWaiting.hidden = true; void refreshNotifications();
@@ -1968,7 +2315,22 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           retryAI.addEventListener("click", () => { reviewCorrection.hidden = false; retryAI.disabled = true; correction.focus(); });
           retryCancel.addEventListener("click", () => { reviewCorrection.hidden = true; retryAI.disabled = false; });
           retrySubmit.addEventListener("click", () => { reviewCorrection.hidden = true; void runAIGeneration(); });
-          acknowledgeError.addEventListener("click", () => { aiId = null; textMode = "image"; correction.value = ""; reviewCorrection.hidden = true; setWizardStep("compare"); });
+          acknowledgeError.addEventListener("click", async () => {
+            acknowledgeError.disabled = true;
+            try {
+              if (aiTaskId) await cancelImageTask(aiTaskId);
+              aiTaskId = null;
+              aiId = null;
+              textMode = "image";
+              correction.value = "";
+              reviewCorrection.hidden = true;
+              setWizardStep("compare");
+            } catch (error) {
+              setText(errorMessage, `Annulation impossible : ${error.message}`);
+            } finally {
+              acknowledgeError.disabled = false;
+            }
+          });
           const finishAI = async choice => { if (demoThisCard) { choiceDialog.close(); return; } acceptAI.disabled = cancelAI.disabled = retryAI.disabled = true; try { await postJSON("/api/v2/image/ai/choose", { id: aiId, choice }); choiceDialog.close(); if (aiTaskId) imageTaskHandlers.delete(aiTaskId); if (choice === "new" && previewTaskId) { imageTaskHandlers.delete(previewTaskId); choiceDialog.removeAttribute("data-preview-task-id"); } void refreshNotifications(); if (choice === "new") { refreshCurrentCollection(); await openCard(card.provider_card_id, context, selectedFace); } } catch (error) { setText(aiStatus, `Choix impossible : ${error.message}`); acceptAI.disabled = !aiId; cancelAI.disabled = false; retryAI.disabled = !aiId; } };
           acceptAI.addEventListener("click", () => { if (aiId) void finishAI("new"); });
           cancelAI.textContent = "Retour à la sélection des images";
@@ -2127,6 +2489,10 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     imageArea.append(imageWrap, controls);
     const body = node("div", "card-viewer-body"); body.append(imageArea, details);
     shell.append(header, body); target.replaceChildren(shell); target.classList.remove("card-detail-loading");
+    if (focusedDirection && document.activeElement === document.body) {
+      const button = focusedDirection === "-1" ? previousCard : nextCard;
+      (button.disabled ? $("close-dialog") : button).focus({ preventScroll: true });
+    }
     if (resumedPreview) controls.querySelector(".card-image-search")?.click();
   } catch (error) { if (request === state.cardRequest) { showError(target,error.message); target.classList.remove("card-detail-loading"); } }
   finally { if (state.cardController === controller) state.cardController = null; }
@@ -2144,7 +2510,7 @@ async function openAIReviewTask(taskId, summary = {}) {
       waiting.append(node("h2", "comparison-title", "Génération en cours"), node("div", "card-loading-spinner"), waitingMessage);
       const actions = node("div", "comparison-choices ai-waiting-actions");
       const home = node("button", "secondary-button", "Reprendre la consultation"); home.type = "button"; home.addEventListener("click", () => { reviewDialog.close(); if ($("card-dialog").open) $("card-dialog").close(); });
-      const cancel = node("button", "secondary-button", "Annuler"); cancel.type = "button"; cancel.addEventListener("click", async () => { cancel.disabled = true; try { await postJSON("/api/v2/image/task/cancel", { task_id: taskId }); } catch (error) { setText(waiting.querySelector("p"), `Annulation impossible : ${error.message}`); cancel.disabled = false; } });
+      const cancel = node("button", "secondary-button", "Annuler"); cancel.type = "button"; cancel.addEventListener("click", async () => { cancel.disabled = true; try { await cancelImageTask(taskId); } catch (error) { setText(waitingMessage, `Annulation impossible : ${error.message}`); cancel.disabled = false; } });
       actions.append(cancel, home); waiting.append(actions); content.replaceChildren(waiting);
       if (!reviewDialog.open) reviewDialog.showModal(); $("notification-panel").hidden = true;
       const poll = async () => {
@@ -2158,8 +2524,26 @@ async function openAIReviewTask(taskId, summary = {}) {
       setTimeout(poll, 1200); return;
     }
     if (["error", "cancelled"].includes(task.status)) {
-      const failed = node("section", "image-comparison"); failed.append(node("h2", "comparison-title", task.status === "cancelled" ? "Génération annulée" : "Génération impossible"), node("p", "error-state", task.detail || "La génération n’a pas abouti."));
-      const close = node("button", "secondary-button", providerId ? "Revenir à la sélection d’images" : "Fermer"); close.type = "button"; close.addEventListener("click", async () => { reviewDialog.close(); if (providerId) { await openCard(providerId, null, faceIndex); $("card-detail").querySelector(".card-image-search")?.click(); } }); failed.append(close); content.replaceChildren(failed);
+      const failed = node("section", "image-comparison");
+      const failure = node("p", "error-state", task.detail || "La génération n’a pas abouti.");
+      failed.append(node("h2", "comparison-title", task.status === "cancelled" ? "Génération annulée" : "Génération impossible"), failure);
+      const close = node("button", "secondary-button", providerId ? "Revenir à la sélection d’images" : "Fermer");
+      close.type = "button";
+      close.addEventListener("click", async () => {
+        close.disabled = true;
+        try {
+          if (task.status === "error") await cancelImageTask(taskId);
+          reviewDialog.close();
+          if (providerId) {
+            await openCard(providerId, null, faceIndex);
+            $("card-detail").querySelector(".card-image-search")?.click();
+          }
+        } catch (error) {
+          setText(failure, `Annulation impossible : ${error.message}`);
+          close.disabled = false;
+        }
+      });
+      failed.append(close); content.replaceChildren(failed);
       if (!reviewDialog.open) reviewDialog.showModal(); $("notification-panel").hidden = true; return;
     }
     let currentAiId = result.id || result.candidate_id || summary.candidate_id;
@@ -2278,16 +2662,17 @@ async function openAIReviewTask(taskId, summary = {}) {
   }
 }
 function refreshCurrentCollection(proxyImage = false) {
+  invalidatePageCache();
   if (state.view === "editions") void refreshEditionPage();
   else if (state.view === "recherche") {
-    if (proxyImage) void runSearch(false);
+    if (proxyImage && state.searchSnapshot) void loadSearchPage(state.searchSnapshot);
     else void refreshSearchImages();
   }
   else if (state.view === "decks") {
     void renderDeckPage();
     if (state.selectedDeck?.id) void openDeck(state.selectedDeck.id);
   } else if (state.view === "info") void loadHome();
-  else if (state.view === "proxy" && proxyImage) void renderProxies();
+  else if (state.view === "proxy" && proxyImage) void renderProxies({ quiet: true });
   else if (state.view === "perso" && proxyImage) {
     if (personalState.deck) renderPersonalEditor();
     else renderPersonalList();
@@ -2325,7 +2710,7 @@ async function refreshDeckResults() {
   setText(status, "Vérification des decks de la recherche active…");
   try {
     const result = await postJSON("/api/v2/decks/recalculate", filters);
-    if (state.view === "decks" && state.deckAppliedFilters === filters && !state.openDeckId) await renderDeckPage();
+    if (state.view === "decks" && state.deckAppliedFilters === filters && !state.openDeckId) await renderDeckPage(true);
     setText(status, `${formatNumber(result.total || 0)} decks vérifiés.`);
   } catch (error) {
     setText(status, `Rafraîchissement impossible : ${error.message}`);
@@ -2338,7 +2723,7 @@ function ensureDeckPage() {
   if (!state.deckExecuted) return;
   if (state.deckListKey !== params(deckPageQuery())) return renderDeckPage();
 }
-async function renderDeckPage() {
+async function renderDeckPage(background = false) {
   if (state.openDeckId || !state.deckExecuted) return;
   if (state.view === "decks") syncRoute();
   const query = deckPageQuery();
@@ -2347,13 +2732,16 @@ async function renderDeckPage() {
   const controller = new AbortController();
   state.deckController = controller;
   const request = ++state.deckRequest;
+  if (background) invalidatePageCache("/api/v2/decks");
+  else cancelPagePrefetch();
   $("download-deck-results").disabled = true;
   const container = $("deck-list");
-  const waiting = node("p", "muted search-loading-state");
-  waiting.append(node("span", "card-loading-spinner search-loading-spinner"), node("span", "", "Chargement des decks…"));
-  container.replaceChildren(waiting);
+  if (!background) {
+    pageControls.get("deck-pager")(0, 1);
+    container.replaceChildren(pageLoading("Chargement des decks…"));
+  }
   try {
-    const data = await getJSON("/api/v2/decks", query, { signal: controller.signal });
+    const data = await fetchCataloguePage("/api/v2/decks", query, { signal: controller.signal });
     if (request !== state.deckRequest) return;
     state.deckTotal = data.total;
     updateBatchButtons();
@@ -2376,10 +2764,9 @@ async function renderDeckPage() {
       container.append(tile);
     }
     const pages = Math.max(1, Math.ceil(data.total / DECK_PAGE_SIZE));
-    setText($("deck-page-status"), `Page ${state.deckPage + 1} sur ${pages} · ${formatNumber(data.total)} decks`);
-    $("deck-pager").hidden = pages <= 1;
-    $("deck-prev").disabled = state.deckPage === 0;
-    $("deck-next").disabled = (state.deckPage + 1) * DECK_PAGE_SIZE >= data.total;
+    pageControls.get("deck-pager")(state.deckPage, pages, `${formatNumber(data.total)} decks`);
+    prefetchNeighbourPages("/api/v2/decks", query, data.total, container,
+      () => state.view === "decks" && !state.openDeckId && request === state.deckRequest);
   } catch (error) {
     if (request === state.deckRequest) {
       state.deckListKey = null;
@@ -2475,12 +2862,14 @@ function closeDeck(urlMode = "push") {
     if (wasOpen) {
       state.deckListOpener?.focus({ preventScroll: true });
       scrollToDeckList();
+      cataloguePageCaches.get("/api/v2/decks")?.resume?.();
     }
   }
 }
 async function openDeck(deckId, urlMode = "push") {
   const target = $("deck-detail");
   const request = ++state.deckDetailRequest;
+  cancelPagePrefetch();
   const changed = deckId !== state.openDeckId;
   if (!state.openDeckId && !$("deck-browser").hidden && state.view === "decks") {
     state.deckListScroll = window.scrollY;
@@ -2541,6 +2930,7 @@ async function openDeck(deckId, urlMode = "push") {
       }
       section.append(list); target.append(section);
     }
+    target.append(scrollTopFooter("deck-open-heading"));
     if (state.deckTaskId) pollDeckTask();
     loadDeckFacets(true);
   } catch (error) { if (request === state.deckDetailRequest) showError(target, error.message); }
@@ -2693,7 +3083,7 @@ async function runArchiveOcrBatch() {
     const summary=task.stop?`OCR arrêté après ${done}/${missing.length} fichier(s) · ${imported} importée(s). Résultats conservés.`:`OCR terminé : ${done} analysée(s), ${already} déjà lue(s), ${imported} importée(s), ${review} à revoir, ${failed} erreur(s).`;
     status.replaceChildren(node("span","",summary));
     if(errors.length){const details=node("details","deck-errors");details.append(node("summary","error-state","Fichiers en erreur"));const list=node("ul");for(const error of errors)list.append(node("li","",error));details.append(list);status.append(details);}
-    if(state.view==="archives"){archiveResolvedByPage.clear();await renderArchivePage();}
+    if(state.view==="archives"){archiveResolvedByPage.clear();await renderArchivePage(true);}
   }catch(error){setText(status,`Analyse interrompue : ${error.message}`);}
   finally{archiveOcrBatch=null;start.disabled=false;autoStart.disabled=false;stop.hidden=true;}
 }
@@ -2730,7 +3120,7 @@ async function runArchiveAutoNameBatch() {
     const summary=task.stop?`Nommage arrêté après ${done}/${items.length} fichier(s). Les noms déjà enregistrés sont conservés.`:`Nommage terminé : ${done} traitée(s), ${renamed} renommée(s), ${kept} nom(s) conservé(s), ${unnamed} sans titre lisible, ${failed} erreur(s).`;
     status.replaceChildren(node("span","",summary));
     if(errors.length){const details=node("details","deck-errors");details.append(node("summary","error-state","Fichiers en erreur"));const list=node("ul");for(const error of errors)list.append(node("li","",error));details.append(list);status.append(details);}
-    if(state.view==="archives"){archiveResolvedByPage.clear();await renderArchivePage();}
+    if(state.view==="archives"){archiveResolvedByPage.clear();await renderArchivePage(true);}
   }catch(error){setText(status,`Nommage interrompu : ${error.message}`);}
   finally{archiveAutoNameBatch=null;start.disabled=false;ocrStart.disabled=false;stop.hidden=true;}
 }
@@ -2741,14 +3131,18 @@ function archiveSelectionKey() {
 function ensureArchivePage() {
   if (archivePageKey !== archiveSelectionKey()) return renderArchivePage();
 }
-async function renderArchivePage() {
+async function renderArchivePage(background = false) {
   archivePageKey = archiveSelectionKey();
   if (state.view === "archives") syncRoute();
   const request = ++archiveRequest;
   const pageIndex = state.archivePage;
-  const container = $("archive-list"), offset = Math.max(0, pageIndex * PAGE_SIZE - archiveResolvedCount(pageIndex)); hoverPreview.hidden=true;archiveOcrViews.clear();container.replaceChildren(node("p", "muted", "Chargement des archives…"));
+  const path = "/api/v2/archive";
+  if (background) invalidatePageCache(path);
+  else cancelPagePrefetch();
+  const container = $("archive-list"), offset = Math.max(0, pageIndex * PAGE_SIZE - archiveResolvedCount(pageIndex)); hoverPreview.hidden=true;archiveOcrViews.clear();if (!background) container.replaceChildren(pageLoading("Chargement des archives…"));
   try {
-    const data = await getJSON("/api/v2/archive", { limit: PAGE_SIZE, offset, status: $("archive-status").value });
+    const query = { limit: PAGE_SIZE, offset, status: $("archive-status").value };
+    const data = archiveResolvedCount() ? await getJSON(path, query) : await fetchCataloguePage(path, query);
     if (request !== archiveRequest) return;
     state.archiveTotal = data.total;
     container.replaceChildren();
@@ -2785,6 +3179,7 @@ async function renderArchivePage() {
         hoverPreview.hidden=true;archiveOcrViews.delete(entry.relative_path);
         article.querySelector(".archive-auto-name")?.remove();article.querySelector(".archive-delete")?.remove();
         review.replaceChildren(node("p","archive-imported-message","✓ Image importée dans la base"));
+        invalidatePageCache(path);
         archiveResolvedByPage.set(pageIndex,(archiveResolvedByPage.get(pageIndex)||0)+1);
         state.archiveTotal=Math.max(0,state.archiveTotal-1);
         setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);
@@ -2896,6 +3291,7 @@ async function renderArchivePage() {
         try{
           await postJSON("/api/v2/archive/delete",{path:entry.relative_path});
           article.remove();archiveOcrViews.delete(entry.relative_path);
+          invalidatePageCache(path);
           archiveResolvedByPage.set(pageIndex,(archiveResolvedByPage.get(pageIndex)||0)+1);
           state.archiveTotal=Math.max(0,state.archiveTotal-1);
           setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);
@@ -2905,7 +3301,10 @@ async function renderArchivePage() {
       article.append(autoNameButton,deleteButton,img,body);container.append(article);
       if(entry.ocr_result)applyOcrResult(entry.ocr_result);
     }
-    setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);const visibleTotal=data.total+archiveResolvedCount();const pages=Math.max(1,Math.ceil(visibleTotal/PAGE_SIZE));$("archive-pager").hidden=pages<=1;setText($("archive-page-status"),`Page ${state.archivePage+1} sur ${pages}`);$("archive-prev").disabled=state.archivePage===0;$("archive-next").disabled=(state.archivePage+1)*PAGE_SIZE>=visibleTotal;
+    setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);const visibleTotal = data.total + archiveResolvedCount();
+    pageControls.get("archive-pager")(state.archivePage, Math.max(1, Math.ceil(visibleTotal / PAGE_SIZE)));
+    if (!archiveResolvedCount()) prefetchNeighbourPages(path, query, data.total, container,
+      () => state.view === "archives" && request === archiveRequest);
   } catch (error) {
     if (request === archiveRequest) {
       archivePageKey = null;
@@ -2914,7 +3313,19 @@ async function renderArchivePage() {
   }
 }
 
-document.querySelectorAll("[data-view]").forEach((button)=>button.addEventListener("click",()=>setView(button.dataset.view)));
+$("view-info").append(scrollTopFooter("info-title"));
+attachScrollTop($("search-pager"), "search-title");
+attachScrollTop($("edition-pager"), "editions-title", true);
+attachScrollTop($("deck-pager"), "decks-title", true);
+attachScrollTop($("archive-pager"), "archive-title", true);
+document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => {
+  const view = button.dataset.view;
+  if (view === "perso" && state.view === view && personalState.deck) {
+    void returnToPersonalList();
+    return;
+  }
+  setView(view);
+}));
 document.querySelector(".brand").addEventListener("click", event => { event.preventDefault(); setView("info"); });
 window.addEventListener("popstate", restoreRoute);
 window.addEventListener("hashchange", restoreRoute);
@@ -2931,6 +3342,7 @@ $("search-form").addEventListener("change", () => { searchDraftTouched = true; p
 window.addEventListener("pagehide", persistSearchDraft);
 $("search-form").addEventListener("submit", event => {
   event.preventDefault();
+  invalidatePageCache("/api/v2/search");
   rememberSearchTerm($("query").value);
   state.searchBaseFilters = mainSearchFilters();
   state.refineFilters = refineSearchFilters();
@@ -2952,8 +3364,7 @@ async function refreshVisibleView() {
       return Promise.all([loadHome(), loadMaintenanceStatus()]);
     case "recherche":
       if (state.searchController) return;
-      if (state.searchItems.some(item => !item.proxy && item.printing_id)) return refreshSearchImages();
-      return state.searchExecuted ? runSearch(false) : ensureEditions(true);
+      return state.searchSnapshot ? refreshSearchImages() : ensureEditions(true);
     case "editions":
       await ensureEditions(true);
       if (state.view === "editions") return refreshEditionPage();
@@ -2963,21 +3374,23 @@ async function refreshVisibleView() {
     case "perso":
       return personalState.deck ? refreshOpenPersonalDeck() : personalState.refreshList?.(true);
     case "proxy":
-      return renderProxies();
+      return renderProxies({ quiet: true });
     case "archives":
-      return renderArchivePage();
+      return renderArchivePage(true);
   }
 }
 $("refresh-view").addEventListener("click", async event => {
   const button = event.currentTarget;
   button.disabled = true;
+  const view = state.view, top = window.scrollY;
   try {
     await refreshVisibleView();
+    if (state.view === view) window.scrollTo({ top, behavior: "instant" });
   } finally {
     button.disabled = false;
   }
 });
-$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); state.searchBaseFilters = mainSearchFilters(); state.refineFilters = refineSearchFilters(); state.searchPage = 0; searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
+$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
 $("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
 $("query").addEventListener("focus", renderRecentSearches);
 $("query").addEventListener("click", renderRecentSearches);
@@ -3005,8 +3418,11 @@ $("search-suggestions").addEventListener("keydown", event => {
   if (options[next]) { event.preventDefault(); options[next].focus(); }
 });
 document.addEventListener("pointerdown", event => { if (!event.target.closest(".search-main")) hideRecentSearches(); });
-$("previous-page").addEventListener("click",()=>{state.searchPage=Math.max(0,state.searchPage-1);runSearch();});
-$("next-page").addEventListener("click",()=>{state.searchPage++;runSearch();});
+registerPager("search-pager", "previous-page", "page-status", "next-page", "results", jumpToCataloguePage(page => {
+  if (!state.searchSnapshot) return;
+  state.searchPage = page;
+  return loadSearchPage(state.searchSnapshot);
+}));
 $("edition-select").addEventListener("change",()=>{state.exactEditionCode=null;state.editionPage=0;hideEditionSuggestions();renderEditionPage();});
 $("edition-query").addEventListener("input",()=>{renderEditionSuggestions();if (state.view === "editions") syncRoute();});
 $("edition-query").addEventListener("keydown", event => {
@@ -3020,14 +3436,17 @@ $("edition-query").addEventListener("keydown", event => {
   }
 });
 document.addEventListener("pointerdown", event => { if (!event.target.closest(".edition-search")) hideEditionSuggestions(); });
-$("edition-prev").addEventListener("click",()=>{state.editionPage=Math.max(0,state.editionPage-1);renderEditionPage();});
-$("edition-next").addEventListener("click",()=>{state.editionPage++;renderEditionPage();});
+registerPager("edition-pager", "edition-prev", "edition-page-status", "edition-next", "edition-cards", jumpToCataloguePage(page => {
+  state.editionPage = page;
+  return renderEditionPage();
+}));
 attachEditionSuggestions("search-edition-query", "search-edition-suggestions", "filter-set", () => { setText($("search-status"), "Édition choisie. Cliquez sur Rechercher."); });
 attachEditionSuggestions("deck-edition-query", "deck-edition-suggestions", "deck-edition", () => {});
 $("deck-query").addEventListener("input", () => { clearTimeout(deckSuggestionTimer); deckSuggestionTimer = setTimeout(() => { if (!state.openDeckId) renderDeckSuggestions(); }, 180); });
 $("deck-submit").addEventListener("click", () => {
   clearTimeout(deckSuggestionTimer); ++state.deckSuggestionRequest;
   hideDeckSuggestions();
+  invalidatePageCache("/api/v2/decks");
   state.deckAppliedFilters = deckResultFilters();
   state.deckExecuted = true;
   state.deckPage = 0;
@@ -3049,7 +3468,7 @@ $("clear-deck-filters").addEventListener("click", () => {
   state.deckExecuted = false; state.deckAppliedFilters = null; state.deckPage = 0; state.deckTotal = 0;
   state.deckListKey = null; state.deckController?.abort(); state.deckController = null; ++state.deckRequest;
   $("deck-list").replaceChildren();
-  $("deck-pager").hidden = true;
+  pageControls.get("deck-pager")(0, 1);
   updateBatchButtons();
   if (state.view === "decks") syncRoute();
 });
@@ -3068,11 +3487,16 @@ $("deck-query").addEventListener("keydown", event => {
 });
 document.addEventListener("pointerdown", event => { if (!event.target.closest(".deck-search")) hideDeckSuggestions(); });
 document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button=>button.addEventListener("click",()=>{toggleMana(button, document.querySelector(".deck-color-filter"));}));
-$("deck-prev").addEventListener("click",()=>{state.deckPage=Math.max(0,state.deckPage-1);renderDeckPage();});
-$("deck-next").addEventListener("click",()=>{state.deckPage++;renderDeckPage();});
+registerPager("deck-pager", "deck-prev", "deck-page-status", "deck-next", "deck-list", jumpToCataloguePage(page => {
+  state.deckPage = page;
+  return renderDeckPage();
+}));
 $("archive-status").addEventListener("change",()=>{archiveResolvedByPage.clear();state.archivePage=0;renderArchivePage();});
-$("archive-prev").addEventListener("click",()=>{archiveResolvedByPage.clear();state.archivePage=Math.max(0,state.archivePage-1);renderArchivePage();});
-$("archive-next").addEventListener("click",()=>{state.archivePage++;renderArchivePage();});
+registerPager("archive-pager", "archive-prev", "archive-page-status", "archive-next", "archive-list", page => {
+  if (page < state.archivePage) archiveResolvedByPage.clear();
+  state.archivePage = page;
+  void renderArchivePage();
+}, false);
 $("archive-ocr-all").addEventListener("click",()=>void runArchiveOcrBatch());
 $("archive-auto-name-all").addEventListener("click",()=>void runArchiveAutoNameBatch());
 $("archive-ocr-stop").addEventListener("click",()=>{if(archiveOcrBatch)archiveOcrBatch.stop=true;if(archiveAutoNameBatch)archiveAutoNameBatch.stop=true;setText($("archive-ocr-batch-status"),"Arrêt demandé. Les lectures déjà lancées se termineront avant l’arrêt.");});
@@ -3129,7 +3553,7 @@ document.addEventListener("keydown", event => {
   const target = event.target;
   if (target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || "") || event.defaultPrevented) return;
   event.preventDefault();
-  void galleryNeighbor(event.key === "ArrowLeft" ? -1 : 1).catch(error => console.error("Impossible de changer de carte.", error));
+  navigateCardGallery(event.key === "ArrowLeft" ? -1 : 1);
 });
 $("image-choice-dialog").querySelector(".comparison-dialog-close").addEventListener("click",() => $("image-choice-dialog").close());
 $("image-choice-dialog").addEventListener("close", () => {
@@ -3188,6 +3612,7 @@ function removableProxyTile(item) {
             if (!window.confirm(`Supprimer définitivement le proxy « ${name} » ? L’image sera supprimée du dossier des proxies et le proxy disparaîtra de l’application.`)) return;
             remove.disabled = true;
             await postJSON("/api/v2/proxies/delete", { provider_card_id: item.provider_card_id, confirmed: true });
+            invalidatePageCache();
             if (state.searchItems.some(card => card.provider_card_id === item.provider_card_id)) {
                 state.searchItems = state.searchItems.filter(card => card.provider_card_id !== item.provider_card_id);
                 state.searchTotal = Math.max(0, state.searchTotal - 1);
@@ -3210,7 +3635,10 @@ function removableProxyTile(item) {
     entry.append(editionTile(item), remove);
     return entry;
 }
-async function renderProxies({ quiet = false } = {}) {
+async function renderProxies({ quiet = false, paginating = false } = {}) {
+    const path = "/api/v2/proxies";
+    if (paginating) cancelPagePrefetch();
+    else invalidatePageCache(path);
     const request = ++proxyState.request;
     const root = $("proxy-content");
     proxyState.loading = true;
@@ -3218,22 +3646,24 @@ async function renderProxies({ quiet = false } = {}) {
     grid.id = "personal-proxy-grid";
     grid.setAttribute("aria-live", "polite");
     const pager = node("div", "pager");
-    const changePage = delta => {
-        proxyState.page += delta;
+    const changePage = page => {
+        proxyState.page = page;
         syncRoute();
-        void renderProxies();
+        void renderProxies({ paginating: true });
     };
-    const prev = personalButton("Précédent", () => changePage(-1));
-    const next = personalButton("Suivant", () => changePage(1));
+    const prev = node("button", "secondary-button", "Précédent");
+    const next = node("button", "secondary-button", "Suivant");
     const pageLabel = node("span", "muted");
     pager.hidden = true;
     pager.append(prev, pageLabel, next);
+    const updatePager = makePager(pager, prev, pageLabel, next, changePage);
     if (!quiet) {
         proxyState.snapshot = null;
         root.replaceChildren(node("p", "muted", "Chargement…"));
     }
     try {
-        const data = await getJSON("/api/v2/proxies", { limit: PROXY_PAGE_SIZE, offset: proxyState.page * PROXY_PAGE_SIZE });
+        const query = { limit: PROXY_PAGE_SIZE, offset: proxyState.page * PROXY_PAGE_SIZE };
+        const data = await fetchCataloguePage(path, query);
         if (request !== proxyState.request) return;
         proxyState.total = data.total;
         const pages = Math.max(1, Math.ceil(data.total / PROXY_PAGE_SIZE));
@@ -3244,7 +3674,11 @@ async function renderProxies({ quiet = false } = {}) {
             return;
         }
         const snapshot = JSON.stringify(data);
-        if (snapshot === proxyState.snapshot) return;
+        if (snapshot === proxyState.snapshot) {
+            prefetchNeighbourPages(path, query, data.total, $("personal-proxy-grid"),
+                () => state.view === "proxy" && request === proxyState.request);
+            return;
+        }
         for (const [title, linked] of [["À référencer", false], ["Référencés", true]]) {
             const items = data.items.filter(item => Boolean(item.proxy_source_id) === linked);
             if (!items.length) continue;
@@ -3255,12 +3689,12 @@ async function renderProxies({ quiet = false } = {}) {
             grid.append(section);
         }
         if (!data.total) grid.append(node("p", "empty-state", "Aucun proxy dans la collection."));
-        pager.hidden = pages <= 1;
-        prev.disabled = proxyState.page === 0;
-        next.disabled = proxyState.page + 1 >= pages;
-        setText(pageLabel, `Page ${proxyState.page + 1} sur ${pages} · ${formatNumber(data.total)} proxies`);
+        updatePager(proxyState.page, pages, `${formatNumber(data.total)} proxies`);
         root.replaceChildren(grid, pager);
+        attachScrollTop(pager, "proxy-title", true);
         proxyState.snapshot = snapshot;
+        prefetchNeighbourPages(path, query, data.total, grid,
+            () => state.view === "proxy" && request === proxyState.request);
     } catch (error) {
         if (request !== proxyState.request || quiet) return;
         showError(grid, error.message);
@@ -3278,15 +3712,27 @@ function refreshProxiesOnReturn() {
 window.addEventListener("focus", refreshProxiesOnReturn);
 document.addEventListener("visibilitychange", refreshProxiesOnReturn);
 
-$("proxy-open-folder").addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    const status = $("proxy-folder-status");
+$("proxy-import").addEventListener("click", () => $("proxy-file").click());
+$("proxy-file").addEventListener("change", async event => {
+    const input = event.currentTarget;
+    const file = input.files[0];
+    input.value = "";
+    if (!file) return;
+    const button = $("proxy-import"), status = $("proxy-folder-status");
     button.disabled = true;
-    status.textContent = "";
+    setText(status, "Importation…");
     try {
-        await postJSON("/api/v2/proxies/open-folder", {});
+        const response = await fetch("/api/v2/proxies/import?" + params({ filename: file.name }), {
+            method: "POST", body: file,
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || result.error);
+        invalidatePageCache();
+        setText(status, result.filename + " importé.");
+        await renderProxies({ quiet: true });
+        void ensureEditions(true);
     } catch (error) {
-        status.textContent = `Impossible d’ouvrir le dossier des proxies. ${error.message}`;
+        setText(status, "Importation impossible. " + error.message);
     } finally {
         button.disabled = false;
     }
@@ -3317,10 +3763,11 @@ function proxyAssociationPanel(card, gallery) {
     const results = node("div", "proxy-association-results");
     const pager = node("div", "pager");
     pager.hidden = true;
-    const prev = personalButton("Précédent", () => void load(page - 1));
-    const next = personalButton("Suivant", () => void load(page + 1));
+    const prev = node("button", "secondary-button", "Précédent");
+    const next = node("button", "secondary-button", "Suivant");
     const pageLabel = node("span", "muted");
     pager.append(prev, pageLabel, next);
+    const updatePager = makePager(pager, prev, pageLabel, next, page => void load(page));
     form.append(nameLabel, editionLabel, search);
     body.append(title, association, form, status, results, pager);
     edition.disabled = true;
@@ -3367,8 +3814,9 @@ function proxyAssociationPanel(card, gallery) {
         report("Enregistrement de l’association…");
         try {
             await postJSON("/api/v2/proxies/associate", { provider_card_id: card.provider_card_id, source_id: item.provider_card_id });
+            invalidatePageCache();
             editionPageKey = null;
-            if (state.searchExecuted && state.searchBaseFilters) void runSearch(false);
+            if (state.searchSnapshot && state.view === "recherche") void loadSearchPage(state.searchSnapshot);
             if (state.view === "editions") void renderEditionPage();
             if (state.view === "proxy") void renderProxies();
             if (panel.isConnected && $("card-dialog").open && gallery.current === card.provider_card_id) {
@@ -3382,6 +3830,8 @@ function proxyAssociationPanel(card, gallery) {
     };
     async function load(requestedPage) {
         controller?.abort();
+        const path = "/api/v2/search";
+        cancelPagePrefetch();
         const current = new AbortController();
         controller = current;
         enlarged.hidden = true;
@@ -3389,7 +3839,8 @@ function proxyAssociationPanel(card, gallery) {
         results.replaceChildren();
         report("Recherche…");
         try {
-            const data = await getJSON("/api/v2/search", { ...filters, official_only: 1, limit: pageSize, offset: requestedPage * pageSize }, { signal: current.signal });
+            const query = { ...filters, official_only: 1, limit: pageSize, offset: requestedPage * pageSize };
+            const data = await fetchCataloguePage(path, query, { signal: current.signal });
             if (!panel.isConnected || controller !== current) return;
             page = requestedPage;
             for (const item of data.items) {
@@ -3410,10 +3861,9 @@ function proxyAssociationPanel(card, gallery) {
             }
             report(data.total ? `${formatNumber(data.total)} résultat(s)` : "Aucune carte trouvée.");
             const pages = Math.ceil(data.total / pageSize);
-            pager.hidden = pages <= 1;
-            prev.disabled = page === 0;
-            next.disabled = page + 1 >= pages;
-            setText(pageLabel, `Page ${page + 1} sur ${pages}`);
+            updatePager(page, pages);
+            prefetchNeighbourPages(path, query, data.total, results,
+                () => panel.isConnected && $("card-dialog").open && controller === current);
         } catch (error) {
             if (controller === current && !current.signal.aborted && panel.isConnected) report(`Recherche impossible : ${error.message}`, true);
         }
@@ -3427,6 +3877,8 @@ function proxyAssociationPanel(card, gallery) {
             query.focus();
             return;
         }
+        cancelPagePrefetch();
+        cataloguePageCaches.delete("proxy-association");
         filters = { q, set };
         void load(0);
     });
@@ -3640,7 +4092,7 @@ function renderPersonalList() {
     let decks = null, groups = [], organizing = false, importing = false;
     let busy = false, draggedDeck = null, latestLoad = 0;
     const create = personalButton("Créer un deck", renderPersonalCreate, true);
-    const actions = node("div", "personal-toolbar");
+    const actions = node("div", "search-header-actions personal-list-actions");
     const filePicker = node("input");
     filePicker.type = "file";
     filePicker.accept = ".txt,.dec,text/plain";
@@ -3655,6 +4107,10 @@ function renderPersonalList() {
         organize.setAttribute("aria-pressed", String(organizing));
         setText(organize, organizing ? "Terminer l’organisation" : "Organiser les sections");
         groupForm.hidden = !organizing;
+        create.disabled = organizing;
+        importText.disabled = organizing || (busy && importing);
+        organize.classList.toggle("primary-button", organizing);
+        organize.classList.toggle("secondary-button", !organizing);
         render();
     });
     organize.setAttribute("aria-pressed", "false");
@@ -3662,7 +4118,7 @@ function renderPersonalList() {
     organize.disabled = true;
     actions.append(create, importText, organize, filePicker);
     const importReport = node("div", "personal-import-report");
-    const groupForm = node("form", "personal-section-form");
+    const groupForm = node("form", "personal-section-form personal-section-organizer-form");
     const groupName = node("input");
     groupName.required = true;
     groupName.maxLength = 200;
@@ -3741,9 +4197,10 @@ function renderPersonalList() {
     }));
     form.append(row, refine, controls);
     const list = node("div", "personal-list-groups");
-    root.replaceChildren(actions, importReport, form, groupForm, list);
+    $("personal-heading-content").querySelector(".deck-heading").append(actions);
+    root.replaceChildren(importReport, form, groupForm, list, scrollTopFooter("personal-title"));
     personalState.refreshList = (manual = false) => {
-        if (list.isConnected && !busy && !importing && (manual || !organizing)) return load(!manual);
+        if (list.isConnected && !busy && !importing && (manual || !organizing)) return load(true);
     };
     personalStatus("");
     const normalize = value => value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("fr").trim();
@@ -3767,8 +4224,8 @@ function renderPersonalList() {
         const ungrouped = [];
         for (const deck of items) (groupsById.get(deck.group_id) || ungrouped).push(deck);
         if (groups.length || organizing) {
+            list.append(renderGroup(null, ungrouped));
             for (const group of groups) list.append(renderGroup(group, groupsById.get(group.id)));
-            if (ungrouped.length || organizing) list.append(renderGroup(null, ungrouped));
         } else if (ungrouped.length) {
             const grid = node("div", "personal-deck-grid");
             grid.append(...ungrouped.map(renderDeck));
@@ -3789,27 +4246,21 @@ function renderPersonalList() {
             }, remove);
         });
         entry.append(tile, remove);
-        if (organizing && groups.length) {
+        if (groups.length) {
             tile.draggable = true;
             tile.addEventListener("dragstart", event => {
                 if (busy) { event.preventDefault(); return; }
                 draggedDeck = deck;
+                tile.classList.add("personal-deck-dragging");
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", deck.id);
             });
-            tile.addEventListener("dragend", () => { draggedDeck = null; });
-            const label = node("label", "personal-deck-group-choice", "Déplacer vers");
-            const select = node("select");
-            select.setAttribute("aria-label", `Section du deck ${deck.name}`);
-            select.append(new Option("Sans section", ""), ...groups.map(group => new Option(group.name, group.id)));
-            select.value = deck.group_id || "";
-            select.addEventListener("change", () => {
-                const next = select.value || null;
-                select.value = deck.group_id || "";
-                moveDeck(deck, next);
+            tile.addEventListener("dragend", () => {
+                tile.classList.remove("personal-deck-dragging");
+                draggedDeck = null;
+                list.querySelectorAll(".personal-list-drop-target").forEach(section =>
+                    section.classList.remove("personal-list-drop-target"));
             });
-            label.append(select);
-            entry.append(label);
         }
         return entry;
     }
@@ -3837,6 +4288,8 @@ function renderPersonalList() {
                 heading.hidden = true;
                 renameForm.hidden = false;
                 field.value = group.name;
+                destination = source;
+                changeDestination(0);
                 field.focus();
                 field.select();
             });
@@ -3845,16 +4298,33 @@ function renderPersonalList() {
                 heading.hidden = false;
                 edit.focus();
             });
+            const source = groups.indexOf(group);
+            let destination = source;
+            const up = personalButton("↑", () => changeDestination(-1));
+            const down = personalButton("↓", () => changeDestination(1));
+            up.setAttribute("aria-label", "Monter la section");
+            down.setAttribute("aria-label", "Descendre la section");
+            const position = node("span", "muted");
+            position.setAttribute("role", "status");
+            function changeDestination(delta) {
+                destination += delta;
+                up.disabled = destination === 0;
+                down.disabled = destination === groups.length - 1;
+                setText(position, `Position ${destination + 1} sur ${groups.length}`);
+            }
+            changeDestination(0);
             const save = node("button", "primary-button", "Valider");
             save.type = "submit";
-            renameForm.append(field, save, cancel);
+            renameForm.append(field, position, up, down, save, cancel);
             renameForm.addEventListener("submit", event => {
                 event.preventDefault();
                 const name = field.value.trim();
                 if (!name) return;
                 void mutate(async () => {
-                    const result = await postJSON("/api/v2/personal-decks/group-rename", { group_id: group.id, name });
-                    group.name = result.group.name;
+                    await postJSON("/api/v2/personal-decks/group-rename", {
+                        group_id: group.id, name, move: destination - source,
+                    });
+                    await load(true);
                 }, save);
             });
             const remove = personalButton("Supprimer", () => {
@@ -3865,14 +4335,15 @@ function renderPersonalList() {
                     for (const deck of decks) if (deck.group_id === group.id) deck.group_id = null;
                 }, remove);
             });
-            heading.append(edit, remove);
+            heading.append(edit);
+            renameForm.append(remove);
             section.append(renameForm);
         }
         const grid = node("div", "personal-deck-grid");
         grid.append(...items.map(renderDeck));
-        if (!items.length) grid.append(node("p", "empty-state", organizing ? "Déposez un deck ici." : "Aucun deck dans cette section."));
+        if (!items.length) grid.append(node("p", "empty-state", groups.length ? "Déposez un deck ici." : "Aucun deck dans cette section."));
         section.append(grid);
-        if (organizing) {
+        if (groups.length) {
             const groupId = group?.id || null;
             section.addEventListener("dragover", event => {
                 if (!draggedDeck || (draggedDeck.group_id || null) === groupId) return;
@@ -3905,7 +4376,7 @@ function renderPersonalList() {
         } catch (error) {
             if (list.isConnected) personalStatus(error.message, true);
         } finally {
-            if (button) button.disabled = false;
+            if (button) button.disabled = button === importText && organizing;
             busy = false;
         }
     }
@@ -3917,7 +4388,7 @@ function renderPersonalList() {
             if (request !== latestLoad || !list.isConnected) return;
             decks = response.items;
             groups = response.groups || [];
-            importText.disabled = false;
+            importText.disabled = organizing || (busy && importing);
             organize.disabled = false;
             render();
         } catch (error) {
@@ -3932,6 +4403,7 @@ function renderPersonalList() {
     void load();
 }
 function renderPersonalCreate() {
+    updatePersonalHeading();
     const root = $("personal-content"), form = node("form", "panel personal-create"), label = node("label", "", "Nom du deck"), name = node("input");
     name.required = true;
     name.maxLength = 200;
@@ -4099,6 +4571,17 @@ function updatePersonalHeading(deck = null, editButton = null) {
     if (editButton) heading.append(editButton);
     $("personal-heading-content").replaceChildren(eyebrow, heading);
 }
+async function returnToPersonalList() {
+    const deck = personalState.deck;
+    if (!await flushPersonal() || personalState.deck !== deck) return false;
+    personalState.deck = null;
+    personalState.sectionOrganization = null;
+    personalState.editing = null;
+    personalStore(PERSONAL_CURRENT_KEY, null);
+    if (state.view === "perso") syncRoute();
+    renderPersonalList();
+    return true;
+}
 function renderPersonalEditor() {
     const deck = personalState.deck, root = $("personal-content"), editing = personalState.editing;
     const sectionOrganization = personalState.sectionOrganization;
@@ -4108,14 +4591,7 @@ function renderPersonalEditor() {
     root.replaceChildren();
     const actions = node("div", "personal-toolbar"), back = personalButton("Retour à la liste", async () => {
         back.disabled = true;
-        if (await flushPersonal()) {
-            personalState.deck = null;
-            personalStore(PERSONAL_CURRENT_KEY, null);
-            syncRoute();
-            renderPersonalList();
-        }
-        else
-            back.disabled = false;
+        if (!await returnToPersonalList()) back.disabled = false;
     }, true);
     function deckExportButton(label, route, pendingMessage, successMessage) {
         const button = personalButton(label, async () => {
@@ -4158,7 +4634,12 @@ function renderPersonalEditor() {
     organize.setAttribute("aria-pressed", String(Boolean(sectionOrganization)));
     organize.setAttribute("aria-expanded", String(Boolean(sectionOrganization)));
     const editActions = node("div", "search-header-actions personal-edit-actions");
-    editActions.append(personalButton("Dupliquer", () => duplicatePersonalDeck(deck)), organize);
+    const duplicate = personalButton("Dupliquer", () => duplicatePersonalDeck(deck));
+    if (sectionOrganization) {
+        for (const button of [...actions.querySelectorAll("button"), duplicate]) button.disabled = true;
+        organize.classList.replace("secondary-button", "primary-button");
+    }
+    editActions.append(duplicate, organize);
     actions.append(editActions);
     root.append(actions);
     if (sectionOrganization) {
@@ -4371,19 +4852,7 @@ function renderPersonalEditor() {
         container.append(cards);
         root.append(container);
     }
-    const footer = node("div", "personal-deck-footer");
-    const top = personalButton("", () => {
-        const title = $("personal-title");
-        title?.setAttribute("tabindex", "-1");
-        title?.focus({ preventScroll: true });
-        window.scrollTo({ top: 0 });
-    });
-    top.classList.add("personal-scroll-top");
-    top.title = "Remonter en haut";
-    top.setAttribute("aria-label", top.title);
-    top.append(cardActionIcon("arrowUp"));
-    footer.append(top);
-    root.append(footer);
+    root.append(scrollTopFooter("personal-title"));
 }
 function duplicatePersonalDeck(deck) {
     const dialog = node("dialog", "personal-picker personal-duplicate");
@@ -4446,7 +4915,7 @@ async function importPersonalDeck(id, button) {
     }
 }
 async function choosePersonalDeck(card) {
-    const dialog = node("dialog", "personal-picker"), heading = node("h2", "", "Ajouter à un deck personnel"), status = node("p", "muted", "Chargement…"), list = node("div", "personal-picker-list");
+    const dialog = node("dialog", "personal-picker personal-add-picker"), heading = node("h2", "", "Ajouter à un deck personnel"), status = node("p", "muted", "Chargement…"), list = node("div", "personal-picker-list");
     status.setAttribute("role", "status");
     const form = node("form", "personal-picker-form");
     const nameLabel = node("label", "", "Nom du deck");
@@ -4467,8 +4936,9 @@ async function choosePersonalDeck(card) {
     create.disabled = true;
     const validate = node("button", "primary-button", "Valider");
     validate.type = "submit";
+    const cancel = personalButton("Annuler", () => dialog.close());
     const footer = node("div", "personal-picker-footer");
-    footer.append(create, validate);
+    footer.append(create, validate, cancel);
     form.append(nameLabel, footer);
     const body = node("div", "personal-picker-body");
     body.append(status, list);
@@ -4478,13 +4948,26 @@ async function choosePersonalDeck(card) {
     dialog.addEventListener("close", () => dialog.remove(), { once: true });
     dialog.showModal();
     let busy = false;
+    function isBackdrop(event) {
+        if (event.target !== dialog) return false;
+        const bounds = dialog.getBoundingClientRect();
+        return event.clientX < bounds.left || event.clientX >= bounds.right ||
+            event.clientY < bounds.top || event.clientY >= bounds.bottom;
+    }
+    let pointerStartedOutside = false;
+    dialog.addEventListener("pointerdown", event => { pointerStartedOutside = isBackdrop(event); });
+    dialog.addEventListener("click", event => {
+        if (pointerStartedOutside && isBackdrop(event) && !busy) form.requestSubmit(validate);
+        pointerStartedOutside = false;
+    });
+    dialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); });
     function report(message, error = false) {
         status.textContent = message;
         status.className = error ? "error-state" : "muted";
     }
     function setBusy(value) {
         busy = value;
-        create.disabled = validate.disabled = value;
+        create.disabled = validate.disabled = cancel.disabled = value;
         name.disabled = value || nameLabel.hidden;
         for (const button of list.querySelectorAll("button")) button.disabled = value;
     }

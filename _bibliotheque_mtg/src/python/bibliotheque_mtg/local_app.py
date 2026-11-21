@@ -62,6 +62,7 @@ PERSONAL_DECK_DB = OPS_ROOT / "state" / "personal-decks.sqlite"
 PROXIES = Proxies(OPS_ROOT.parent / "proxy", OPS_ROOT / "state")
 PROXY_ASSOCIATE = "/api/v2/proxies/associate"
 PROXY_OPEN_FOLDER = "/api/v2/proxies/open-folder"
+PROXY_IMPORT = "/api/v2/proxies/import"
 PROXY_DELETE = "/api/v2/proxies/delete"
 PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                         ("create", "save", "add", "import", "export", "delete", "duplicate",
@@ -69,7 +70,7 @@ PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                          "group-delete", "group-move")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 38
+APP_API_REVISION = 41
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -1544,7 +1545,10 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
         oracle, printing = card["oracle_id"], card["printing_id"]
         rows = conn.execute("""SELECT p.printing_id,e.code,e.name,e.released_at,p.collector_number
             FROM printings p JOIN editions e USING(set_id)
-            WHERE e.eligibility='eligible' AND (p.oracle_id=? OR p.printing_id=?)""", (oracle, printing)).fetchall()
+            WHERE e.eligibility='eligible' AND (p.oracle_id=? OR p.printing_id=?)
+            AND EXISTS (SELECT 1 FROM source_records sr WHERE sr.printing_id=p.printing_id)
+            ORDER BY p.printing_id<>?, CAST(p.collector_number AS INTEGER),p.collector_number,p.printing_id
+            """, (oracle, printing, printing)).fetchall()
         printings = {row["printing_id"] for row in rows} | {printing}
         proxy_printings = PROXIES.printing_ids(catalog_db, oracle)
         if proxy:
@@ -1561,14 +1565,16 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
             editions = {}
             for row in selected:
                 code = row["code"]
-                editions.setdefault(code, {"code": code, "name": row["name"], "name_fr": _SET_NAMES_FR.get(code.upper()), "released_at": row["released_at"]})
+                editions.setdefault(code, {"code": code, "name": row["name"], "name_fr": _SET_NAMES_FR.get(code.upper()), "released_at": row["released_at"], "printing_id": row["printing_id"]})
             usage["editions"] = sorted(editions.values(), key=lambda x: (x["released_at"] or "", x["code"]), reverse=True)
         icons = _edition_icon_urls({row["code"].lower() for row in rows}, OPS_ROOT / "catalogue.sqlite")
         for usage in (exact, global_usage):
             for edition in usage["editions"]:
                 edition["edition_icon_url"] = icons.get(edition["code"].lower())
         if proxy_printings:
-            proxy_edition = {"code": "proxy", "name": "Proxy", "name_fr": "Proxy", "released_at": None}
+            proxy_target = proxy[0]["printing_id"] if proxy else min(proxy_printings)
+            proxy_edition = {"code": "proxy", "name": "Proxy", "name_fr": "Proxy",
+                             "released_at": None, "printing_id": proxy_target}
             global_usage["editions"].insert(0, proxy_edition)
         if proxy:
             exact["editions"] = [proxy_edition]
@@ -1696,6 +1702,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 with _IMAGE_TASKS_LOCK:
                     items = []
                     for item in _IMAGE_TASKS.values():
+                        if item["kind"] == "ai_generation" and item["status"] == "cancelled":
+                            continue
                         summary = {key: value for key, value in item.items() if key != "result"}
                         if isinstance(item.get("result"), dict):
                             summary["candidate_id"] = item["result"].get("id")
@@ -1951,6 +1959,14 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     self._json({"error": "proxy_not_found"}, 404)
                 else:
                     self._send(200, data, content_type)
+            elif route == "/api/v2/search" and params.get("snapshot") == "1":
+                self._json(PROXIES.start_search(self.db, params, _enrich_result))
+            elif route == "/api/v2/search/page":
+                result = PROXIES.search_page(self.db, params, _enrich_result)
+                if result is None:
+                    self._json({"error": "search_expired", "detail": "Cette recherche a expiré. Cliquez sur Rechercher."}, 410)
+                else:
+                    self._json(result)
             elif route in {"/api/v2/proxies", "/api/v2/editions", "/api/v2/search", "/api/v2/card", "/api/v2/edition"}:
                 if route != "/api/v2/card" or str(params.get("id", "")).startswith("proxy-"):
                     result = PROXIES.dispatch(self.db, route, params, _enrich_result)
@@ -2021,7 +2037,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _LIST_TASK, _BATCH_TASK
         route = urllib.parse.urlsplit(self.path).path
-        if route not in PERSONAL_POST_ROUTES and route not in {PROXY_ASSOCIATE, PROXY_OPEN_FOLDER, PROXY_DELETE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
+        if route not in PERSONAL_POST_ROUTES and route not in {PROXY_ASSOCIATE, PROXY_OPEN_FOLDER, PROXY_IMPORT, PROXY_DELETE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
             self._json({"error": "route_not_found"}, 404)
             return
         expected_origin = f"http://127.0.0.1:{self.server.server_port}"
@@ -2030,11 +2046,17 @@ class LibraryHandler(BaseHTTPRequestHandler):
         if origin and origin not in {expected_origin, local_origin}:
             self._json({"error": "origin_rejected"}, 403)
             return
-        if route in {"/api/v2/app/shutdown", PROXY_OPEN_FOLDER, PROXY_DELETE} and origin not in {expected_origin, local_origin}:
+        if route in {"/api/v2/app/shutdown", PROXY_OPEN_FOLDER, PROXY_IMPORT, PROXY_DELETE} and origin not in {expected_origin, local_origin}:
             self._json({"error": "origin_required"}, 403)
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if route == PROXY_IMPORT:
+                if not 0 < length <= 20 * 1024 * 1024:
+                    raise ValueError("L’image proxy doit peser au plus 20 Mio.")
+                filename = _params(urllib.parse.urlsplit(self.path).query).get("filename", "")
+                self._json(PROXIES.import_image(filename, self.rfile.read(length)), 201)
+                return
             if route == "/api/v2/image/import":
                 params = _params(urllib.parse.urlsplit(self.path).query)
                 provider_id = params.get("provider_card_id", "")
@@ -2096,7 +2118,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     return
                 if action == "group-rename":
                     self._json({"group": personal_decks.rename_deck_group(
-                        PERSONAL_DECK_DB, payload.get("group_id"), payload.get("name"))})
+                        PERSONAL_DECK_DB, payload.get("group_id"), payload.get("name"), payload.get("move", 0))})
                     return
                 if action == "group-delete":
                     self._json({"group": personal_decks.delete_deck_group(PERSONAL_DECK_DB, payload.get("group_id"))})
@@ -2190,6 +2212,9 @@ class LibraryHandler(BaseHTTPRequestHandler):
                         cancel_event.set()
                         task["status"] = "cancelling"
                         self._json({"task_id": task_id, "status": "cancelling"}, 202)
+                    elif task["kind"] == "ai_generation" and task["status"] == "error":
+                        task.update(status="cancelled", detail="")
+                        self._json({"task_id": task_id, "status": "cancelled"})
                     else:
                         self._json({"task_id": task_id, "status": task["status"], "cancel_requested": False})
                 return

@@ -66,6 +66,8 @@ def _database(path):
                 group_id TEXT NOT NULL REFERENCES personal_deck_groups(id) ON DELETE CASCADE);
         """)
         conn.execute("BEGIN IMMEDIATE")
+        if not _has_group_position(conn):
+            conn.execute("ALTER TABLE personal_deck_groups ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
         yield conn
         conn.commit()
         if conn.total_changes:
@@ -218,14 +220,19 @@ def _has_deck_groups(conn):
     return row is not None
 
 
+def _has_group_position(conn):
+    return any(row[1] == "position" for row in conn.execute("PRAGMA table_info(personal_deck_groups)"))
+
+
 def list_deck_groups(path):
     if not Path(path).is_file():
         return []
     with _read_connection(path) as conn:
         if not _has_deck_groups(conn):
             return []
+        order = "position, rowid" if _has_group_position(conn) else "rowid"
         return [{"id": group_id, "name": name} for group_id, name in conn.execute(
-            "SELECT id, name FROM personal_deck_groups ORDER BY rowid")]
+            f"SELECT id, name FROM personal_deck_groups ORDER BY {order}")]
 
 
 def _read_deck_group(conn, group_id):
@@ -240,16 +247,26 @@ def _read_deck_group(conn, group_id):
 def create_deck_group(path, name):
     group = {"id": _id(), "name": _text(name, "Nom de section")}
     with _database(path) as conn:
-        conn.execute("INSERT INTO personal_deck_groups (id, name) VALUES (?, ?)",
+        conn.execute("""INSERT INTO personal_deck_groups (id, name, position)
+            SELECT ?, ?, COALESCE(MAX(position), -1) + 1 FROM personal_deck_groups""",
                      (group["id"], group["name"]))
     return group
 
 
-def rename_deck_group(path, group_id, name):
+def rename_deck_group(path, group_id, name, move=0):
     name = _text(name, "Nom de section")
     with _database(path) as conn:
         group = _read_deck_group(conn, group_id)
         conn.execute("UPDATE personal_deck_groups SET name=? WHERE id=?", (name, group_id))
+        if type(move) is not int:
+            raise ValueError("Déplacement de section invalide.")
+        if move:
+            ids = [row[0] for row in conn.execute(
+                "SELECT id FROM personal_deck_groups ORDER BY position, rowid")]
+            source = ids.index(group_id)
+            target = min(len(ids) - 1, max(0, source + move))
+            ids.insert(target, ids.pop(source))
+            conn.executemany("UPDATE personal_deck_groups SET position=? WHERE id=?", enumerate(ids))
         group["name"] = name
     return group
 

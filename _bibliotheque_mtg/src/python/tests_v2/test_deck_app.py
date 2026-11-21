@@ -38,6 +38,7 @@ def test_card_usage_exposes_edition_icon_and_deck_colors(monkeypatch, tmp_path):
     monkeypatch.setattr(local_app, "PERSONAL_DECK_DB", personal_db)
     monkeypatch.setattr(local_app, "_edition_icon_urls", lambda codes, db: {"s1": "https://svgs.scryfall.io/sets/s1.svg"})
     usage = local_app._card_usage(catalogue, "en-1")
+    assert usage["exact"]["editions"][0]["printing_id"] == printing
     assert usage["exact"]["editions"][0]["edition_icon_url"] == "https://svgs.scryfall.io/sets/s1.svg"
     assert usage["exact"]["decks"][0]["colors"] == ["W", "U"]
     assert usage["exact"]["personal_decks"][0]["colors"] == ["B"]

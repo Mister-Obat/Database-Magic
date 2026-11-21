@@ -4,7 +4,9 @@
 
 L’onglet **Proxy** ouvre une vue paginée indépendante, entre **Deck perso** et
 **Archives**. Les anciens liens `#perso?proxies=1` restent utilisables.
-**Ouvrir le dossier des proxies** appelle `POST /api/v2/proxies/open-folder`
+**Importer** sélectionne une image locale et envoie son contenu à
+`POST /api/v2/proxies/import`. Le serveur valide le format et conserve les
+fichiers déjà présents. L'ancienne commande d'ouverture du dossier appelle `POST /api/v2/proxies/open-folder`
 pour ouvrir le dossier local configuré. Le serveur n’accepte aucun chemin libre.
 La grille relit le dossier à l’entrée dans la vue et au retour du focus dans
 l’application. Les écritures d’images dans une version publiée ne reconstruisent
@@ -12,8 +14,12 @@ pas l’index proxy. Le verrou de cet index est libéré avant la consultation d
 catalogue officiel. Les cartes à référencer précèdent les cartes référencées. La visionneuse
 affiche l’image locale et propose un choix d’impression réelle par nom et
 édition. La sélection associe les caractéristiques de cette impression à la
-carte de l’édition **Proxy**. Les proxies sont également interrogeables dans
-Recherche et l’édition Proxy arrive en tête d’Éditions tant que le dossier
+carte de l’édition **Proxy**. Dans Recherche, le tri Édition place les proxies
+en tête dans les deux sens. Les autres critères classent ensemble cartes
+officielles et proxies avant pagination, selon les mêmes règles et les valeurs
+de l’impression associée. Pour le tri par ajout, la création du fichier
+proxy fait foi, ou sa modification avec le filtre Avec image.
+L’édition Proxy arrive en tête d’Éditions tant que le dossier
 contient des images. La croix d’une vignette demande une confirmation qui
 mentionne la suppression de l’image du dossier. `POST /api/v2/proxies/delete`
 exige l’origine locale, un identifiant de proxy et une confirmation explicite.
@@ -27,12 +33,18 @@ remplacer l’image par un fichier local, exporter l’image sur le Bureau,
 ajouter le proxy à un deck personnel et consulter ses occurrences.
 Le sélecteur d’ajout permet de créer un deck sur place par son nom. Chaque clic
 sur un deck ajoute un exemplaire. La liste reste ouverte jusqu’à validation ou
-fermeture par l’utilisateur.
+fermeture par l’utilisateur. Un clic en dehors du sélecteur déclenche la même
+action que Valider. Annuler ferme le sélecteur et abandonne la saisie en cours.
 Dans un deck personnel, la grille reste en présentation de consultation avec
 quantités, retrait confirmé et déplacement par glisser-déposer. Le nom de
 chaque section se modifie sur place, avec validation, annulation ou suppression.
 Le formulaire du nom et des couleurs garde les changements en brouillon
 jusqu’à validation. L’annulation conserve le nom et les couleurs existants.
+Les sections de la liste Deck perso sont ordonnées et les nouvelles sections
+s'ajoutent après les autres. Sans section reste en tête. Le glisser-déposer
+entre sections reste actif en consultation comme en organisation. Dans le
+mode d’organisation, l’ordre et le nouveau nom d’une section sont appliqués
+ensemble à la validation.
 Le bouton Modifier se trouve dans le titre du deck. L’action Dupliquer ouvre
 un champ prérempli et crée un deck indépendant qui conserve l’ordre, les sections,
 les couleurs et les quantités de l’original.
@@ -107,7 +119,27 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   fiche annule de même le chargement précédent. Les réponses obsolètes restent
   ignorées. La fermeture de la connexion n’interrompt pas nécessairement un
   calcul SQLite déjà démarré côté serveur.
-- Aux limites d'une page, une flèche dans la visionneuse peut charger une autre
+- La pagination de Recherche, Éditions et Decks remonte à l’en-tête et
+  affiche un chargement dans la grille. Recherche réutilise l’ordre des
+  impressions lorsque le classement et les critères le permettent.
+  Le rafraîchissement conserve la position de lecture.
+  Recherche, Éditions et Decks préconstruits placent aussi les commandes avant
+  la grille. Entrée dans le numéro de page mène directement à la page saisie.
+  Les listes conservent la page courante et les pages adjacentes par filtre.
+  Le préchargement attend le rendu et les images visibles de la page consultée.
+  Recherche ouvre une liste ordonnée d’identifiants via `/api/v2/search?snapshot=1`.
+  La pagination, le préchargement et les flèches de la visionneuse lisent ensuite
+  `/api/v2/search/page` avec le jeton de cette recherche. Les pages chargent les
+  données et images actuelles des impressions sélectionnées, sans réappliquer
+  les filtres ni le tri. Le serveur conserve jusqu’à douze recherches récentes
+  en mémoire et signale explicitement un jeton expiré.
+  Dans Archives, une résolution locale invalide le cache avant recalcul des offsets.
+- Les liens Éditions des usages reçoivent l'identifiant de l'impression par
+  édition. `/api/v2/edition?focus=...` retourne la page qui contient cette
+  impression avec son offset normal. La vue centre la vignette puis l'entoure
+  brièvement en mauve.
+- Les boutons fléchés autour du nom de l'édition partagent la navigation au
+  clavier de la visionneuse. Aux limites d'une page, une flèche peut charger une autre
   page avant d'ouvrir la carte voisine. Le résultat est ignoré si la fiche est
   fermée, remplacée ou si une autre navigation a été demandée. Dans Éditions,
   l'actualisation des images attend la fin d'un chargement de page en cours.
@@ -678,7 +710,7 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
    dans l'interface ; le mana se filtre par bornes dans la section secondaire.
    Les critères secondaires comprennent le filtre d'image, les bornes de mana,
    force et endurance. Le tri choisit séparément le
-   critère (édition, ajout, mana, force ou endurance) et le sens ascendant ou
+   critère (édition, nom affiché, ajout, mana, force ou endurance) et le sens ascendant ou
    descendant. Les bornes s'appliquent
    avant pagination ; les forces/endurance non numériques sont exclues quand
    une borne correspondante est demandée.
@@ -832,6 +864,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   d’actions et donne accès au renommage et à la suppression des sections.
   En consultation, ces commandes sont masquées. Dans la liste des decks,
   le séparateur droit n’apparaît qu’entre deux sections.
+- Pendant l’organisation, Créer et Importer sont désactivés dans la liste.
+  Dans une composition, Retour à la liste, les deux exports et Dupliquer sont
+  désactivés. Les boutons concernés sont désaturés, y compris au survol.
+  Les vignettes de decks déplaçables affichent un curseur de prise.
 - Réutiliser la présentation des filtres Recherche, avec Incolore exclusif,
   correspondance normale ou exacte et tri. La création est hors des filtres.
 - En édition, le glisser-déposer fait défiler la page près des bords.
@@ -840,8 +876,9 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - Retirer une carte du deck demande une confirmation avant de modifier la liste.
 - La suppression explicite retire le deck de la liste et conserve ses révisions.
   Elle vérifie la révision courante et utilise la même protection POST locale.
-- Après un ajout réussi, fermer le sélecteur et afficher un message bref sur
-  la fiche. Afficher les erreurs dans le sélecteur, avec Fermer centré en bas.
+- Après un ajout réussi, conserver le sélecteur ouvert pour permettre les
+  ajouts successifs. Afficher la confirmation et les erreurs dans le sélecteur,
+  avec Valider et Annuler en bas.
 
 ### Consultation des utilisations d’une carte
 

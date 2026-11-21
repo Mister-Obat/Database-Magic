@@ -19,6 +19,7 @@ _SEARCH_CANDIDATE_CACHE = OrderedDict()
 _SEARCH_CANDIDATE_LOCK = threading.Lock()
 _SEARCH_CANDIDATE_CACHE_SIZE = 2
 _SEARCH_CANDIDATE_MAX_ROWS = 150000
+_SEARCH_ORDER_CACHE = OrderedDict()
 _FRENCH_TOKEN_ALIASES = {
     "indice": "clue", "indices": "clue",
     "tresor": "treasure", "tresors": "treasure",
@@ -227,20 +228,36 @@ def catalogue_text_key(db):
     return str(path), tuple(fingerprints)
 
 
-def search_cards(db, term="", *, set_code=None, language=None, rarity=None, color=None, color_mode="contains", mana_value=None, type_text=None, mana_min=None, mana_max=None, power_min=None, power_max=None, toughness_min=None, toughness_max=None, card_type=None, image_filter="all", result_sort="date", oracle_id=None, printing_id=None, unique=False, limit=50, offset=0):
-    limit,offset=_page(limit,offset,max_size=300)
+def search_cards(db, term="", *, set_code=None, language=None, rarity=None, color=None, color_mode="contains", mana_value=None, type_text=None, mana_min=None, mana_max=None, power_min=None, power_max=None, toughness_min=None, toughness_max=None, card_type=None, image_filter="all", result_sort="date", oracle_id=None, printing_id=None, unique=False, limit=50, offset=0, ranks_only=False, proxy_date=None):
+    if ranks_only and limit is None:
+        limit, offset = -1, 0
+    else:
+        limit, offset = _page(limit, offset, max_size=max(300, int(limit)) if ranks_only else 300)
     color_mode = str(color_mode).casefold()
     if color_mode not in {"contains", "exact"}:
         raise ValueError("Mode couleur attendu : contains ou exact")
     sort_fields = {"mana": "sr.mana_value", "power": "json_extract(sr.raw_json,'$.power')", "toughness": "json_extract(sr.raw_json,'$.toughness')"}
     if image_filter not in {"all", "with", "without"}:
         raise ValueError("Filtre d'image invalide")
-    if result_sort not in {"date", "date_asc", "added_asc", "added_desc"} | {f"{field}_{direction}" for field in sort_fields for direction in ("asc", "desc")}:
+    if result_sort not in {"date", "date_asc", "added_asc", "added_desc", "name_asc", "name_desc"} | {f"{field}_{direction}" for field in sort_fields for direction in ("asc", "desc")}:
         raise ValueError("Classement invalide")
     cache_key = (*catalogue_text_key(db), str(term), str(set_code or ""), str(language or ""),
         str(rarity or ""), str(color or ""), color_mode, str(mana_value), str(type_text or ""),
         str(mana_min), str(mana_max), str(power_min), str(power_max), str(toughness_min),
         str(toughness_max), str(card_type or ""), str(oracle_id or ""), str(printing_id or ""))
+    grouped = str(unique).casefold() in {"1", "true", "yes"}
+    order_key = (cache_key, grouped, result_sort)
+    ordered_ids = None
+    if image_filter == "all" and not ranks_only:
+        with _SEARCH_CANDIDATE_LOCK:
+            ordered_ids = _SEARCH_ORDER_CACHE.get(order_key)
+            if ordered_ids is not None:
+                _SEARCH_ORDER_CACHE.move_to_end(order_key)
+    if ordered_ids is not None:
+        with _connection(db) as c:
+            items = _search_page_records(c, ordered_ids[offset:offset + limit], display_language=str(language).casefold() if language else None)
+        return {"contract_version": CONTRACT_VERSION, "total": len(ordered_ids), "limit": limit,
+                "offset": offset, "items": items}
     match=None if oracle_id or printing_id else _match_term(term, db)
     filters=[]; args=[]
     if oracle_id:
@@ -406,7 +423,7 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
                 WHERE ims.printing_id=chosen_search.printing_id AND ims.status='ready')"""
             exclude = "NOT " + ready if image_filter == "with" else ready
             c.execute("DELETE FROM chosen_search WHERE " + exclude)
-        if str(unique).casefold() in {"1", "true", "yes"}:
+        if grouped:
             c.execute("""CREATE TEMP TABLE unique_search AS
                 SELECT printing_id FROM (
                   SELECT p.printing_id, ROW_NUMBER() OVER (
@@ -422,12 +439,17 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
             c.execute("DELETE FROM chosen_search WHERE printing_id NOT IN (SELECT printing_id FROM unique_search)")
             c.execute("DROP TABLE unique_search")
         count=c.execute("SELECT COUNT(*) FROM chosen_search").fetchone()[0]
-        order = "e.released_at DESC,e.code,CAST(p.collector_number AS INTEGER),p.collector_number,p.printing_id"
+        default_keys = ["e.released_at", "e.code", "CAST(p.collector_number AS INTEGER)",
+                        "p.collector_number", "p.printing_id"]
+        keys = list(zip(default_keys, ["DESC", "ASC", "ASC", "ASC", "ASC"]))
         if result_sort == "date_asc":
-            order = "e.released_at ASC,e.code,CAST(p.collector_number AS INTEGER),p.collector_number,p.printing_id"
+            keys[0] = ("e.released_at", "ASC")
         elif result_sort in {"added_asc", "added_desc"}:
             direction = "ASC" if result_sort == "added_asc" else "DESC"
-            if image_filter == "with":
+            if proxy_date is not None:
+                c.create_function("proxy_date", 1, proxy_date)
+                date_value = "proxy_date(p.printing_id)"
+            elif image_filter == "with":
                 asset_root = Path(db).resolve().parent
                 def image_mtime(relative):
                     path = (asset_root / relative).resolve()
@@ -457,39 +479,77 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
                 date_value = "NULL"
             # Historical cards can share one migration timestamp; reverse their
             # stable tie-breakers too so ascending and descending remain distinct.
-            order = (f"({date_value}) IS NULL,({date_value}) {direction},"
-                     f"e.released_at {direction},e.code {direction},"
-                     f"CAST(p.collector_number AS INTEGER) {direction},"
-                     f"p.collector_number {direction},p.printing_id {direction}")
+            keys = [(f"({date_value}) IS NULL", "ASC"), (date_value, direction)]
+            keys.extend((field, direction) for field in default_keys)
+        elif result_sort in {"name_asc", "name_desc"}:
+            c.create_function("fold_search_name", 1, _fold)
+            c.create_function("sort_display_language", 0, lambda: display_language)
+            name = """(SELECT fold_search_name(COALESCE(
+                         CASE WHEN sr.lang != 'ph' THEN NULLIF(sr.printed_name, '') END, sr.name))
+                       FROM source_records sr WHERE sr.printing_id=p.printing_id
+                         AND (sort_display_language() IS NULL OR sr.lang=sort_display_language())
+                       ORDER BY CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 WHEN 'ja' THEN 2 ELSE 3 END,
+                                sr.provider_card_id LIMIT 1)"""
+            keys.insert(0, (name, "ASC" if result_sort == "name_asc" else "DESC"))
         elif result_sort != "date":
             field_name, direction = result_sort.rsplit("_", 1)
             field = sort_fields[field_name]
             value = f"(SELECT {field} FROM source_records sr WHERE sr.printing_id=p.printing_id ORDER BY CASE sr.lang WHEN 'fr' THEN 0 ELSE 1 END LIMIT 1)"
             numeric = f"CASE WHEN {value} IS NULL OR {value} GLOB '*[^0-9.-]*' THEN NULL ELSE CAST({value} AS REAL) END"
-            order = f"({numeric}) IS NULL,({numeric}) {direction.upper()}," + order
-        page=""" SELECT chosen_search.printing_id FROM chosen_search
-            JOIN printings p USING(printing_id) JOIN editions e USING(set_id)
-            ORDER BY """ + order + " LIMIT ? OFFSET ?"
-        printing_ids=[row[0] for row in c.execute(page,[limit,offset])]
-        rows=[]
-        if printing_ids:
-            values = ",".join("(?,?)" for _ in printing_ids)
-            page_args = [value for ordinal, printing_id in enumerate(printing_ids) for value in (printing_id, ordinal)]
-            row_query = f"""WITH page(printing_id,ordinal) AS (VALUES {values}), ranked AS (
-                SELECT page.ordinal,sr.provider_card_id,p.printing_id,e.code AS set_code,e.name AS edition,
-                    sr.lang,sr.name,sr.printed_name,sr.type_line,sr.printed_type_line,
-                    sr.mana_cost,sr.mana_value,sr.rarity,p.collector_number,p.layout,
-                    p.identity_status,sr.oracle_text,sr.printed_text,
-                    ROW_NUMBER() OVER (PARTITION BY p.printing_id ORDER BY
-                      CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 WHEN 'ja' THEN 2 ELSE 3 END,
-                      sr.provider_card_id) AS language_rank
-                FROM page JOIN printings p USING(printing_id) JOIN editions e USING(set_id)
-                JOIN source_records sr USING(printing_id) WHERE (? IS NULL OR sr.lang=?)
-            ) SELECT provider_card_id,printing_id,set_code,edition,lang,name,printed_name,type_line,
-                printed_type_line,mana_cost,mana_value,rarity,collector_number,layout,identity_status,
-                oracle_text,printed_text FROM ranked WHERE language_rank=1 ORDER BY ordinal"""
-            rows = c.execute(row_query, page_args + [display_language, display_language]).fetchall()
-    return {"contract_version":CONTRACT_VERSION,"total":count,"limit":limit,"offset":offset,"items":[_readable_record(r) for r in rows]}
+            keys[:0] = [(f"({numeric}) IS NULL", "ASC"), (numeric, direction.upper())]
+        from_page = """FROM chosen_search
+            JOIN printings p USING(printing_id) JOIN editions e USING(set_id)"""
+        if ranks_only:
+            values = ",".join(field for field, _ in keys)
+            order = ",".join(f"{index} {direction}" for index, (_, direction) in enumerate(keys, 1))
+            ranks = [tuple(row) for row in c.execute(
+                f"SELECT {values} {from_page} ORDER BY {order} LIMIT ? OFFSET ?", (limit, offset))]
+            return {"total": count, "ranks": ranks, "directions": [direction for _, direction in keys],
+                    "display_language": display_language}
+        order = ",".join(f"{field} {direction}" for field, direction in keys)
+        page = f"SELECT chosen_search.printing_id {from_page} ORDER BY {order}"
+        if image_filter == "all" and count <= _SEARCH_CANDIDATE_MAX_ROWS:
+            ordered_ids = tuple(row[0] for row in c.execute(page))
+            with _SEARCH_CANDIDATE_LOCK:
+                _SEARCH_ORDER_CACHE[order_key] = ordered_ids
+                _SEARCH_ORDER_CACHE.move_to_end(order_key)
+                while len(_SEARCH_ORDER_CACHE) > _SEARCH_CANDIDATE_CACHE_SIZE:
+                    _SEARCH_ORDER_CACHE.popitem(last=False)
+            printing_ids = ordered_ids[offset:offset + limit]
+        else:
+            printing_ids = [row[0] for row in c.execute(page + " LIMIT ? OFFSET ?", (limit, offset))]
+        items = _search_page_records(c, printing_ids, display_language=display_language)
+    return {"contract_version": CONTRACT_VERSION, "total": count, "limit": limit, "offset": offset, "items": items}
+
+
+def _search_page_records(c, printing_ids, *, display_language):
+    if printing_ids:
+        values = ",".join("(?,?)" for _ in printing_ids)
+        page_args = [value for ordinal, printing_id in enumerate(printing_ids) for value in (printing_id, ordinal)]
+        row_query = f"""WITH page(printing_id,ordinal) AS (VALUES {values}), ranked AS (
+            SELECT page.ordinal,sr.provider_card_id,p.printing_id,e.code AS set_code,e.name AS edition,
+                sr.lang,sr.name,sr.printed_name,sr.type_line,sr.printed_type_line,
+                sr.mana_cost,sr.mana_value,sr.rarity,p.collector_number,p.layout,
+                p.identity_status,sr.oracle_text,sr.printed_text,
+                ROW_NUMBER() OVER (PARTITION BY p.printing_id ORDER BY
+                  CASE sr.lang WHEN 'fr' THEN 0 WHEN 'en' THEN 1 WHEN 'ja' THEN 2 ELSE 3 END,
+                  sr.provider_card_id) AS language_rank
+            FROM page JOIN printings p USING(printing_id) JOIN editions e USING(set_id)
+            JOIN source_records sr USING(printing_id) WHERE (? IS NULL OR sr.lang=?)
+        ) SELECT provider_card_id,printing_id,set_code,edition,lang,name,printed_name,type_line,
+            printed_type_line,mana_cost,mana_value,rarity,collector_number,layout,identity_status,
+            oracle_text,printed_text FROM ranked WHERE language_rank=1 ORDER BY ordinal"""
+        rows = c.execute(row_query, page_args + [display_language, display_language]).fetchall()
+        return [_readable_record(row) for row in rows]
+    return []
+
+
+def read_search_rank_page(db, ranks, *, display_language):
+    printing_ids = [rank[-1] for rank in ranks]
+    with _connection(db) as c:
+        return [item for start in range(0, len(printing_ids), 300)
+                for item in _search_page_records(c, printing_ids[start:start + 300],
+                                                 display_language=display_language)]
 
 
 def card_detail(db, provider_card_id):
@@ -509,7 +569,7 @@ def card_detail(db, provider_card_id):
     return {"contract_version":CONTRACT_VERSION,"found":True,"card":result}
 
 
-def edition_cards(db, set_code, *, limit=50, offset=0, proxy_groups=False):
+def edition_cards(db, set_code, *, limit=50, offset=0, proxy_groups=False, focus=None):
     limit, offset = _page(limit, offset, max_size=300)
     codes = _set_codes(set_code)
     if not codes:
@@ -526,6 +586,17 @@ def edition_cards(db, set_code, *, limit=50, offset=0, proxy_groups=False):
     order += "CAST(collector_number AS INTEGER),collector_number,printing_id"
     with _connection(db) as c:
         total = c.execute("SELECT COUNT(*) " + eligible, codes).fetchone()[0]
+        if focus:
+            row = c.execute(
+                f"""WITH ranked AS (
+                    SELECT p.printing_id, ROW_NUMBER() OVER (ORDER BY {order}) AS position
+                    FROM (SELECT p.printing_id, p.collector_number{association} {eligible}) p
+                )
+                SELECT position FROM ranked WHERE printing_id=?""",
+                codes + [focus],
+            ).fetchone()
+            if row:
+                offset = ((row[0] - 1) // limit) * limit
         rows = c.execute(
             f"""WITH page AS (
                 SELECT p.printing_id,p.collector_number,p.layout,p.identity_status,

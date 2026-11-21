@@ -6,6 +6,8 @@ from pathlib import Path
 from contextlib import closing
 from unittest.mock import patch
 
+from bibliotheque_mtg.proxies import Proxies
+from bibliotheque_mtg.v2 import api
 from bibliotheque_mtg.v2.catalogue import migrate
 from bibliotheque_mtg.v2.query import _french_type_aliases, _match_term, card_detail, edition_cards, list_editions, search_cards
 from .test_catalogue_v2 import source_database
@@ -40,6 +42,56 @@ class QueryV2Tests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_search_merges_proxies_by_display_name_before_pagination(self):
+        root = Path(self.temp.name)
+        proxies = Proxies(root / "proxy", root / "state")
+        proxies.root.mkdir()
+        for name in ("Alouette.png", "Baleine.png", "Zèbre.png"):
+            (proxies.root / name).touch()
+        identifiers = {path.stem: identifier for identifier, path in proxies.files().items()}
+        proxies.associate(self.db, identifiers["Baleine"], "fr-1")
+
+        def page(sort, offset=0, limit=1, **filters):
+            return proxies.dispatch(self.db, "/api/v2/search",
+                                    {"result_sort": sort, "offset": offset, "limit": limit, **filters},
+                                    lambda _db, result: result)
+
+        def ids(result):
+            self.assertEqual(4, result["total"])
+            return [item["provider_card_id"] for item in result["items"]]
+
+        self.assertEqual([identifiers["Alouette"], "fr-1", identifiers["Baleine"], identifiers["Zèbre"]],
+                         [ids(page("name_asc", offset))[0] for offset in range(4)])
+        self.assertEqual([identifiers["Zèbre"], "fr-1", identifiers["Baleine"], identifiers["Alouette"]],
+                         ids(page("name_desc", limit=4)))
+        self.assertEqual([], ids(page("name_asc", offset=20)))
+        self.assertEqual(["fr-1", identifiers["Baleine"]], ids(page("mana_asc", limit=2)))
+        def unchanged(_db, result):
+            return result
+
+        search = proxies.start_search(self.db, {"result_sort": "name_asc", "limit": 1}, unchanged)
+        self.assertEqual([identifiers["Alouette"]], ids(search))
+        missing = proxies.start_search(self.db, {"image_filter": "without", "limit": 1}, unchanged)
+        self.assertEqual(["fr-1"], [item["provider_card_id"] for item in missing["items"]])
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("UPDATE printing_added SET added_at='2999-12-31T00:00:00Z'")
+            conn.execute("INSERT INTO image_assets VALUES('asset','card.webp','image/webp',1,531,738,'en','{}')")
+            conn.execute("""INSERT INTO image_slots
+                SELECT printing_id,face_index,'fr','en','ready','asset','{}' FROM card_faces""")
+        official_image = root / "card.webp"
+        official_image.touch()
+        os.utime(official_image, (1000, 1000))
+        self.assertEqual(["fr-1"], ids(page("added_desc")))
+        with patch("bibliotheque_mtg.v2.api.search_cards", side_effect=AssertionError("Search ran again")):
+            next_page = proxies.search_page(self.db, {"snapshot": search["snapshot"], "offset": 1, "limit": 1}, unchanged)
+            self.assertEqual(["fr-1"], ids(next_page))
+            still_missing = proxies.search_page(self.db, {"snapshot": missing["snapshot"]}, unchanged)
+            self.assertEqual(["fr-1"], [item["provider_card_id"] for item in still_missing["items"]])
+        self.assertEqual([], page("added_desc", image_filter="without")["items"])
+        self.assertEqual(["fr-1"], ids(page("added_asc", image_filter="with")))
+        for sort in ("date", "date_asc"):
+            self.assertEqual(["fr-1"], ids(page(sort, offset=3)))
 
     def test_accent_and_filters_return_expected_provider_record(self):
         result=search_cards(self.db,'Forêt',set_code='s1',language='fr',limit=50)
@@ -238,6 +290,11 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual(2, result['total'])
         self.assertEqual('fr-1', result['items'][0]['provider_card_id'])
         self.assertEqual('en-variant', result['items'][1]['provider_card_id'])
+        focused = api.dispatch(self.db, '/api/v2/edition', {
+            'set': 's1', 'limit': 1, 'focus': 'variant-printing',
+        })
+        self.assertEqual(1, focused['offset'])
+        self.assertEqual(['en-variant'], [item['provider_card_id'] for item in focused['items']])
 
         conn = sqlite3.connect(self.db)
         try:

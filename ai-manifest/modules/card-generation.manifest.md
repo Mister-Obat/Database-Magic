@@ -129,6 +129,8 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   ne l'interrompt pas. L'utilisateur peut rouvrir son avancement ou sa candidate
   depuis la cloche et peut demander l'annulation explicite de la tâche. Cette
   annulation arrête le processus CLI associé et ne publie aucune image.
+  Une tâche IA en erreur peut être annulée depuis la notification ou acquittée
+  dans sa modale. L'annulation rend la tâche terminale et la retire de la cloche.
 - Les références de prévisualisation restent en mémoire au plus 24 heures (jusqu'à
   100 ensembles) pour permettre une revue différée. Les tâches et références
   appartiennent au processus serveur actif ; un redémarrage du serveur les perd.
