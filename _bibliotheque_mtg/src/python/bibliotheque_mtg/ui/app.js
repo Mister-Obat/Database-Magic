@@ -98,7 +98,9 @@ async function refreshNotifications() {
     if (request !== notificationRequest) return;
     const items = (response.items || []).filter(item => !["complete", "cancelled", "ready"].includes(item.status));
     const count = items.filter(item => ["queued", "running", "needs_review", "error", "failed"].includes(item.status)).length;
-    document.getElementById("notification-count").textContent = String(count);
+    const badge = document.getElementById("notification-count");
+    badge.textContent = String(count);
+    badge.hidden = count === 0;
     currentReviewTaskIds = new Set(items.filter(item => item.status === "needs_review").map(item => item.task_id));
     updateReviewBadge();
     const list = document.getElementById("notification-list"); list.replaceChildren();
@@ -148,7 +150,11 @@ async function refreshNotifications() {
       list.append(row);
     }
   } catch {
-    if (request === notificationRequest) document.getElementById("notification-count").textContent = "!";
+    if (request === notificationRequest) {
+      const badge = document.getElementById("notification-count");
+      badge.textContent = "!";
+      badge.hidden = false;
+    }
   }
 }
 async function cancelImageTask(taskId) {
@@ -235,7 +241,9 @@ function renderMultiFilter(id) {
   for (const option of options) {
     const label = document.createElement("label"), checkbox = document.createElement("input");
     checkbox.type = "checkbox"; checkbox.value = option.value; checkbox.checked = chosen.has(option.value);
-    label.append(checkbox, document.createTextNode(option.textContent)); list.append(label);
+    label.append(checkbox);
+    appendEditionOptionLabel(label, option);
+    list.append(label);
   }
 }
 function commitMultiFilter(id) {
@@ -324,6 +332,47 @@ function node(tag, className, text) {
   if (className) el.className = className;
   if (text !== undefined && text !== null) el.textContent = String(text);
   return el;
+}
+function editionIcon(code, url) {
+  if (code === PROXY_SET_CODE) {
+    const icon = cardActionIcon("copy");
+    icon.classList.add("edition-symbol");
+    return icon;
+  }
+  if (!code) return null;
+  const fallback = () => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const use = document.createElementNS(svg.namespaceURI, "use");
+    svg.classList.add("search-icon", "edition-symbol");
+    svg.setAttribute("aria-hidden", "true");
+    use.setAttribute("href", "#search-icon-edition");
+    svg.append(use);
+    return svg;
+  };
+  if (!url) return fallback();
+  const icon = node("img", "edition-symbol");
+  icon.alt = "";
+  icon.loading = "lazy";
+  icon.addEventListener("error", () => icon.replaceWith(fallback()), { once: true });
+  icon.src = url;
+  return icon;
+}
+function appendEditionOptionLabel(container, option) {
+  const name = option?.textContent || "Sélectionner…";
+  if (!option?.dataset.editionCode) {
+    container.append(name);
+    return;
+  }
+  const row = node("span", "edition-option-label");
+  const icon = editionIcon(option.dataset.editionCode, option.dataset.editionIcon);
+  if (icon) row.append(icon);
+  row.append(node("span", "edition-option-name", name));
+  if (option.dataset.editionTotal !== undefined) {
+    const downloaded = Number(option.dataset.editionDownloaded).toLocaleString("fr");
+    const total = Number(option.dataset.editionTotal).toLocaleString("fr");
+    row.append(node("span", "edition-option-total", `${downloaded} / ${total}`));
+  }
+  container.append(row);
 }
 // Lucide SVG paths (ISC/MIT); see LUCIDE_LICENSE.txt.
 function cardActionIcon(name) {
@@ -1084,8 +1133,8 @@ function groupedEditionCode(code) {
 function selectExactEditionCode(code) {
   const select = $("edition-select");
   if (![...select.options].some(option => option.value === code)) {
-    const option = node("option", "", `${code.toUpperCase()} · édition précise`);
-    option.value = code; select.append(option);
+    const edition = exactEditions.find(edition => edition.code === code);
+    select.append(edition ? makeEditionOption(edition) : new Option(`${code.toUpperCase()} · édition précise`, code));
   }
   select.value = code;
 }
@@ -1104,28 +1153,57 @@ function groupEditions(editions) {
   for (const edition of named) {
     const root = rootFor(edition);
     const key = root.code;
-    if (!groups.has(key)) groups.set(key, { ...root, members: [] });
-    groups.get(key).members.push(edition.code);
+    if (!groups.has(key)) groups.set(key, { ...root, members: [], card_total: 0, downloaded: 0 });
+    const group = groups.get(key);
+    group.members.push(edition.code);
+    group.card_total += edition.card_total ?? 0;
+    group.downloaded += edition.downloaded ?? 0;
   }
   return [...groups.values()].map(group => ({ ...group, code: [group.code, ...group.members.filter(code => code !== group.code)].join(",") }))
     .sort((a, b) => Number(b.code === PROXY_SET_CODE) - Number(a.code === PROXY_SET_CODE)
       || (b.released_at || "").localeCompare(a.released_at || "") || a.name.localeCompare(b.name));
 }
+function makeEditionOption(edition) {
+  const codes = edition.code.split(",");
+  const option = new Option(`${edition.name_fr || edition.name} (${codes[0]})`, edition.code);
+  option.dataset.searchTerms = [edition.name_fr || edition.name, edition.name || edition.name_fr, ...codes].map(editionSearchKey).join("|");
+  option.dataset.editionCode = codes[0];
+  if (edition.edition_icon_url) option.dataset.editionIcon = edition.edition_icon_url;
+  if (edition.card_total !== undefined) {
+    option.dataset.editionTotal = edition.card_total;
+    option.dataset.editionDownloaded = edition.downloaded ?? 0;
+  }
+  return option;
+}
 async function loadEditions() {
+  const placeholder = $("edition-select").options[0];
+  if (!state.editions.length) placeholder.textContent = "Chargement des éditions…";
   const all = []; let offset = 0; let total = Infinity;
   while (offset < total) { const page = await getJSON("/api/v2/editions", { limit: 100, offset }); total = page.total; all.push(...page.items); offset += page.items.length; if (!page.items.length) break; }
+  placeholder.textContent = "Sélectionner…";
   exactEditions = all;
   const grouped = groupEditions(all);
   state.editions = grouped.map(e => ({ ...e, search_fr: editionSearchKey(e.name_fr || e.name), search_en: editionSearchKey(e.name || e.name_fr) }));
   for (const id of ["filter-set", "edition-select"]) {
     const select = $(id), selected = select.value;
     const options = document.createDocumentFragment(); options.append(select.options[0]);
-    for (const e of grouped) { const option = document.createElement("option"); option.value = e.code; option.textContent = `${e.name_fr || e.name} (${e.code.split(",")[0]})`; option.dataset.searchTerms = [e.name_fr || e.name, e.name || e.name_fr, ...e.code.split(",")].map(editionSearchKey).join("|"); options.append(option); }
-    select.replaceChildren(options); select.value = groupedEditionCode(selected);
+    for (const edition of grouped) options.append(makeEditionOption(edition));
+    select.replaceChildren(options);
+    if (id === "edition-select" && state.exactEditionCode === selected) selectExactEditionCode(selected);
+    else select.value = groupedEditionCode(selected);
     if (id === "filter-set") renderMultiFilter(id);
   }
   renderEditionSuggestions();
   setText($("edition-count"), "");
+}
+let editionReloadPromise = null;
+function reloadEditions() {
+  if (!editionReloadPromise) {
+    editionReloadPromise = Promise.resolve(editionsPromise)
+      .then(() => { editionsPromise = null; return ensureEditions(); })
+      .finally(() => { editionReloadPromise = null; });
+  }
+  return editionReloadPromise;
 }
 async function ensureEditions(refreshProxies = false) {
   if (refreshProxies && editionsPromise) {
@@ -1136,7 +1214,7 @@ async function ensureEditions(refreshProxies = false) {
       if (hasProxies !== state.editions.some(item => item.code === PROXY_SET_CODE)) editionsPromise = null;
     } catch { /* Keep the loaded edition list when refresh is unavailable. */ }
   }
-  if (!editionsPromise) editionsPromise = loadEditions().catch(error => { editionsPromise = null; setText($("edition-count"), `Éditions indisponibles : ${error.message}`); });
+  if (!editionsPromise) editionsPromise = loadEditions().catch(error => { editionsPromise = null; $("edition-select").options[0].textContent = "Sélectionner…"; setText($("edition-count"), `Éditions indisponibles : ${error.message}`); });
   return editionsPromise;
 }
 function editionSearchKey(value) { return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr"); }
@@ -1179,7 +1257,8 @@ function renderEditionSuggestions() {
   if (!term) return;
   const matches = matchingEditionOptions($("edition-select"), term);
   for (const edition of matches) {
-    const option = node("div", "edition-suggestion", edition.textContent);
+    const option = node("div", "edition-suggestion");
+    appendEditionOptionLabel(option, edition);
     option.id = `edition-suggestion-${editionSuggestionCodes.length}`;
     option.setAttribute("role", "option"); option.setAttribute("aria-selected", "false");
     option.addEventListener("click", () => chooseEditionSuggestion(edition.value));
@@ -1199,7 +1278,8 @@ function attachEditionSuggestions(inputId, listId, selectId, onSelect) {
     list.replaceChildren(); codes = []; hide();
     if (!term) return;
     for (const option of matchingEditionOptions(select, term)) {
-      const item = node("div", "edition-suggestion", option.textContent);
+      const item = node("div", "edition-suggestion");
+      appendEditionOptionLabel(item, option);
       item.id = `${listId}-${codes.length}`;
       item.setAttribute("role", "option"); item.setAttribute("aria-selected", "false");
       item.addEventListener("click", () => choose(option.value));
@@ -1561,6 +1641,7 @@ async function pollBatchDownload() {
     }
     status.prepend(node("strong", "", task.status === "complete" ? "Terminé · " : task.status === "cancelled" ? "Annulé · " : "Échec · "));
     batchTaskId = null; batchMode = null; updateBatchButtons();
+    if (editionsPromise) void reloadEditions();
     if (state.view === "recherche" && state.searchItems.length) void refreshSearchImages();
     if (state.view === "editions") void refreshEditionPage();
     if (state.view === "decks") void renderDeckPage(true);
@@ -1585,6 +1666,7 @@ function refreshEditionPage() {
   return renderEditionPage(true);
 }
 async function renderEditionPage(background = false) {
+  $("edition-select").dispatchEvent(new Event("input"));
   editionController?.abort();
   editionController = null;
   editionRefreshPending = false;
@@ -1870,7 +1952,11 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     };
     const previousCard = navigationButton(-1, "Carte précédente", "arrowLeft");
     const nextCard = navigationButton(1, "Carte suivante", "arrowRight");
-    header.append(previousCard, node("p", "eyebrow", [card.edition || card.set_code, card.collector_number && `n° ${card.collector_number}`].filter(Boolean).join(" · ")), nextCard);
+    const edition = node("p", "eyebrow");
+    const icon = editionIcon(card.set_code, card.edition_icon_url);
+    if (icon) edition.append(icon);
+    edition.append(node("span", "", [card.edition || card.set_code, card.collector_number && `n° ${card.collector_number}`].filter(Boolean).join(" · ")));
+    header.append(previousCard, edition, nextCard);
     const imageArea = node("div", `card-viewer-image${card.proxy ? (card.proxy_source_id ? " linked-proxy-image" : " unlinked-proxy-image") : ""}`);
     const slots = (card.image_slots || []).slice().sort((a,b) => a.face_index - b.face_index);
     let selectedFace = preferredFace !== null && slots.some(x => x.face_index === preferredFace)
@@ -2663,6 +2749,7 @@ async function openAIReviewTask(taskId, summary = {}) {
 }
 function refreshCurrentCollection(proxyImage = false) {
   invalidatePageCache();
+  if (editionsPromise) void reloadEditions();
   if (state.view === "editions") void refreshEditionPage();
   else if (state.view === "recherche") {
     if (proxyImage && state.searchSnapshot) void loadSearchPage(state.searchSnapshot);
@@ -3364,9 +3451,9 @@ async function refreshVisibleView() {
       return Promise.all([loadHome(), loadMaintenanceStatus()]);
     case "recherche":
       if (state.searchController) return;
-      return state.searchSnapshot ? refreshSearchImages() : ensureEditions(true);
+      return Promise.all([reloadEditions(), state.searchSnapshot && refreshSearchImages()]);
     case "editions":
-      await ensureEditions(true);
+      await reloadEditions();
       if (state.view === "editions") return refreshEditionPage();
       return;
     case "decks":
@@ -4936,9 +5023,8 @@ async function choosePersonalDeck(card) {
     create.disabled = true;
     const validate = node("button", "primary-button", "Valider");
     validate.type = "submit";
-    const cancel = personalButton("Annuler", () => dialog.close());
     const footer = node("div", "personal-picker-footer");
-    footer.append(create, validate, cancel);
+    footer.append(create, validate);
     form.append(nameLabel, footer);
     const body = node("div", "personal-picker-body");
     body.append(status, list);
@@ -4967,7 +5053,7 @@ async function choosePersonalDeck(card) {
     }
     function setBusy(value) {
         busy = value;
-        create.disabled = validate.disabled = cancel.disabled = value;
+        create.disabled = validate.disabled = value;
         name.disabled = value || nameLabel.hidden;
         for (const button of list.querySelectorAll("button")) button.disabled = value;
     }
@@ -5033,4 +5119,5 @@ window.addEventListener("beforeunload", event => {
         event.returnValue = "";
     }
 });
+void ensureEditions();
 void restoreRoute();

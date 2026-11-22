@@ -180,7 +180,22 @@ def list_editions(db, *, limit=50, offset=0):
     limit,offset=_page(limit,offset)
     with _connection(db) as c:
         total=c.execute("SELECT COUNT(*) FROM editions WHERE eligibility='eligible'").fetchone()[0]
-        rows=c.execute("SELECT set_id AS id,code,name,set_type,released_at,digital,source_card_count,eligibility FROM editions WHERE eligibility='eligible' ORDER BY released_at DESC,code LIMIT ? OFFSET ?",(limit,offset)).fetchall()
+        rows=c.execute("""
+            WITH page AS (
+                SELECT set_id AS id,code,name,set_type,released_at,digital,source_card_count,eligibility
+                FROM editions WHERE eligibility='eligible' ORDER BY released_at DESC,code LIMIT ? OFFSET ?
+            )
+            SELECT page.*, COUNT(p.printing_id) AS card_total,
+                   COUNT(CASE WHEN EXISTS (
+                       SELECT 1 FROM image_slots s WHERE s.printing_id=p.printing_id
+                   ) AND NOT EXISTS (
+                       SELECT 1 FROM image_slots s WHERE s.printing_id=p.printing_id AND s.status!='ready'
+                   ) THEN 1 END) AS downloaded
+            FROM page LEFT JOIN printings p ON p.set_id=page.id AND EXISTS (
+                SELECT 1 FROM source_records WHERE printing_id=p.printing_id
+            )
+            GROUP BY page.id ORDER BY page.released_at DESC,page.code
+        """,(limit,offset)).fetchall()
     return {"contract_version":CONTRACT_VERSION,"total":total,"limit":limit,"offset":offset,"items":[dict(r) for r in rows]}
 
 

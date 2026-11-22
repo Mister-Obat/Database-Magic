@@ -219,6 +219,9 @@ class QueryV2Tests(unittest.TestCase):
         self.assertEqual('2.0.0',result['contract_version'])
         self.assertEqual(1,result['limit'])
         self.assertEqual(1,result['total'])
+        edition = result['items'][0]
+        self.assertEqual(1, edition['card_total'])
+        self.assertEqual(0, edition['downloaded'])
 
     def test_edition_name_search_and_grouped_codes_find_catalogue_cards(self):
         conn = sqlite3.connect(self.db)

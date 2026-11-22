@@ -54,6 +54,7 @@ de même taille et de même trait, intégrées sans dépendance React.
 - Barre supérieure : Rafraîchir, les commandes de zoom, Fermer et Notifications
   mesurent **46 × 46 px**. Rafraîchir est placé à gauche du bouton moins.
   Le logo a la même hauteur. Les boutons à icône seule ont un nom accessible.
+  Les commandes affichent leur nom au survol et au focus. Le compteur de la cloche est masqué à zéro.
 - En-têtes de Recherche, Éditions et Decks : le bouton de téléchargement mesure
   **44 px** de haut. Son libellé reste sur une ligne, même sous le titre.
 - Centrer la loupe et le texte de Rechercher comme un seul ensemble. Laisser Rechercher et Effacer les filtres à gauche et le statut à droite. En espace étroit, le statut peut passer dessous en conservant son alignement à droite.

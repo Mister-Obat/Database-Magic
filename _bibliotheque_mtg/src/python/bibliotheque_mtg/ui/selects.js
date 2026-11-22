@@ -36,10 +36,10 @@
     wrapper.append(button);
 
     function sync() {
-      button.textContent = select.selectedOptions[0]?.textContent || select.options[0]?.textContent || "Sélectionner…";
+      button.replaceChildren();
+      appendEditionOptionLabel(button, select.selectedOptions[0] || select.options[0]);
       button.setAttribute("aria-label", `${label} : ${button.textContent}`);
       button.disabled = select.disabled;
-      if (opened?.select === select) closeMenu();
     }
 
     function openMenu() {
@@ -55,11 +55,12 @@
       for (const [index, option] of [...select.options].entries()) {
         const item = document.createElement("div");
         item.className = "custom-select-option";
+        item.dataset.optionValue = option.value;
         item.id = `${menu.id}-option-${index}`;
         item.setAttribute("role", "option");
         item.setAttribute("aria-selected", String(option.selected));
         item.setAttribute("aria-disabled", String(option.disabled));
-        item.textContent = option.textContent;
+        appendEditionOptionLabel(item, option);
         item.addEventListener("click", () => choose(index));
         menu.append(item);
         items.push(item);
@@ -78,7 +79,6 @@
       button.setAttribute("aria-expanded", "true");
       opened = {select, button, menu, items, active: Math.max(0, select.selectedIndex)};
       setActive(opened.active);
-      items[opened.active]?.scrollIntoView({block: "nearest"});
     }
 
     function setActive(index) {
@@ -89,7 +89,11 @@
       opened.active = next;
       opened.items[next]?.classList.add("active");
       button.setAttribute("aria-activedescendant", opened.items[next].id);
-      opened.items[next]?.scrollIntoView({block: "nearest"});
+      const item = opened.items[next];
+      const itemRect = item.getBoundingClientRect();
+      const menuRect = opened.menu.getBoundingClientRect();
+      if (itemRect.top < menuRect.top) opened.menu.scrollTop -= menuRect.top - itemRect.top;
+      else if (itemRect.bottom > menuRect.bottom) opened.menu.scrollTop += itemRect.bottom - menuRect.bottom;
     }
 
     function choose(index) {
@@ -101,9 +105,13 @@
       if (changed) select.dispatchEvent(new Event("change", {bubbles: true}));
     }
 
-    button.addEventListener("click", () => opened?.select === select ? closeMenu() : openMenu());
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      if (opened?.select === select) closeMenu();
+      else openMenu();
+    });
     select.labels?.[0]?.addEventListener("click", event => {
-      if (event.target.closest(".custom-select")) return;
+      if (event.composedPath().includes(wrapper)) return;
       event.preventDefault();
       button.click();
     });
@@ -132,7 +140,19 @@
       if (next >= 0 && next < select.options.length) setActive(next);
     });
     select.addEventListener("change", sync);
-    new MutationObserver(sync).observe(select, {childList: true, subtree: true, attributes: true, characterData: true});
+    select.addEventListener("input", sync);
+    new MutationObserver(() => {
+      if (opened?.select !== select) { sync(); return; }
+      if (select.disabled || !select.options.length) { closeMenu(); sync(); return; }
+      const activeValue = opened.items[opened.active]?.dataset.optionValue;
+      const scrollTop = opened.menu.scrollTop;
+      openMenu();
+      const index = [...select.options].findIndex(option => option.value === activeValue);
+      if (index >= 0) {
+        setActive(index);
+        opened.menu.scrollTop = scrollTop;
+      }
+    }).observe(select, {childList: true, subtree: true, attributes: true, characterData: true});
     sync();
   }
 

@@ -70,7 +70,7 @@ PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                          "group-delete", "group-move")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 41
+APP_API_REVISION = 42
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -1973,10 +1973,15 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 else:
                     result = api.dispatch(self.db, route, params)
                 if route == "/api/v2/editions":
-                    for edition in result.get("items", []):
-                        edition["name_fr"] = _SET_NAMES_FR.get(str(edition["code"]).upper())
+                    editions = result.get("items", [])
+                    icons = _edition_icon_urls({edition["code"].lower() for edition in editions}, OPS_ROOT / "catalogue.sqlite")
+                    for edition in editions:
+                        edition["name_fr"] = _SET_NAMES_FR.get(edition["code"].upper())
+                        edition["edition_icon_url"] = icons.get(edition["code"].lower())
                 if route == "/api/v2/card" and result.get("found") and not result["card"].get("proxy"):
                     card = result["card"]
+                    code = (card.get("set_code") or "").lower()
+                    card["edition_icon_url"] = _edition_icon_urls({code}, OPS_ROOT / "catalogue.sqlite").get(code)
                     with connect(self.db) as conn:
                         slots = conn.execute(
                             "SELECT s.face_index,s.preferred_language,s.selected_language,s.status,s.asset_id,"

@@ -155,6 +155,11 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
   formulaires et les événements `change`, mais remplace son menu natif visible
   par une liste sombre et animée. Cela évite le flash gris du menu système dans
   Firefox, y compris pour les sélecteurs ajoutés dynamiquement.
+- Les choix d’édition dans Éditions et Recherche affichent le symbole à gauche
+  et le nombre de cartes téléchargées sur le total à droite. Une impression
+  est téléchargée lorsque toutes ses faces attendues sont prêtes. Les familles
+  additionnent les compteurs de leurs éditions. Le symbole apparaît aussi à
+  gauche du nom d’édition dans la visionneuse. Proxy emploie l’icône Lucide Copy.
 - Le logo seul identifie le lien Accueil dans l’en-tête. Le logo et le favicon utilisent `Logo.png` et `Logo.ico` à la
   racine du projet, servis par les routes locales `/logo.png` et `/favicon.ico`.
 - Le démarrage ne synchronise pas intégralement les images organisées. Cette
@@ -878,7 +883,7 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Elle vérifie la révision courante et utilise la même protection POST locale.
 - Après un ajout réussi, conserver le sélecteur ouvert pour permettre les
   ajouts successifs. Afficher la confirmation et les erreurs dans le sélecteur,
-  avec Valider et Annuler en bas.
+  avec Valider en bas.
 
 ### Consultation des utilisations d’une carte
 
