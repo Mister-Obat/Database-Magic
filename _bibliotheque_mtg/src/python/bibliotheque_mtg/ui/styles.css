@@ -239,8 +239,8 @@ body > .custom-select-menu {
   justify-content: space-between;
   gap: .65rem 1rem;
 }
-#search-status { display: flex; align-items: center; justify-content: flex-end; gap: .3rem; flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
-#search-status:empty { position: absolute; }
+#search-status, #deck-edition-status { display: flex; align-items: center; justify-content: flex-end; gap: .3rem; flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
+#search-status:empty, #deck-edition-status:empty { position: absolute; }
 #deck-batch-status { flex: 1 1 12rem; min-width: 0; text-align: right; font-size: .875rem; }
 #deck-batch-status.batch-status:not(:empty) { margin: 0; padding: 0; background: none; border: 0; }
 #deck-batch-status:empty { display: none; }
@@ -554,7 +554,7 @@ select[hidden]{display:none!important}
 .search-main{position:relative;min-width:0}
 .search-main label{font-weight:600}
 .search-main .edition-suggestions{top:calc(100% + .35rem)}
-.search-main .edition-suggestion{border:0;background:transparent;font:inherit}
+.recent-search-row .edition-suggestion{border:0;background:transparent;font:inherit}
 .recent-search-row{display:flex;align-items:center;min-width:0;border-radius:6px}
 .recent-search-row:hover,.recent-search-row:focus-within{background:var(--panel2)}
 .recent-search-row .edition-suggestion{flex:1;min-width:0}
@@ -816,6 +816,7 @@ select[hidden]{display:none!important}
 .image-choice-dialog .comparison-preview-pane{grid-column:2;display:grid;place-items:center;overflow:hidden;padding:.35rem;border:1px solid var(--line);border-radius:10px;background:#0c100d}
 .image-choice-dialog .comparison-selection-pane .comparison-thumbnails{display:grid;grid-template-columns:repeat(auto-fill,minmax(76px,1fr));align-content:start;justify-content:stretch;gap:.5rem;width:100%;max-height:none;min-height:0;overflow-y:auto;overflow-x:hidden;padding:.2rem}
 .image-choice-dialog .comparison-selection-pane .comparison-option{min-width:0;max-width:100%;width:100%}
+.image-choice-dialog .comparison-no-reference{align-content:center;min-height:5rem}
 .image-choice-dialog .comparison-selection-pane .comparison-thumb{display:block;width:100%;max-width:140px;height:auto;aspect-ratio:531/738;object-fit:contain}
 .image-choice-dialog .comparison-selection-pane .comparison-caption{display:block;white-space:normal;overflow-wrap:anywhere;text-align:center}
 .image-choice-dialog .comparison-preview-pane .comparison-preview,.image-choice-dialog .comparison-preview-pane .ai-selection-preview{display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain}

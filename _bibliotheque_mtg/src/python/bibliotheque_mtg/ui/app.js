@@ -529,7 +529,7 @@ async function restoreRoute() {
     state.exactEditionCode = query.has("exact") ? query.get("set") : null;
     if (state.exactEditionCode) selectExactEditionCode(state.exactEditionCode);
     else $("edition-select").value = groupedEditionCode(query.get("set"));
-    renderEditionSuggestions();
+    editionSuggestions.hide();
     state.editionPage = routePage(query);
     pendingEditionFocus = query.get("focus");
     if (pendingEditionFocus) editionPageKey = null;
@@ -1195,7 +1195,8 @@ async function loadEditions() {
     else select.value = groupedEditionCode(selected);
     if (id === "filter-set") renderMultiFilter(id);
   }
-  renderEditionSuggestions();
+  editionSuggestions.refresh();
+  searchEditionSuggestions.refresh();
   setText($("edition-count"), "");
 }
 let editionReloadPromise = null;
@@ -1220,29 +1221,6 @@ async function ensureEditions(refreshProxies = false) {
   return editionsPromise;
 }
 function editionSearchKey(value) { return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("fr"); }
-let editionSuggestionCodes = [];
-let activeEditionSuggestion = -1;
-function hideEditionSuggestions() {
-  $("edition-suggestions").hidden = true;
-  $("edition-query").setAttribute("aria-expanded", "false");
-  $("edition-query").removeAttribute("aria-activedescendant");
-  activeEditionSuggestion = -1;
-}
-function highlightEditionSuggestion(index) {
-  const options = $("edition-suggestions").querySelectorAll('[role="option"]');
-  if (!options.length) return;
-  activeEditionSuggestion = (index + options.length) % options.length;
-  options.forEach((option, i) => option.setAttribute("aria-selected", i === activeEditionSuggestion ? "true" : "false"));
-  $("edition-query").setAttribute("aria-activedescendant", options[activeEditionSuggestion].id);
-  options[activeEditionSuggestion].scrollIntoView({ block: "nearest" });
-}
-function chooseEditionSuggestion(code) {
-  $("edition-select").value = code;
-  $("edition-query").value = "";
-  hideEditionSuggestions();
-  state.editionPage = 0;
-  void renderEditionPage();
-}
 function matchingEditionOptions(select, term) {
   const options = Array.from(select.options).filter(option => option.value);
   const terms = option => (option.dataset.searchTerms || editionSearchKey(option.textContent)).split("|");
@@ -1250,56 +1228,104 @@ function matchingEditionOptions(select, term) {
   const contains = options.filter(option => !starts.includes(option) && terms(option).some(value => value.includes(term)));
   return [...starts, ...contains].slice(0, 8);
 }
-function renderEditionSuggestions() {
-  const term = editionSearchKey($("edition-query").value.trim());
-  const list = $("edition-suggestions");
-  list.replaceChildren();
-  editionSuggestionCodes = [];
-  hideEditionSuggestions();
-  if (!term) return;
-  const matches = matchingEditionOptions($("edition-select"), term);
-  for (const edition of matches) {
-    const option = node("div", "edition-suggestion");
-    appendEditionOptionLabel(option, edition);
-    option.id = `edition-suggestion-${editionSuggestionCodes.length}`;
-    option.setAttribute("role", "option"); option.setAttribute("aria-selected", "false");
-    option.addEventListener("click", () => chooseEditionSuggestion(edition.value));
-    list.append(option); editionSuggestionCodes.push(edition.value);
-  }
-  if (!matches.length) { list.append(node("p", "edition-suggestion-empty", "Aucune édition trouvée.")); }
-  list.hidden = false;
-  $("edition-query").setAttribute("aria-expanded", "true");
-}
-function attachEditionSuggestions(inputId, listId, selectId, onSelect) {
+function attachEditionSuggestions(inputId, listId, selectId, onSelect, { keepOpen = false, onQuery = () => {} } = {}) {
   const input = $(inputId), list = $(listId), select = $(selectId);
-  let codes = [], active = -1;
-  const hide = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); active = -1; };
-  const choose = code => { if (MULTI_FILTER_IDS.includes(selectId)) setMultiValue(selectId, code); else select.value = code; input.value = ""; hide(); onSelect(); };
-  const render = () => {
-    const term = editionSearchKey(input.value.trim());
-    list.replaceChildren(); codes = []; hide();
-    if (!term) return;
-    for (const option of matchingEditionOptions(select, term)) {
-      const item = node("div", "edition-suggestion");
-      appendEditionOptionLabel(item, option);
-      item.id = `${listId}-${codes.length}`;
-      item.setAttribute("role", "option"); item.setAttribute("aria-selected", "false");
-      item.addEventListener("click", () => choose(option.value));
-      list.append(item); codes.push(option.value);
-    }
-    if (!codes.length) list.append(node("p", "edition-suggestion-empty", "Aucune édition trouvée."));
-    list.hidden = false; input.setAttribute("aria-expanded", "true");
+  const field = input.closest(".edition-search");
+  const storageKey = `database-magic-${inputId}-recent-v1`;
+  let active = -1;
+  const hide = () => {
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    active = -1;
   };
-  input.addEventListener("input", render);
-  input.addEventListener("keydown", event => {
-    if (event.key === "Escape") { hide(); return; }
-    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && codes.length && !list.hidden) {
-      event.preventDefault(); active = (active + (event.key === "ArrowDown" ? 1 : -1) + codes.length) % codes.length;
-      list.querySelectorAll('[role="option"]').forEach((item, index) => item.setAttribute("aria-selected", index === active ? "true" : "false"));
-      input.setAttribute("aria-activedescendant", `${listId}-${active}`);
-    } else if (event.key === "Enter" && active >= 0) { event.preventDefault(); choose(codes[active]); }
-  });
-  document.addEventListener("pointerdown", event => { if (!event.target.closest(`#${inputId}`) && !event.target.closest(`#${listId}`)) hide(); });
+  const choose = code => {
+    rememberSearchTerm(input.value, storageKey);
+    if (!keepOpen) {
+      input.value = "";
+      hide();
+    }
+    onSelect(code);
+  };
+  const updateQuery = () => {
+    render();
+    onQuery();
+  };
+  const render = () => {
+    if (document.activeElement !== input && !list.contains(document.activeElement)) {
+      hide();
+      return;
+    }
+    const term = editionSearchKey(input.value.trim());
+    const scrollTop = list.scrollTop;
+    list.replaceChildren();
+    active = -1;
+    input.removeAttribute("aria-activedescendant");
+    if (term) {
+      const matches = matchingEditionOptions(select, term);
+      for (const option of matches) {
+        const item = node("div", "edition-suggestion");
+        appendEditionOptionLabel(item, option);
+        item.setAttribute("role", "option");
+        item.setAttribute("aria-selected", "false");
+        item.addEventListener("pointerdown", event => event.preventDefault());
+        item.addEventListener("click", () => choose(option.value));
+        list.append(item);
+      }
+      if (!matches.length) list.append(node("p", "edition-suggestion-empty", "Aucune édition trouvée."));
+    }
+    renderRecentSearchRows(input, list, storageKey, updateQuery, render);
+    list.querySelectorAll('[role="option"]').forEach((option, index) => { option.id = `${listId}-${index}`; });
+    list.hidden = !list.childElementCount;
+    input.setAttribute("aria-expanded", String(!list.hidden));
+    list.scrollTop = scrollTop;
+  };
+  input.addEventListener("input", updateQuery);
+  input.addEventListener("focus", render);
+  input.addEventListener("click", render);
+  input.addEventListener("blur", event => { if (!list.contains(event.relatedTarget)) hide(); });
+  list.addEventListener("focusout", event => { if (!field.contains(event.relatedTarget)) hide(); });
+  window.addEventListener("blur", hide);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); });
+  document.addEventListener("pointerdown", event => { if (!field.contains(event.target)) hide(); });
+  field.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !list.hidden) {
+      event.preventDefault();
+      input.focus();
+      hide();
+      return;
+    }
+    if (event.target !== input || list.hidden || event.isComposing) return;
+    const options = [...list.querySelectorAll('[role="option"]')];
+    if (["ArrowDown", "ArrowUp"].includes(event.key) && options.length) {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      active = active < 0 ? (direction > 0 ? 0 : options.length - 1) : (active + direction + options.length) % options.length;
+      options.forEach((option, index) => option.setAttribute("aria-selected", String(index === active)));
+      input.setAttribute("aria-activedescendant", options[active].id);
+      options[active].scrollIntoView({ block: "nearest" });
+    } else if (event.key === "Enter" && options[active]) {
+      event.preventDefault();
+      options[active].click();
+    }
+  }, { capture: true });
+  return { hide, refresh: () => { if (!list.hidden) render(); } };
+}
+function addEditionToFilter(id, status, code) {
+  const value = multiValue(id);
+  const selected = value && value !== "-" ? value.split("|") : [];
+  if (selected.includes(code)) {
+    setText(status, "Édition déjà sélectionnée.");
+    return;
+  }
+  setMultiValue(id, [...selected, code].join("|"));
+  setText(status, "Édition ajoutée. Cliquez sur Rechercher.");
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    $(`${id}-multi`).querySelector("summary").animate(
+      [{ backgroundColor: "#59446e", borderColor: "#a287c4" }, { backgroundColor: "", borderColor: "" }],
+      { duration: 650, easing: "ease-out" }
+    );
+  }
 }
 const REFINE_IDS = { image_filter: "refine-images", result_sort: "refine-sort", result_order: "refine-order", mana_min: "refine-mana-min", mana_max: "refine-mana-max", power_min: "refine-power-min", power_max: "refine-power-max", toughness_min: "refine-toughness-min", toughness_max: "refine-toughness-max" };
 function mainSearchFilters() { return { q: $("query").value.trim(), set: multiValue("filter-set"), rarity: multiValue("filter-rarity").toLowerCase(), color: selectedManaColors($("filter-color")), color_mode: $("filter-color-mode").value, card_type: multiValue("filter-type"), oracle_id: state.searchIdentity?.oracle_id || "", printing_id: state.searchIdentity?.printing_id || "", unique: $("search-unique").checked ? "1" : "" }; }
@@ -1656,7 +1682,7 @@ async function pollBatchDownload() {
     if (state.view === "decks") void renderDeckPage(true);
   } catch (error) { batchPollTimer = setTimeout(pollBatchDownload, 3000); }
 }
-function openEdition(code) { $("edition-query").value = ""; hideEditionSuggestions(); state.exactEditionCode = null; $("edition-select").value = groupedEditionCode(code); state.activeSet = $("edition-select").value; state.editionPage = 0; setView("editions"); }
+function openEdition(code) { $("edition-query").value = ""; editionSuggestions.hide(); state.exactEditionCode = null; $("edition-select").value = groupedEditionCode(code); state.activeSet = $("edition-select").value; state.editionPage = 0; setView("editions"); }
 let editionPageKey = null;
 let pendingEditionFocus = null;
 let editionController = null;
@@ -2166,7 +2192,11 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           const showPreview = (url, alt, host) => { const preview = node("img", "comparison-preview"); preview.src = url; preview.alt = alt; host.replaceChildren(preview); };
           const addThumb = (url, label, index, dimensions = "") => {
             const button = node("button", "comparison-option"); button.type = "button";
-            if (wizardStep === "text" && String(index) === textSelect.value) button.classList.add("selected");
+            if (wizardStep === "text") {
+              const isSelected = String(index) === textSelect.value;
+              button.classList.toggle("selected", isSelected);
+              button.setAttribute("aria-pressed", String(isSelected));
+            }
             const thumb = node("img", "comparison-thumb"); thumb.src = url; thumb.alt = label;
             button.append(thumb, node("span", "comparison-caption", dimensions || label));
             button.addEventListener("click", () => {
@@ -2184,13 +2214,27 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           };
           const renderThumbnails = language => {
             thumbs.replaceChildren();
-            const visual = options.find(item => String(item.index) === visualSelect.value);
+            if (wizardStep === "text") {
+              const noReference = node("button", "comparison-option comparison-no-reference");
+              noReference.type = "button";
+              noReference.append(node("span", "comparison-caption", "Aucune image de référence"));
+              noReference.classList.toggle("selected", !textSelect.value);
+              noReference.setAttribute("aria-pressed", String(!textSelect.value));
+              noReference.addEventListener("click", () => {
+                textSelect.value = "";
+                textMode = "online";
+                selectionPreview.replaceChildren();
+                alignReferenceOptions();
+                thumbs.querySelector(".comparison-no-reference").focus();
+              });
+              thumbs.append(noReference);
+            }
             const visible = options.filter(value => (wizardStep !== "compare" || !value.visual_only && !value.text_reference_only)
               && (wizardStep === "text" ? value.language === "fr" || value.text_reference_only || value.local_original_reference : wizardStep === "visual" ? !value.text_reference_only || value.local_original_reference : !language || value.language === language));
             for (const item of visible)
               addThumb(item.preview_url, `Image ${item.language.toUpperCase()}${item.local_original_reference ? " déjà intégrée" : item.text_reference_only ? " même nom" : ""}`, item.index,
                 `${item.language.toUpperCase()}${item.local_original_reference ? " · originale intégrée" : item.text_reference_only ? " · même nom · autre édition" : ""} · ${item.width} × ${item.height} px`);
-            if (!visible.length) thumbs.append(node("p", "muted", wizardStep === "compare" ? "Aucune autre image à comparer." : "Aucune image disponible pour ce choix."));
+            if (!visible.length && wizardStep !== "text") thumbs.append(node("p", "muted", wizardStep === "compare" ? "Aucune autre image à comparer." : "Aucune image disponible pour ce choix."));
           };
           const chooseOld = node("button", "secondary-button", "Annuler"); chooseOld.type = "button";
           const chooseNew = node("button", "primary-button", "Valider l’image choisie"); chooseNew.type = "button"; chooseNew.disabled = true;
@@ -2255,7 +2299,6 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
             }
             if (textSelect.selectedOptions[0]?.disabled) textSelect.value = "";
             updateReferenceStages();
-            const validLocalText = Boolean(visual && options.some(item=>String(item.index)===textSelect.value&&(item.language==="fr"&&item.printing_id===visual.printing_id&&item.face_index===visual.face_index||item.text_reference_only||item.local_original_reference)));
             nextStep.disabled = wizardStep === "visual" ? !visualSelect.value : !visual;
             if (wizardStep === "text") renderThumbnails("fr");
           };
@@ -2279,7 +2322,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
             comparePanel.hidden = step !== "compare";
             selectionPreview.hidden = !choosing;
             createVersionButton.hidden = step !== "compare";
-            stepDescription.hidden = !choosing;
+            stepDescription.hidden = step !== "visual";
             aiProgress.hidden = step !== "generating";
             stepActions.hidden = !choosing;
             columns.hidden = step !== "review";
@@ -2301,11 +2344,10 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
               else selectionPreview.replaceChildren(node("p", "muted", "Sélectionnez une carte à gauche."));
             } else if (step === "text") {
               comparison.querySelector(".comparison-title").textContent = "Étape 2 sur 2 · Référence de texte";
-              stepDescription.textContent = "Choisissez l’original intégré, une image française du même nom (y compris d’une autre édition), ou le texte officiel de la base locale.";
               renderThumbnails("fr");
               const choice = options.find(item => String(item.index) === textSelect.value);
               if (choice) showPreview(choice.preview_url, "Référence textuelle française", selectionPreview);
-              else selectionPreview.replaceChildren(node("p", "muted", "Sélectionnez une carte à gauche."));
+              else selectionPreview.replaceChildren();
             } else if (step === "generating") {
               comparison.querySelector(".comparison-title").textContent = "Étape 3 sur 3 · Génération en cours";
             } else if (step === "error") {
@@ -2897,6 +2939,7 @@ async function loadDeckFacets(force = false) {
       editionSelect.append(option);
     }
     editionSelect.value = selectedEdition; renderMultiFilter("deck-edition");
+    deckEditionSuggestions.refresh();
     const coverage = Number(data.color_indexed || 0), total = Number(data.total || 0);
     const incomplete = coverage < total;
     document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button => { button.disabled = incomplete; });
@@ -3494,35 +3537,32 @@ $("refresh-view").addEventListener("click", async event => {
     button.disabled = false;
   }
 });
-$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
+$("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); searchEditionSuggestions.hide(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
 $("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
 registerPager("search-pager", "previous-page", "page-status", "next-page", "results", jumpToCataloguePage(page => {
   if (!state.searchSnapshot) return;
   state.searchPage = page;
   return loadSearchPage(state.searchSnapshot);
 }));
-$("edition-select").addEventListener("change",()=>{state.exactEditionCode=null;state.editionPage=0;hideEditionSuggestions();renderEditionPage();});
-$("edition-query").addEventListener("input",()=>{renderEditionSuggestions();if (state.view === "editions") syncRoute();});
-$("edition-query").addEventListener("keydown", event => {
-  if (event.key === "Escape") { hideEditionSuggestions(); return; }
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    if (!editionSuggestionCodes.length || $("edition-suggestions").hidden) return;
-    event.preventDefault();
-    highlightEditionSuggestion(activeEditionSuggestion + (event.key === "ArrowDown" ? 1 : -1));
-  } else if (event.key === "Enter" && activeEditionSuggestion >= 0) {
-    event.preventDefault(); chooseEditionSuggestion(editionSuggestionCodes[activeEditionSuggestion]);
-  }
-});
-document.addEventListener("pointerdown", event => { if (!event.target.closest(".edition-search")) hideEditionSuggestions(); });
+$("edition-select").addEventListener("change",()=>{state.exactEditionCode=null;state.editionPage=0;editionSuggestions.hide();renderEditionPage();});
+const editionSuggestions = attachEditionSuggestions("edition-query", "edition-suggestions", "edition-select", code => {
+  const select = $("edition-select");
+  select.value = code;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}, { onQuery: () => { if (state.view === "editions") syncRoute(); } });
 registerPager("edition-pager", "edition-prev", "edition-page-status", "edition-next", "edition-cards", jumpToCataloguePage(page => {
   state.editionPage = page;
   return renderEditionPage();
 }));
-attachEditionSuggestions("search-edition-query", "search-edition-suggestions", "filter-set", () => { setText($("search-status"), "Édition choisie. Cliquez sur Rechercher."); });
-attachEditionSuggestions("deck-edition-query", "deck-edition-suggestions", "deck-edition", () => {});
+const searchEditionSuggestions = attachEditionSuggestions("search-edition-query", "search-edition-suggestions",
+  "filter-set", code => addEditionToFilter("filter-set", $("search-status"), code), { keepOpen: true });
+const deckEditionSuggestions = attachEditionSuggestions("deck-edition-query", "deck-edition-suggestions",
+  "deck-edition", code => addEditionToFilter("deck-edition", $("deck-edition-status"), code), { keepOpen: true });
 $("deck-submit").addEventListener("click", () => {
   rememberSearchTerm($("deck-query").value, RECENT_DECK_SEARCHES_KEY);
   hideDeckSuggestions();
+  deckEditionSuggestions.hide();
+  setText($("deck-edition-status"), "");
   invalidatePageCache("/api/v2/decks");
   state.deckAppliedFilters = deckResultFilters();
   state.deckExecuted = true;
@@ -3530,7 +3570,10 @@ $("deck-submit").addEventListener("click", () => {
   void renderDeckPage();
 });
 $("deck-edition-query").addEventListener("keydown", event => {
-  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); $("deck-submit").click(); }
+  if (event.key === "Enter" && !event.isComposing && !event.defaultPrevented) {
+    event.preventDefault();
+    $("deck-submit").click();
+  }
 });
 $("clear-deck-filters").addEventListener("click", () => {
   for (const id of ["deck-query", "deck-edition-query", "deck-format", "deck-type", "deck-edition", "deck-color-mode", "deck-image-filter", "deck-sort", "deck-order"]) {
@@ -3539,6 +3582,8 @@ $("clear-deck-filters").addEventListener("click", () => {
   for (const id of ["deck-edition", "deck-format", "deck-type"]) setMultiValue(id, "");
   document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button => setManaPressed(button, false));
   hideDeckSuggestions();
+  deckEditionSuggestions.hide();
+  setText($("deck-edition-status"), "");
   state.deckExecuted = false; state.deckAppliedFilters = null; state.deckPage = 0; state.deckTotal = 0;
   state.deckListKey = null; state.deckController?.abort(); state.deckController = null; ++state.deckRequest;
   $("deck-list").replaceChildren();
@@ -3657,6 +3702,27 @@ function personalButton(label, action, primary = false) {
     b.type = "button";
     b.addEventListener("click", action);
     return b;
+}
+function personalSectionPosition(form, source, count) {
+    let destination = source;
+    const up = personalButton("↑", () => changeDestination(destination - 1));
+    const down = personalButton("↓", () => changeDestination(destination + 1));
+    up.setAttribute("aria-label", "Monter la section");
+    down.setAttribute("aria-label", "Descendre la section");
+    const position = node("span", "muted");
+    position.setAttribute("role", "status");
+    function changeDestination(index) {
+        destination = index;
+        up.disabled = destination === 0;
+        down.disabled = destination === count - 1;
+        setText(position, `Position ${destination + 1} sur ${count}`);
+    }
+    changeDestination(source);
+    form.append(position, up, down);
+    return {
+        reset: () => changeDestination(source),
+        destination: () => destination,
+    };
 }
 function personalRemoveButton(label, action) {
     const button = personalButton("", action);
@@ -4302,7 +4368,7 @@ function renderPersonalList() {
         if (!name) return;
         void mutate(async () => {
             const { group } = await postJSON("/api/v2/personal-decks/group-create", { name });
-            groups.push(group);
+            groups.unshift(group);
             groupForm.reset();
         }, addGroup);
     });
@@ -4609,8 +4675,7 @@ function renderPersonalList() {
                 heading.hidden = true;
                 renameForm.hidden = false;
                 field.value = group.name;
-                destination = source;
-                changeDestination(0);
+                position.reset();
                 field.focus();
                 field.select();
             });
@@ -4620,30 +4685,18 @@ function renderPersonalList() {
                 edit.focus();
             });
             const source = groups.indexOf(group);
-            let destination = source;
-            const up = personalButton("↑", () => changeDestination(-1));
-            const down = personalButton("↓", () => changeDestination(1));
-            up.setAttribute("aria-label", "Monter la section");
-            down.setAttribute("aria-label", "Descendre la section");
-            const position = node("span", "muted");
-            position.setAttribute("role", "status");
-            function changeDestination(delta) {
-                destination += delta;
-                up.disabled = destination === 0;
-                down.disabled = destination === groups.length - 1;
-                setText(position, `Position ${destination + 1} sur ${groups.length}`);
-            }
-            changeDestination(0);
+            renameForm.append(field);
+            const position = personalSectionPosition(renameForm, source, groups.length);
             const save = node("button", "primary-button", "Valider");
             save.type = "submit";
-            renameForm.append(field, position, up, down, save, cancel);
+            renameForm.append(save, cancel);
             renameForm.addEventListener("submit", event => {
                 event.preventDefault();
                 const name = field.value.trim();
                 if (!name) return;
                 void mutate(async () => {
                     await postJSON("/api/v2/personal-decks/group-rename", {
-                        group_id: group.id, name, move: destination - source,
+                        group_id: group.id, name, move: position.destination() - source,
                     });
                     await load(true);
                 }, save);
@@ -5176,7 +5229,7 @@ function renderPersonalEditor() {
             event.preventDefault();
             const sectionName = name.value.trim();
             if (!sectionName) { name.focus(); return; }
-            deck.sections.push({ id: crypto.randomUUID(), name: sectionName, cards: [] });
+            deck.sections.unshift({ id: crypto.randomUUID(), name: sectionName, cards: [] });
             sectionOrganization.name = "";
             personalChanged();
             renderPersonalEditor();
@@ -5245,13 +5298,23 @@ function renderPersonalEditor() {
         field.required = true;
         field.maxLength = 200;
         form.hidden = true;
+        form.append(field);
+        const source = deck.sections.indexOf(section);
+        const position = personalSectionPosition(form, source, deck.sections.length);
         const setSectionEditing = active => {
             form.hidden = !active;
             heading.hidden = active;
-            if (active) { field.value = section.name; field.focus(); field.select(); }
-            else modify.focus();
+            if (active) {
+                position.reset();
+                field.value = section.name;
+                field.focus();
+                field.select();
+            } else {
+                modify.focus();
+            }
         };
         const modify = personalButton("Modifier", () => setSectionEditing(true));
+        modify.id = `personal-section-modify-${section.id}`;
         modify.setAttribute("aria-label", `Modifier la section ${section.name}`);
         heading.append(title);
         if (sectionOrganization) heading.append(modify);
@@ -5261,6 +5324,16 @@ function renderPersonalEditor() {
             event.preventDefault();
             const nextName = field.value.trim();
             if (!nextName) { field.focus(); return; }
+            const destination = position.destination();
+            if (destination !== source) {
+                section.name = nextName;
+                deck.sections.splice(source, 1);
+                deck.sections.splice(destination, 0, section);
+                personalChanged();
+                renderPersonalEditor();
+                $(modify.id)?.focus();
+                return;
+            }
             if (nextName !== section.name) {
                 section.name = nextName;
                 modify.setAttribute("aria-label", `Modifier la section ${nextName}`);
@@ -5281,7 +5354,7 @@ function renderPersonalEditor() {
             renderPersonalEditor();
         });
         remove.disabled = deck.sections.length < 2;
-        form.append(field, saveSection, personalButton("Annuler", () => setSectionEditing(false)), remove);
+        form.append(saveSection, personalButton("Annuler", () => setSectionEditing(false)), remove);
         container.append(heading);
         if (sectionOrganization) container.append(form);
         const cards = node("div", "deck-cards personal-cards-edit");

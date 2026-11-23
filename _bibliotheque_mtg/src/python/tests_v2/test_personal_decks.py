@@ -125,7 +125,7 @@ def test_deck_groups_migrate_a_legacy_database_and_preserve_compositions(tmp_pat
 
     first = personal.create_deck_group(db, "Favoris")
     second = personal.create_deck_group(db, "À tester")
-    assert personal.list_deck_groups(db) == [first, second]
+    assert personal.list_deck_groups(db) == [second, first]
     assert personal.rename_deck_group(db, second["id"], "  Projets  ") == {**second, "name": "Projets"}
     assert personal.move_deck_to_group(db, deck["id"], first["id"]) == {
         "id": deck["id"], "group_id": first["id"]}
@@ -139,7 +139,7 @@ def test_deck_groups_migrate_a_legacy_database_and_preserve_compositions(tmp_pat
     backup = tmp_path / "personal-decks-backups/latest.sqlite"
     restored = personal.restore_backup(backup, tmp_path / "restored.sqlite")
     assert personal.list_decks(restored, include_groups=True) == [current]
-    assert personal.list_deck_groups(restored) == [first, {**second, "name": "Projets"}]
+    assert personal.list_deck_groups(restored) == [{**second, "name": "Projets"}, first]
 
     personal.delete_deck_group(db, second["id"])
     assert personal.list_deck_groups(db) == [first]

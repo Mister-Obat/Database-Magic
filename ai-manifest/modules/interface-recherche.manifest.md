@@ -38,14 +38,17 @@ action que Valider. Annuler ferme le sélecteur et abandonne la saisie en cours.
 Dans un deck personnel, la grille reste en présentation de consultation avec
 quantités, retrait confirmé et déplacement par glisser-déposer. Le nom de
 chaque section se modifie sur place, avec validation, annulation ou suppression.
+Les flèches haut et bas modifient sa position en brouillon, puis Valider
+applique le nom et la position ensemble.
 Le formulaire Modifier du titre garde le nom et le design de la boîte en
 brouillon jusqu’à validation. Le design se choisit dans une galerie modale
 des boîtes 3D, avec la carte de couverture actuelle ou une fenêtre noire si
 son image manque. Le clic sur une boîte ferme la galerie et reporte son nom
 dans le formulaire. Valider applique le design dans la liste et sur l’Accueil.
 Les couleurs restent affichées dans le titre.
-Les sections de la liste Deck perso sont ordonnées et les nouvelles sections
-s'ajoutent après les autres. Les sections créées restent visibles, même vides.
+Les nouvelles sections s’ajoutent en tête des sections nommées dans la liste
+Deck perso et en tête des sections dans une composition. Les sections créées
+restent visibles, même vides.
 Sans section reste en tête lorsqu’elle contient des résultats. Elle reste
 masquée si elle est vide, y compris pendant un glisser-déposer. Le déplacement
 entre les sections visibles reste actif en consultation comme en organisation. Dans le
@@ -474,11 +477,19 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   privilégient les préfixes et affichent au plus huit suggestions. Dans Decks,
   les suggestions restent limitées aux éditions effectivement représentées par
   les decks indexés.
+  Chaque champ conserve jusqu’à dix termes récents dans un historique local
+  indépendant. Un terme est mémorisé à la sélection d’un résultat. Cliquer sur
+  un terme relance les suggestions d’éditions et sa croix le supprime.
+  Dans Recherche et Decks préconstruits, choisir une édition garde le champ
+  ouvert et ajoute son code au filtre existant. Depuis le filtre sans restriction (« Toutes sélectionnées »),
+  le premier choix initialise la sélection. Un doublon affiche un message sans
+  changer le filtre. Un ajout affiche une confirmation et surligne brièvement
+  le compteur lorsque la préférence de mouvement le permet.
 - Le sélecteur d'éditions conserve la liste complète des groupes, ordonnée par
   sortie décroissante de leur édition racine. Les séries sont chargées une seule fois pour
   la session et partagée par l'onglet Éditions et le sélecteur d'édition de la
   vue Recherche ; son absence empêcherait aussi les suggestions. La recherche
-  attenante ne modifie jamais ce sélecteur : elle propose au plus huit groupes
+  attenante conserve la liste complète des groupes : elle propose au plus huit groupes
   sous son propre champ, par nom français/anglais ou code de groupe et de
   sous-édition. Choisir une
   suggestion sélectionne le groupe dans la liste complète et ouvre ses cartes.
@@ -688,7 +699,8 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   seulement : Codex en transcrit les champs, puis la génération reçoit uniquement
   l'image visuelle et cette transcription. La publication reste liée à
   l'impression cible. À l'étape 2, la vignette choisie garde le même contour de
-  sélection qu'à l'étape 1.
+  sélection qu'à l'étape 1. Le choix « Aucune image de référence » applique
+  le parcours de texte de la base locale.
   La revue d'une génération réussie utilise toute la largeur de la modale pour
   les cartes de référence et la candidate IA côte à côte, entièrement visibles
   avec `object-fit: contain` sans barre de défilement qui coupe l'image. La zone
@@ -920,7 +932,7 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   nom et les couleurs, ainsi que leurs séparateurs et titres de section avec le
   nombre de cartes entre parenthèses. Les deux compositions partagent le même espacement autour des titres de section. Aucun total général n’est affiché.
   **Organiser les sections** affiche le formulaire d’ajout sous la barre
-  d’actions et donne accès au renommage et à la suppression des sections.
+  d’actions et donne accès au renommage, au déplacement et à la suppression des sections.
   En consultation, ces commandes sont masquées. Dans la liste des decks,
   le séparateur droit n’apparaît qu’entre deux sections.
 - Pendant l’organisation, Créer et Importer sont désactivés dans la liste.

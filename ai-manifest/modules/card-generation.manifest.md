@@ -59,7 +59,9 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   local validé, même si la recherche approfondie a trouvé d'autres variantes.
   Elle peut guider la référence visuelle et, si elle est française, la référence
   textuelle ; elle reste `visual_only` pour le choix de publication.
-- Quand l'utilisateur choisit les informations de la base locale, l'interface
+- À l’étape 2, le choix « Aucune image de référence » utilise les données
+  officielles de la base locale comme source de texte. L’image visuelle
+  sélectionnée à l’étape 1 reste la référence graphique. L’interface
   précontrôle le texte français avant de démarrer imagegen. Si aucun texte officiel
   compatible n'existe, elle affiche l'avertissement « pas de traduction
   française officielle dans votre database », un prompt utilisateur facultatif,

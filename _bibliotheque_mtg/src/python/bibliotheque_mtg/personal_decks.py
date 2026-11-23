@@ -294,7 +294,7 @@ def create_deck_group(path, name):
     group = {"id": _id(), "name": _text(name, "Nom de section")}
     with _database(path) as conn:
         conn.execute("""INSERT INTO personal_deck_groups (id, name, position)
-            SELECT ?, ?, COALESCE(MAX(position), -1) + 1 FROM personal_deck_groups""",
+            SELECT ?, ?, COALESCE(MIN(position), 1) - 1 FROM personal_deck_groups""",
                      (group["id"], group["name"]))
     return group
 
