@@ -3417,6 +3417,10 @@ attachScrollTop($("deck-pager"), "decks-title", true);
 attachScrollTop($("archive-pager"), "archive-title", true);
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => {
   const view = button.dataset.view;
+  if (view === "decks" && state.view === view && state.openDeckId) {
+    closeDeck();
+    return;
+  }
   if (view === "perso" && state.view === view && personalState.deck) {
     void returnToPersonalList();
     return;
@@ -4156,6 +4160,26 @@ async function readPersonalTextFile(file) {
     if (new TextEncoder().encode(text).byteLength > maxBytes) throw new Error("Le fichier de deck dépasse 200 Kio de texte.");
     return text;
 }
+function keepPersonalDropInView(findGrid, update) {
+    const grid = findGrid();
+    if (!grid?.getClientRects().length) {
+        update();
+        return;
+    }
+    const top = grid.getBoundingClientRect().top;
+    const page = document.scrollingElement;
+    const previousAnchor = page.style.overflowAnchor;
+    page.style.overflowAnchor = "none";
+    try {
+        update();
+        const next = findGrid();
+        if (next?.getClientRects().length) {
+            window.scrollBy({ top: next.getBoundingClientRect().top - top, behavior: "instant" });
+        }
+    } finally {
+        page.style.overflowAnchor = previousAnchor;
+    }
+}
 function renderPersonalList() {
     updatePersonalHeading();
     const root = $("personal-content");
@@ -4290,18 +4314,19 @@ function renderPersonalList() {
         } else if (sort.value === "recent") {
             items.sort((a, b) => direction * (a.creation_order - b.creation_order));
         }
-        list.replaceChildren();
+        const content = document.createDocumentFragment();
         const groupsById = new Map(groups.map(group => [group.id, []]));
         const ungrouped = [];
         for (const deck of items) (groupsById.get(deck.group_id) || ungrouped).push(deck);
         if (groups.length || organizing) {
-            list.append(renderGroup(null, ungrouped));
-            for (const group of groups) list.append(renderGroup(group, groupsById.get(group.id)));
+            content.append(renderGroup(null, ungrouped));
+            for (const group of groups) content.append(renderGroup(group, groupsById.get(group.id)));
         } else if (ungrouped.length) {
-            list.append(renderGrid(null, ungrouped));
+            content.append(renderGrid(null, ungrouped));
         }
         if (!items.length && !groups.length && !organizing)
-            list.append(node("p", "empty-state", "Aucun deck personnel pour cette sélection."));
+            content.append(node("p", "empty-state", "Aucun deck personnel pour cette sélection."));
+        list.replaceChildren(content);
     }
     function renderGrid(groupId, items) {
         const grid = node("div", "personal-deck-grid");
@@ -4353,10 +4378,7 @@ function renderPersonalList() {
             drag.tile.style.width = `${bounds.width}px`;
             // Set both coordinates before moving the live tile out of its grid.
             drag.tile.style.translate = `${bounds.left}px ${bounds.top}px`;
-            // Keep a section target available when its only box is lifted.
-            if (drag.source.childElementCount === 1) {
-                drag.source.style.minHeight = `${drag.source.offsetHeight}px`;
-            }
+            drag.source.style.minHeight = `${drag.source.offsetHeight}px`;
             drag.entry.classList.add("personal-deck-slot");
             drag.tile.classList.add("personal-deck-dragging");
             document.body.append(drag.tile);
@@ -4463,8 +4485,10 @@ function renderPersonalList() {
         const changed = target && (target !== source || entry.nextElementSibling !== next);
         const beforeId = entry.nextElementSibling?.dataset.deckId || null;
         const groupId = target?.dataset.groupId || null;
-        finishDrag(Boolean(changed));
+        const findGrid = () => list.querySelector(`[data-group-id="${CSS.escape(groupId || "")}"]`);
+        keepPersonalDropInView(findGrid, () => finishDrag(Boolean(changed)));
         if (!changed) return;
+        const renderAfterMove = () => keepPersonalDropInView(findGrid, render);
         void mutate(async () => {
             try {
                 await postJSON("/api/v2/personal-decks/group-move", {
@@ -4476,10 +4500,10 @@ function renderPersonalList() {
                 deck.group_id = groupId;
                 landedDeckId = deck.id;
             } catch (error) {
-                if (list.isConnected) render();
+                if (list.isConnected) renderAfterMove();
                 throw error;
             }
-        });
+        }, null, renderAfterMove);
     }
     function renderGroup(group, items) {
         const section = node("section", "deck-section personal-list-group");
@@ -4554,7 +4578,7 @@ function renderPersonalList() {
         section.append(grid);
         return section;
     }
-    async function mutate(action, button) {
+    async function mutate(action, button, renderResult = render) {
         if (busy) return;
         busy = true;
         ++latestLoad;
@@ -4562,7 +4586,7 @@ function renderPersonalList() {
         try {
             personalStatus("");
             await action();
-            if (list.isConnected) render();
+            if (list.isConnected) renderResult();
         } catch (error) {
             if (list.isConnected) personalStatus(error.message, true);
         } finally {
@@ -4760,15 +4784,19 @@ function startPersonalCardDrag(event, root, tile, source, sectionId, cardId) {
         const target = commit ? drag.target : null;
         const before = tile.nextElementSibling;
         const changed = target && (target !== source || before !== drag.originalNext);
-        drag.animations.forEach(animation => animation.cancel());
-        drag.target?.parentElement.classList.remove("personal-drop-target");
-        drag.ghost.remove();
-        source.style.minHeight = "";
-        tile.classList.remove("personal-card-placeholder");
-        if (source.isConnected) source.insertBefore(tile, drag.originalNext);
-        personalState.drag = null;
+        const destinationId = target?.dataset.personalCardSection || sectionId;
+        const findGrid = () => root.querySelector(`[data-personal-card-section="${CSS.escape(destinationId)}"]`);
+        keepPersonalDropInView(findGrid, () => {
+            drag.animations.forEach(animation => animation.cancel());
+            drag.target?.parentElement.classList.remove("personal-drop-target");
+            drag.ghost.remove();
+            source.style.minHeight = "";
+            tile.classList.remove("personal-card-placeholder");
+            if (source.isConnected) source.insertBefore(tile, drag.originalNext);
+            personalState.drag = null;
 
-        if (changed) personalMove(sectionId, cardId, target.dataset.personalCardSection, before?.dataset.personalCard);
+            if (changed) personalMove(sectionId, cardId, destinationId, before?.dataset.personalCard);
+        });
     }
 
     function scroll() {
@@ -4982,7 +5010,7 @@ function renderPersonalEditor() {
     hoverPreview.hidden = true;
     if (!deck)
         return;
-    root.replaceChildren();
+    const content = document.createDocumentFragment();
     const actions = node("div", "personal-toolbar"), back = personalButton("Retour à la liste", async () => {
         back.disabled = true;
         if (!await returnToPersonalList()) back.disabled = false;
@@ -5038,7 +5066,7 @@ function renderPersonalEditor() {
     sort.disabled = !deck.sections.some(section => section.cards.length > 1);
     editActions.append(duplicate, organize, sort);
     actions.append(editActions);
-    root.append(actions);
+    content.append(actions);
     if (sectionOrganization) {
         const form = node("form", "personal-section-form personal-section-organizer-form");
         const name = node("input");
@@ -5062,7 +5090,7 @@ function renderPersonalEditor() {
             renderPersonalEditor();
             $(name.id)?.focus();
         });
-        root.append(form);
+        content.append(form);
     }
     if (editing) {
         const fields = node("form", "panel personal-toolbar personal-deck-fields"), label = node("label", "", "Nom du deck"), name = node("input");
@@ -5089,10 +5117,10 @@ function renderPersonalEditor() {
             personalChanged();
             finish();
         });
-        root.append(fields);
+        content.append(fields);
     }
     if (!deck.sections.some(section => section.cards.length)) {
-        root.append(node("p", "empty-state", "Ajoutez des cartes depuis Recherche."));
+        content.append(node("p", "empty-state", "Ajoutez des cartes depuis Recherche."));
     }
     for (const section of deck.sections) {
         const container = node("section", "deck-section personal-section");
@@ -5205,9 +5233,10 @@ function renderPersonalEditor() {
         if (!section.cards.length)
             cards.append(node("p", "muted", "Section vide · Déposez une carte ici."));
         container.append(cards);
-        root.append(container);
+        content.append(container);
     }
-    root.append(scrollTopFooter("personal-title"));
+    content.append(scrollTopFooter("personal-title"));
+    root.replaceChildren(content);
 }
 function duplicatePersonalDeck(deck) {
     const dialog = node("dialog", "personal-picker personal-duplicate");

@@ -595,8 +595,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   titre anglais du deck lorsqu'il diffère. La sélection d'édition transmet son
   code stable ; les types de produit gardent leur valeur anglaise en API mais
   s'affichent en français. La composition préconstruite s’ouvre dans l’onglet
-  Decks et reste ouverte au changement d’onglet. Retour à la liste réaffiche
-  les résultats déjà chargés au même emplacement de défilement. Le détail
+  Decks et reste ouverte au changement d’onglet. Un clic sur Deck préconstruit
+  alors que cet onglet est déjà actif et qu’un deck est ouvert équivaut à
+  Retour à la liste. Cette action réaffiche les résultats déjà chargés au même
+  emplacement de défilement. Le détail
   affiche le type, le nom et les couleurs, puis les actions Retour à la liste,
   Exporter et Créer un deck perso avant la composition.
 - Chaque onglet mémorise sa position de défilement pendant la session. Une
@@ -915,6 +917,9 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   cartes voisines dans la section survolée, y compris entre sections.
   Seul le dépôt valide le nouvel ordre. La préférence de mouvement réduit
   conserve l’emplacement visible sans animation des cartes voisines.
+  Dans la liste et dans la composition, réserver la hauteur de la grille source
+  pendant la prise. Au dépôt, garder la grille de destination à la même hauteur
+  dans la fenêtre, y compris si une rangée apparaît ou disparaît au-dessus.
 - Retirer une carte du deck demande une confirmation avant de modifier la liste.
 - **Supprimer le deck** est disponible entre **Valider** et **Annuler** dans
   le formulaire **Modifier** du titre. La boîte de confirmation reprend le
