@@ -38,11 +38,17 @@ action que Valider. Annuler ferme le sélecteur et abandonne la saisie en cours.
 Dans un deck personnel, la grille reste en présentation de consultation avec
 quantités, retrait confirmé et déplacement par glisser-déposer. Le nom de
 chaque section se modifie sur place, avec validation, annulation ou suppression.
-Le formulaire Modifier du titre garde le nom en brouillon jusqu’à validation.
+Le formulaire Modifier du titre garde le nom et le design de la boîte en
+brouillon jusqu’à validation. Le design se choisit dans une galerie modale
+des boîtes 3D, avec la carte de couverture actuelle ou une fenêtre noire si
+son image manque. Le clic sur une boîte ferme la galerie et reporte son nom
+dans le formulaire. Valider applique le design dans la liste et sur l’Accueil.
 Les couleurs restent affichées dans le titre.
 Les sections de la liste Deck perso sont ordonnées et les nouvelles sections
-s'ajoutent après les autres. Sans section reste en tête. Le glisser-déposer
-entre sections reste actif en consultation comme en organisation. Dans le
+s'ajoutent après les autres. Les sections créées restent visibles, même vides.
+Sans section reste en tête lorsqu’elle contient des résultats. Elle reste
+masquée si elle est vide, y compris pendant un glisser-déposer. Le déplacement
+entre les sections visibles reste actif en consultation comme en organisation. Dans le
 mode d’organisation, l’ordre et le nouveau nom d’une section sont appliqués
 ensemble à la validation.
 Le bouton Modifier se trouve dans le titre du deck. L’action Dupliquer ouvre
@@ -807,6 +813,14 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   pour incolore), une révision et des sections ordonnées identifiées par UUID.
   Les entrées conservent les identités exactes fournisseur/impression, leur
   quantité et les métadonnées utiles à la consultation hors catalogue futur.
+- Le champ `box_design` indique le modèle de boîte du deck personnel.
+  Les valeurs admises sont `standard`, `obsidian`, `plains`, `island`,
+  `swamp`, `mountain`, `forest`, `silver`, `copper` et `indigo`. Les
+  nouveaux decks et les anciens decks sans modèle utilisent `standard`.
+  Une sauvegarde qui omet ce champ conserve le choix existant et une
+  duplication le reprend. La liste, l’Accueil et le détail du deck le renvoient.
+- Le décor panoramique WebP de la boîte Obsidienne est servi depuis les
+  ressources de l’interface à l’adresse `/deck-box-obsidian.webp`.
 - Stocker les compositions dans une SQLite dédiée sous `_bibliotheque_mtg/state/`,
   indépendante des versions du catalogue. Transactions durables, historique des
   révisions et contrôle de concurrence évitent les écrasements silencieux.
@@ -910,8 +924,9 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Les tris par nom et par ajout restent des vues non modifiables.
   Chaque section de la liste, y compris la première, reprend le séparateur
   et l’espacement des sections d’une composition ouverte.
-- Réutiliser la présentation des filtres Recherche, avec Incolore exclusif,
-  correspondance normale ou exacte et tri. La création est hors des filtres.
+- Le nom, les couleurs et le tri filtrent la liste de Deck perso immédiatement.
+  Le mode de couleur conserve Incolore exclusif et la correspondance normale
+  ou exacte. La création est hors des filtres.
 - Dans la composition, le glisser-déposer fait défiler la page près des bords.
   La carte saisie suit le pointeur en relief. Un emplacement visible décale les
   cartes voisines dans la section survolée, y compris entre sections.

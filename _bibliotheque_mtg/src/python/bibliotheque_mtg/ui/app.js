@@ -924,7 +924,7 @@ async function refreshHomeActivity() {
       const recentDecks = decks.map(deck => {
         const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card, () => {
           location.hash = `#perso?deck=${encodeURIComponent(deck.id)}`;
-        });
+        }, null, deck.box_design);
         tile.title = deck.name;
         return tile;
       });
@@ -4121,7 +4121,7 @@ function personalColorField(values, onChange) {
         colors => onChange(colors.filter(color => color !== "C"))));
     return field;
 }
-function deckCoverTile(name, colors, cover, open, edition = null) {
+function deckCoverTile(name, colors, cover, open, edition = null, design = "standard") {
     const tile = personalButton("", open);
     tile.className = "personal-deck-tile";
     tile.title = name;
@@ -4143,7 +4143,7 @@ function deckCoverTile(name, colors, cover, open, edition = null) {
     box.append(node("span", "deck-box-fallback"), panel);
     tile.append(box);
     if (edition) tile.append(edition);
-    mountDeckBox(tile, box, panel, frame, title, mana);
+    mountDeckBox(tile, box, panel, frame, title, mana, design);
     return tile;
 }
 async function readPersonalTextFile(file) {
@@ -4185,6 +4185,7 @@ function renderPersonalList() {
     const root = $("personal-content");
     let decks = null, groups = [], organizing = false, importing = false;
     let busy = false, drag = null, landedDeckId = null, latestLoad = 0;
+    let ungroupedSection = null;
     const create = personalButton("Créer un deck", renderPersonalCreate, true);
     const actions = node("div", "search-header-actions personal-list-actions");
     const filePicker = node("input");
@@ -4255,7 +4256,9 @@ function renderPersonalList() {
             }
         }, importText).finally(() => { importing = false; });
     });
-    const form = node("form", "search-form"), row = node("div", "search-primary-row personal-filter-row");
+    const filters = node("div", "search-form"), row = node("div", "search-primary-row personal-filter-row");
+    filters.setAttribute("role", "search");
+    filters.setAttribute("aria-label", "Rechercher dans les decks personnels");
     const nameLabel = node("label", "", "Nom du deck"), name = node("input");
     name.type = "search";
     name.placeholder = "Rechercher par nom";
@@ -4278,19 +4281,10 @@ function renderPersonalList() {
     orderLabel.append(order);
     orderFields.append(sortLabel, orderLabel);
     refine.append(orderFields);
-    const controls = node("div", "form-actions");
-    const search = node("button", "primary-button", "Rechercher");
-    search.type = "submit";
-    controls.append(search, personalButton("Effacer les filtres", () => {
-        form.reset();
-        colors = [];
-        colorFilter.querySelectorAll("button").forEach(button => setManaPressed(button, false));
-        render();
-    }));
-    form.append(row, refine, controls);
+    filters.append(row, refine);
     const list = node("div", "personal-list-groups");
     $("personal-heading-content").querySelector(".deck-heading").append(actions);
-    root.replaceChildren(importReport, form, groupForm, list, scrollTopFooter("personal-title"));
+    root.replaceChildren(importReport, filters, groupForm, list, scrollTopFooter("personal-title"));
     personalState.refreshList = (manual = false) => {
         if (list.isConnected && !busy && !importing && !drag && (manual || !organizing)) return load(true);
     };
@@ -4318,8 +4312,12 @@ function renderPersonalList() {
         const groupsById = new Map(groups.map(group => [group.id, []]));
         const ungrouped = [];
         for (const deck of items) (groupsById.get(deck.group_id) || ungrouped).push(deck);
+        ungroupedSection = null;
         if (groups.length || organizing) {
-            content.append(renderGroup(null, ungrouped));
+            if (ungrouped.length) {
+                ungroupedSection = renderGroup(null, ungrouped);
+                content.append(ungroupedSection);
+            }
             for (const group of groups) content.append(renderGroup(group, groupsById.get(group.id)));
         } else if (ungrouped.length) {
             content.append(renderGrid(null, ungrouped));
@@ -4337,7 +4335,8 @@ function renderPersonalList() {
     function renderDeck(deck) {
         const entry = node("article", "personal-list-entry");
         entry.dataset.deckId = deck.id;
-        const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card, () => void openPersonalDeck(deck.id));
+        const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card,
+            () => void openPersonalDeck(deck.id), null, deck.box_design);
         if (deck.id === landedDeckId) {
             tile.classList.add("personal-deck-landed");
             landedDeckId = null;
@@ -4457,7 +4456,7 @@ function renderPersonalList() {
     function cancelPointerDrag(event) {
         if (event.pointerId === drag?.pointer) finishDrag();
     }
-    function finishDrag(keepPosition = false) {
+    function finishDrag(keepPosition = false, anchorGrid = drag?.source) {
         if (!drag) return;
         const { listeners, active, pointer, tile, entry, source, next, animations, frame } = drag;
         drag = null;
@@ -4466,13 +4465,18 @@ function renderPersonalList() {
         cancelAnimationFrame(frame);
         for (const animation of animations.values()) animation.cancel();
         if (list.hasPointerCapture(pointer)) list.releasePointerCapture(pointer);
-        if (!keepPosition) source.insertBefore(entry, next);
-        source.style.removeProperty("min-height");
-        tile.style.removeProperty("width");
-        tile.style.removeProperty("translate");
-        tile.classList.remove("personal-deck-dragging");
-        entry.classList.remove("personal-deck-slot");
-        entry.append(tile);
+        keepPersonalDropInView(() => anchorGrid, () => {
+            if (!keepPosition) source.insertBefore(entry, next);
+            source.style.removeProperty("min-height");
+            tile.style.removeProperty("width");
+            tile.style.removeProperty("translate");
+            tile.classList.remove("personal-deck-dragging");
+            entry.classList.remove("personal-deck-slot");
+            entry.append(tile);
+            if (ungroupedSection) {
+                ungroupedSection.hidden = !ungroupedSection.querySelector(".personal-list-entry");
+            }
+        });
         document.body.classList.remove("personal-deck-drag-active");
         tile.dispatchEvent(new Event("deckboxrelease"));
     }
@@ -4486,7 +4490,7 @@ function renderPersonalList() {
         const beforeId = entry.nextElementSibling?.dataset.deckId || null;
         const groupId = target?.dataset.groupId || null;
         const findGrid = () => list.querySelector(`[data-group-id="${CSS.escape(groupId || "")}"]`);
-        keepPersonalDropInView(findGrid, () => finishDrag(Boolean(changed)));
+        finishDrag(Boolean(changed), target || source);
         if (!changed) return;
         const renderAfterMove = () => keepPersonalDropInView(findGrid, render);
         void mutate(async () => {
@@ -4611,7 +4615,6 @@ function renderPersonalList() {
             list.append(personalButton("Réessayer", () => void load()));
         }
     }
-    form.addEventListener("submit", event => { event.preventDefault(); render(); });
     for (const select of [mode, sort, order]) select.addEventListener("change", render);
     name.addEventListener("input", render);
     void load();
@@ -5039,12 +5042,12 @@ function renderPersonalEditor() {
             "Écriture du fichier TXT…", result => `Fichier créé sur le Bureau · ${result.file || result.path}`),
     );
     const editButton = personalButton("Modifier", () => {
-        personalState.editing = { name: deck.name };
+        personalState.editing = { name: deck.name, boxDesign: deck.box_design ?? "standard" };
         renderPersonalEditor();
         $("personal-content").querySelector(".personal-deck-fields input")?.focus();
     });
     editButton.classList.add("personal-heading-edit");
-    editButton.setAttribute("aria-label", "Modifier le nom et les couleurs");
+    editButton.setAttribute("aria-label", "Modifier le nom et le design de la boîte");
     updatePersonalHeading(deck, editing ? null : editButton);
     const organize = personalButton(sectionOrganization ? "Terminer l’organisation" : "Organiser les sections", () => {
         personalState.sectionOrganization = sectionOrganization ? null : { name: "" };
@@ -5108,14 +5111,33 @@ function renderPersonalEditor() {
         };
         buttons.append(validate, personalButton("Supprimer le deck", () => confirmPersonalDeckDeletion(deck)),
             personalButton("Annuler", finish));
-        fields.append(label, buttons);
+        const designField = node("div", "personal-box-design-field");
+        const designLabel = node("span", "", "Design du deckbox");
+        designLabel.id = "personal-box-design-label";
+        const currentDesign = deckBoxDesigns.find(([id]) => id === editing.boxDesign)?.[1] ?? "Standard";
+        const design = personalButton(currentDesign, () => choosePersonalBoxDesign(deck, editing, (id, title) => {
+            editing.boxDesign = id;
+            setText(design, title);
+        }));
+        design.id = "personal-box-design-button";
+        design.setAttribute("aria-haspopup", "dialog");
+        design.setAttribute("aria-labelledby", `${designLabel.id} ${design.id}`);
+        designField.append(designLabel, design);
+        fields.append(label, designField, buttons);
         fields.addEventListener("submit", event => {
             event.preventDefault();
             const nextName = name.value.trim();
             if (!nextName) { name.focus(); return; }
+            const designChanged = editing.boxDesign !== (deck.box_design ?? "standard");
             deck.name = nextName;
+            deck.box_design = editing.boxDesign;
             personalChanged();
             finish();
+            if (designChanged) void flushPersonal().then(async saved => {
+                if (!saved || state.view !== "info") return;
+                await homeActivityRequest;
+                if (state.view === "info") await refreshHomeActivity();
+            });
         });
         content.append(fields);
     }
@@ -5237,6 +5259,32 @@ function renderPersonalEditor() {
     }
     content.append(scrollTopFooter("personal-title"));
     root.replaceChildren(content);
+}
+function choosePersonalBoxDesign(deck, editing, onSelect) {
+    const dialog = node("dialog", "personal-picker personal-box-design-picker");
+    const heading = node("h2", "", "Design du deckbox");
+    heading.id = "personal-box-design-title";
+    dialog.setAttribute("aria-labelledby", heading.id);
+    const gallery = node("div", "personal-picker-body personal-box-design-gallery");
+    const cover = deck.sections.find(section => section.cards.length)?.cards[0];
+    const colors = deck.composition_colors ?? deck.colors ?? [];
+    for (const [id, label] of deckBoxDesigns) {
+        const tile = deckCoverTile(editing.name.trim() || deck.name, colors, cover, () => {
+            onSelect(id, label);
+            dialog.close();
+        }, node("span", "personal-box-design-name", label), id);
+        tile.setAttribute("aria-label", label);
+        tile.title = label;
+        tile.setAttribute("aria-pressed", String(id === editing.boxDesign));
+        if (id === editing.boxDesign) tile.autofocus = true;
+        gallery.append(tile);
+    }
+    const footer = node("div", "personal-picker-footer");
+    footer.append(personalButton("Annuler", () => dialog.close()));
+    dialog.append(heading, gallery, footer);
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
 }
 function duplicatePersonalDeck(deck) {
     const dialog = node("dialog", "personal-picker personal-duplicate");

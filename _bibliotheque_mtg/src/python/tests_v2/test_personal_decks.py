@@ -76,6 +76,29 @@ def test_durable_revisions_backup_and_conflict(tmp_path):
         personal.restore_backup(backup, db)
 
 
+@pytest.mark.parametrize("design", [
+    "standard", "obsidian", "plains", "island", "swamp", "mountain", "forest",
+    "silver", "copper", "indigo",
+])
+def test_box_design_defaults_and_survives_save_and_duplicate(tmp_path, design):
+    db = tmp_path / "personal.sqlite"
+    deck = personal.create_deck(db, "Ancien deck", [])
+    assert deck.pop("box_design") == "standard"
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE personal_decks SET document=? WHERE id=?", (json.dumps(deck), deck["id"]))
+    assert personal.get_deck(db, deck["id"])["box_design"] == "standard"
+
+    deck = personal.save_deck(db, {**deck, "box_design": design})
+    assert personal.summary_with_media(deck, None)["box_design"] == design
+    with pytest.raises(ValueError, match="Modèle"):
+        personal.save_deck(db, {**deck, "box_design": None})
+    del deck["box_design"]
+    deck = personal.save_deck(db, deck)
+    assert personal.get_deck(db, deck["id"])["box_design"] == design
+    copied = personal.duplicate_deck(db, deck["id"], "Copie", deck["revision"])
+    assert copied["box_design"] == design
+
+
 def test_deck_groups_migrate_a_legacy_database_and_preserve_compositions(tmp_path):
     db = tmp_path / "personal.sqlite"
     deck = personal.create_deck(db, "Ancien deck", ["G"])
@@ -389,16 +412,24 @@ def test_http_origin_routes_and_stale_save(cards, tmp_path, monkeypatch):
         deck = result["deck"]
         assert request("/api/v2/personal-decks/add", {"deck_id": deck["id"], "provider_card_id": "id1"})[0] == 200
         assert request("/api/v2/personal-decks/save", {"deck": deck})[0] == 409
-        assert request("/api/v2/personal-deck?id=" + deck["id"])[1]["deck"]["revision"] == 2
+        opened = request("/api/v2/personal-deck?id=" + deck["id"])[1]["deck"]
+        assert opened["revision"] == 2 and opened["box_design"] == "standard"
+        opened["box_design"] = "obsidian"
+        assert request("/api/v2/personal-decks/save", {"deck": opened})[0] == 200
+        with urllib.request.urlopen(base + "/deck-box-obsidian.webp", timeout=5) as texture:
+            assert texture.headers.get_content_type() == "image/webp"
+            assert texture.read(12)[8:] == b"WEBP"
+        assert request("/api/v2/recent-activity")[1]["personal_decks"][0]["box_design"] == "obsidian"
+        assert request("/api/v2/personal-decks?summary=1")[1]["items"][0]["box_design"] == "obsidian"
         assert len(request("/api/v2/personal-decks?q=HTTP&colors=W")[1]["items"]) == 1
         assert request("/api/v2/personal-decks/create", {"name": "bad", "colors": [1]})[0] == 400
         delete_url = "/api/v2/personal-decks/delete"
         delete_request = {"deck_id": deck["id"], "revision": 1}
         assert request(delete_url, delete_request, "https://evil.test")[0] == 403
         assert request(delete_url, delete_request)[0] == 409
-        delete_request["revision"] = 2
+        delete_request["revision"] = 3
         assert request(delete_url, delete_request) == (
-            200, {"deleted": True, "deck_id": deck["id"], "revision": 3})
+            200, {"deleted": True, "deck_id": deck["id"], "revision": 4})
         assert request("/api/v2/personal-decks")[1]["items"] == []
         assert request("/api/v2/personal-deck?id=" + deck["id"])[0] == 404
         assert request("/api/v2/personal-decks/save", {"deck": deck})[0] == 404

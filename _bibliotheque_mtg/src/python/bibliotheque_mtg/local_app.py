@@ -1788,6 +1788,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 self._send(200, (UI_ROOT / "assets/deck-box-grain.png").read_bytes(), "image/png")
             elif route == "/deck-box-fallback.webp":
                 self._send(200, (UI_ROOT / "assets/deck-box-fallback.webp").read_bytes(), "image/webp")
+            elif route == "/deck-box-obsidian.webp":
+                self._send(200, (UI_ROOT / "assets/deck-box-obsidian.webp").read_bytes(), "image/webp")
             elif route == "/app.js":
                 file = _safe_child(UI_ROOT, "app.js")
                 self._send(200, file.read_bytes(), "text/javascript; charset=utf-8")

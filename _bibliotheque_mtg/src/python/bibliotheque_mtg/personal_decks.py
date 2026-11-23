@@ -23,6 +23,11 @@ SECTION_LABELS = {"commander": "Commandant", "mainboard": "Deck principal",
                   "planar_deck": "Deck planaire", "scheme_deck": "Machinations", "tokens": "Jetons"}
 _BACKUP_LOCK = threading.Lock()
 _UNSPECIFIED_POSITION = object()
+DEFAULT_BOX_DESIGN = "standard"
+BOX_DESIGNS = frozenset({
+    DEFAULT_BOX_DESIGN, "obsidian", "plains", "island", "swamp", "mountain",
+    "forest", "silver", "copper", "indigo",
+})
 
 
 class RevisionConflict(ValueError):
@@ -43,6 +48,12 @@ def _colors(value):
     if not isinstance(value, list) or any(not isinstance(c, str) or len(c) != 1 or c not in "WUBRG" for c in value):
         raise ValueError("Couleurs invalides : choisir W/U/B/R/G.")
     return [c for c in "WUBRG" if c in value]
+
+
+def _box_design(value):
+    if not isinstance(value, str) or value not in BOX_DESIGNS:
+        raise ValueError("Modèle de boîte de deck invalide.")
+    return value
 
 
 @contextmanager
@@ -106,6 +117,7 @@ def composition_sections(deck):
 
 def _read_document(document):
     deck = json.loads(document)
+    deck.setdefault("box_design", DEFAULT_BOX_DESIGN)
     sections = composition_sections(deck)
     if not sections and deck["sections"]:
         sections = [{"id": deck["sections"][0]["id"], "name": "Deck principal", "cards": []}]
@@ -153,9 +165,10 @@ def _write(conn, deck):
     return deck
 
 
-def _new(name, colors, sections=None, commander=False):
+def _new(name, colors, sections=None, commander=False, *, box_design=DEFAULT_BOX_DESIGN):
     names = (["Commandant"] if commander else []) + list(SECTION_NAMES)
     return {"id": _id(), "name": _text(name, "Nom"), "colors": _colors(colors), "revision": 1,
+            "box_design": _box_design(box_design),
             "sections": sections if sections is not None else [
                 {"id": _id(), "name": name, "cards": [],
                  **({"source_section": "tokens"} if name == "Jetons" else
@@ -194,7 +207,8 @@ def duplicate_deck(path, deck_id, name, revision):
             section["id"] = _id()
             for card in section["cards"]:
                 card["id"] = _id()
-        return _write(conn, _new(name, source["colors"], sections=source["sections"]))
+        return _write(conn, _new(name, source["colors"], sections=source["sections"],
+                                 box_design=source["box_design"]))
 
 
 def _read_connection(path):
@@ -385,6 +399,7 @@ def save_deck(path, draft):
         current = _read(conn, draft.get("id"))
         if type(draft.get("revision")) is not int or draft["revision"] != current["revision"]:
             raise RevisionConflict("Ce deck a changé. Rechargez-le avant de réessayer.")
+        box_design = _box_design(draft.get("box_design", current["box_design"]))
         sections = draft.get("sections")
         if not isinstance(sections, list) or not 1 <= len(sections) <= 100:
             raise ValueError("Conserver de 1 à 100 sections.")
@@ -425,7 +440,7 @@ def save_deck(path, draft):
             if old["id"] not in seen_sections:
                 cleaned[0]["cards"].extend(c for c in old["cards"] if c["id"] not in seen_cards)
         current.update(name=_text(draft.get("name"), "Nom"), colors=_colors(draft.get("colors")),
-                       sections=cleaned, revision=current["revision"] + 1)
+                       box_design=box_design, sections=cleaned, revision=current["revision"] + 1)
         return _write(conn, current)
 
 
@@ -537,6 +552,7 @@ def _composition_cards(deck):
 
 def summary_with_media(deck, catalog_db, proxy_lookup=None):
     summary = {key: deck.get(key) for key in ("id", "name", "colors", "revision", "updated_at")}
+    summary["box_design"] = deck.get("box_design", DEFAULT_BOX_DESIGN)
     if "group_id" in deck:
         summary["group_id"] = deck["group_id"]
     if "creation_order" in deck:

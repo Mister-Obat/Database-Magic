@@ -79,16 +79,20 @@ Ces deux fichiers, le grain PNG et le WebP de repli sont versionnés dans
 `_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/`. Le serveur lit
 les ressources d’exécution depuis ce dossier. L’interface dessine le volume
 dans Canvas avec un tampon de profondeur. Les vignettes partagent l’image
-calculée au repos et redessinent la géométrie pendant les mouvements. Un WebP
+calculée avec suréchantillonnage au repos et redessinent la géométrie à
+résolution interactive pendant les mouvements. Un WebP
 frontal du même modèle sert de repli. La texture PNG reprend le grain du
 polymère Blender, atténué pour une finition noire satinée. Le couvercle et le corps partagent le même graphite et le même éclairage
 selon leurs normales. Le côté droit est plus sombre que la façade sur toute
 la hauteur et un reflet doux souligne le biseau avant droit. La paroi se
-raccorde au couvercle sur toute sa profondeur. Le joint modélisé combine
-un creux sombre et une lèvre éclairée, avec une remontée vers l’arrière. L’ombre suit la projection
-de la base.
+passe derrière le couvercle sur toute sa profondeur. Les profils du corps
+et du couvercle s’alignent sur l’arête arrière. Une ombre fine souligne le
+retour diagonal du clapet sur les flancs. Au biseau avant, ce trait rejoint
+progressivement le joint horizontal. L’ombre suit la projection de la base.
 Le nom complet du deck apparaît sur le couvercle avec les symboles de mana.
-Les textes et logos suivent la taille de la boîte. Les préconstruits
+Les textes et logos suivent la taille de la boîte. Le titre réduit sa police
+si un mot ne tient pas dans la largeur du couvercle. Les retours à la ligne
+entre les mots restent possibles. Les préconstruits
 affichent aussi leur édition.
 
 La fenêtre montre le rectangle intérieur de l’illustration d’une carte
@@ -101,6 +105,19 @@ rendu 3D et une inclinaison de prise. Un emplacement lilas marque l’insertion
 dans la grille et les autres boîtes glissent vers leurs nouvelles positions.
 La préférence de mouvement réduit conserve une pose fixe et un déplacement
 des voisines sans transition.
+
+Les decks personnels proposent des finitions unies en plus de Standard et
+d’Obsidienne. Sur chaque finition unie, le corps et le couvercle ont la même
+teinte avec un grain discret. Un reflet satiné léger suit l’inclinaison.
+Le rebord de fermeture suit la géométrie des deux pièces. La finition
+Obsidienne projette un même panorama WebP
+du flanc gauche au flanc droit, en passant par la façade, avec une coordonnée
+verticale commune. Le dessus prolonge le bord supérieur du panorama sur sa profondeur. Le volume, l’éclairage et
+l’illustration de couverture suivent le même maillage. Le marquage « Deck Box »
+est noir sur un corps clair et blanc sur un corps sombre, avec un léger
+relief dans les deux cas.
+La texture est chargée seulement pour Obsidienne. Si elle est indisponible,
+la boîte utilise le rendu Standard.
 
 ## Vérification d’une retouche
 
