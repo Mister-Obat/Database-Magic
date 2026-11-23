@@ -12,6 +12,219 @@ const PAGE_SIZE = 50;
 const DECK_PAGE_SIZE = 200;
 const imageTaskHandlers = new Map();
 const notificationButton = document.getElementById("notification-button");
+const aiBatchMode = $("ai-batch-mode");
+const aiBatchPanel = $("ai-batch-panel");
+const aiBatchStart = $("ai-batch-start");
+const aiBatchClear = $("ai-batch-clear");
+const aiBatchStatus = $("ai-batch-status");
+const aiBatchSelection = new Map();
+const aiBatchTargets = new WeakMap();
+const AI_BATCH_LIMIT = 200;
+let aiBatchSubmitting = false;
+
+function updateAIBatchSelection(message = "") {
+  const active = !aiBatchPanel.hidden;
+  const count = aiBatchSelection.size;
+  aiBatchMode.setAttribute("aria-expanded", String(active));
+  document.body.classList.toggle("ai-batch-active", active);
+  aiBatchMode.disabled = aiBatchSubmitting;
+  aiBatchStart.disabled = !count || aiBatchSubmitting;
+  aiBatchClear.disabled = aiBatchSubmitting;
+  aiBatchStatus.textContent = message || (count > 0
+    ? `${count} image${count > 1 ? "s sélectionnées" : " sélectionnée"}`
+    : "Cliquez sur les images des cartes à générer.");
+  for (const target of document.querySelectorAll(".ai-batch-target")) updateAIBatchTarget(target);
+}
+
+function updateAIBatchTarget(target) {
+  const { key, control, name, label, standalone } = aiBatchTargets.get(target);
+  if (aiBatchPanel.hidden) {
+    control.removeAttribute("aria-pressed");
+    if (label) control.setAttribute("aria-label", label);
+    else control.removeAttribute("aria-label");
+    if (standalone) {
+      control.removeAttribute("tabindex");
+      control.removeAttribute("role");
+    }
+  } else {
+    control.setAttribute("aria-pressed", String(aiBatchSelection.has(key)));
+    control.setAttribute("aria-label", `Sélection IA de ${name}`);
+    if (standalone) {
+      control.tabIndex = 0;
+      control.setAttribute("role", "button");
+    }
+  }
+  target.classList.toggle("ai-batch-selected", aiBatchSelection.has(key));
+}
+
+function registerAIBatchTarget(target, image, card, faceIndex = 0, control = target) {
+  if (image.tagName !== "IMG" || !card.provider_card_id ||
+      (card.proxy && !card.proxy_source_id)) return;
+  const url = new URL(image.src, location.href);
+  if (url.origin !== location.origin || !["/assets", "/api/v2/proxies/image"].includes(url.pathname)) return;
+  const item = {
+    provider_card_id: card.provider_card_id,
+    face_index: faceIndex,
+    image_url: url.pathname + url.search,
+  };
+  const key = JSON.stringify([item.provider_card_id, item.face_index]);
+  aiBatchTargets.set(target, {
+    key, control, name: card.printed_name || card.name_fr || card.name || "la carte",
+    label: control.getAttribute("aria-label"), standalone: control === image && !control.hasAttribute("role"),
+  });
+  target.classList.add("ai-batch-target");
+  image.addEventListener("error", () => target.classList.remove("ai-batch-target"), { once: true });
+  const toggle = event => {
+    if (aiBatchPanel.hidden || !target.classList.contains("ai-batch-target")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (aiBatchSubmitting || event.repeat) return;
+    if (aiBatchSelection.has(key)) aiBatchSelection.delete(key);
+    else if (aiBatchSelection.size < AI_BATCH_LIMIT) aiBatchSelection.set(key, item);
+    else {
+      updateAIBatchSelection(`Sélection limitée à ${AI_BATCH_LIMIT} images par génération.`);
+      return;
+    }
+    updateAIBatchSelection();
+  };
+  control.addEventListener("click", toggle, true);
+  if (control.tagName !== "BUTTON") control.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") toggle(event);
+  }, true);
+  updateAIBatchTarget(target);
+}
+
+function closeAIBatchSelection() {
+  aiBatchSelection.clear();
+  aiBatchPanel.hidden = true;
+  updateAIBatchSelection();
+  aiBatchMode.focus();
+}
+
+aiBatchMode.addEventListener("click", () => {
+  if (!aiBatchPanel.hidden) closeAIBatchSelection();
+  else {
+    aiBatchPanel.hidden = false;
+    updateAIBatchSelection();
+  }
+});
+aiBatchClear.addEventListener("click", closeAIBatchSelection);
+aiBatchStart.addEventListener("click", async () => {
+  aiBatchSubmitting = true;
+  updateAIBatchSelection("Démarrage de la génération…");
+  try {
+    await postJSON("/api/v2/image/ai/batch", { items: [...aiBatchSelection.values()] });
+    aiBatchSubmitting = false;
+    closeAIBatchSelection();
+    void refreshNotifications();
+  } catch (error) {
+    aiBatchSubmitting = false;
+    updateAIBatchSelection(`Démarrage impossible : ${error.message}`);
+  }
+});
+
+const aiBatchReview = $("ai-batch-review");
+const aiBatchReviewContent = $("ai-batch-review-content");
+const aiBatchReviewClose = $("ai-batch-review-close");
+let aiBatchReviewRequest = 0;
+let aiBatchReviewDirty = false;
+aiBatchReviewClose.addEventListener("click", () => aiBatchReview.close());
+aiBatchReview.addEventListener("cancel", event => {
+  if (aiBatchReviewClose.disabled) event.preventDefault();
+});
+aiBatchReview.addEventListener("close", () => {
+  aiBatchReviewRequest++;
+  if (aiBatchReviewDirty) refreshCurrentCollection(true);
+  aiBatchReviewDirty = false;
+  notificationButton.focus();
+});
+
+async function openAIBatchReview(taskId) {
+  const request = ++aiBatchReviewRequest;
+  aiBatchReviewContent.replaceChildren(node("p", "muted", "Chargement du lot…"));
+  aiBatchReview.showModal();
+  $("notification-panel").hidden = true;
+  notificationButton.setAttribute("aria-expanded", "false");
+  try {
+    const { items } = await getJSON("/api/v2/image/ai/batch", { task_id: taskId });
+    if (request === aiBatchReviewRequest && aiBatchReview.open) renderAIBatchReview(taskId, items);
+  } catch (error) {
+    if (request === aiBatchReviewRequest && aiBatchReview.open) showError(aiBatchReviewContent, error.message);
+  }
+}
+
+function renderAIBatchReview(taskId, items) {
+  const pending = items.filter(item => item.status === "candidate");
+  const errors = items.filter(item => item.status === "error");
+  aiBatchReviewContent.replaceChildren();
+  if (errors.length) {
+    const details = node("details", "ai-batch-review-errors");
+    const list = node("ul");
+    for (const error of errors) list.append(node("li", "", `${error.name || "Carte"} · ${error.detail || "Génération impossible"}`));
+    details.append(node("summary", "", `Images en échec (${errors.length})`), list);
+    aiBatchReviewContent.append(details);
+  }
+  const item = pending[0];
+  if (!item) {
+    const accepted = items.filter(card => card.status === "accepted").length;
+    const rejected = items.filter(card => card.status === "rejected").length;
+    aiBatchReviewContent.append(node("p", "", `Revue terminée · ${accepted} acceptée(s) · ${rejected} refusée(s)`));
+    aiBatchReviewClose.focus();
+    return;
+  }
+  const title = node("h3", "", item.name || "Carte");
+  title.tabIndex = -1;
+  const remaining = node("p", "muted", `${pending.length} image${pending.length > 1 ? "s" : ""} à vérifier`);
+  const comparison = node("div", "ai-batch-review-comparison");
+  const errorMessage = node("p", "error-state", "");
+  errorMessage.setAttribute("role", "status");
+  const actions = node("div", "ai-batch-review-actions");
+  const reject = node("button", "secondary-button", "Refuser");
+  const accept = node("button", "primary-button", "Accepter et intégrer");
+  let loadedImages = 0;
+  accept.disabled = true;
+  for (const [label, url] of [["Image d’origine", item.original_url], ["Version IA", item.preview_url]]) {
+    const figure = node("figure");
+    const image = node("img");
+    image.alt = `${label} de ${item.name || "la carte"}`;
+    image.addEventListener("error", () => image.replaceWith(node("p", "error-state", "Image indisponible.")));
+    image.addEventListener("load", () => {
+      loadedImages++;
+      if (!aiBatchReviewClose.disabled) accept.disabled = loadedImages !== 2;
+    }, { once: true });
+    if (url) image.src = url;
+    figure.append(node("figcaption", "", label), url ? image : node("p", "muted", "Image indisponible."));
+    comparison.append(figure);
+  }
+  const choose = async choice => {
+    reject.disabled = accept.disabled = aiBatchReviewClose.disabled = true;
+    errorMessage.textContent = "";
+    try {
+      const result = await postJSON("/api/v2/image/ai/batch/choose", { task_id: taskId, id: item.id, choice });
+      item.status = result.status;
+      item.detail = result.detail;
+      if (item.status === "accepted") {
+        aiBatchReviewDirty = true;
+        if (item.provider_card_id) proxyImageRevisions.set(item.provider_card_id, String(Date.now()));
+      }
+      aiBatchReviewClose.disabled = false;
+      renderAIBatchReview(taskId, items);
+      void refreshNotifications();
+    } catch (error) {
+      errorMessage.textContent = error.message;
+    } finally {
+      reject.disabled = aiBatchReviewClose.disabled = false;
+      accept.disabled = loadedImages !== 2;
+    }
+  };
+  reject.type = accept.type = "button";
+  reject.addEventListener("click", () => void choose("reject"));
+  accept.addEventListener("click", () => void choose("accept"));
+  actions.append(reject, accept);
+  aiBatchReviewContent.append(title, remaining, comparison, errorMessage, actions);
+  title.focus();
+}
+
 const REVIEW_SEEN_KEY = "database-magic-seen-reviews-v1";
 let currentReviewTaskIds = new Set();
 let seenReviewTaskIds = new Set();
@@ -51,11 +264,11 @@ function playNotificationSound() {
     tone.stop(start + .23);
   } catch { /* Audio is optional when the browser blocks playback. */ }
 }
-function updateReviewBadge() {
+function updateReviewBadge(newBatchNotification = false) {
   const visible = [...currentReviewTaskIds].some(id => !seenReviewTaskIds.has(id));
   const wasVisible = notificationButton.classList.contains("has-review");
   notificationButton.classList.toggle("has-review", visible);
-  if (visible && !wasVisible) playNotificationSound();
+  if (visible && (!wasVisible || newBatchNotification)) playNotificationSound();
 }
 const closeApplicationButton = document.getElementById("close-application");
 const shutdownDialog = document.getElementById("shutdown-dialog");
@@ -97,17 +310,53 @@ async function refreshNotifications() {
   try {
     const response = await getJSON("/api/v2/notifications");
     if (request !== notificationRequest) return;
-    const items = (response.items || []).filter(item => !["complete", "cancelled", "ready"].includes(item.status));
+    const items = (response.items || []).filter(item => !["complete", "cancelled", "ready"].includes(item.status)
+      || (item.kind === "ai_batch_generation" && item.status === "ready"));
     const count = items.filter(item => ["queued", "running", "needs_review", "error", "failed"].includes(item.status)).length;
     const badge = document.getElementById("notification-count");
     badge.textContent = String(count);
     badge.hidden = count === 0;
-    currentReviewTaskIds = new Set(items.filter(item => item.status === "needs_review").map(item => item.task_id));
-    updateReviewBadge();
-    const list = document.getElementById("notification-list"); list.replaceChildren();
+    const finishedBatches = items.filter(item => item.kind === "ai_batch_generation"
+      && ["needs_review", "ready", "error", "failed"].includes(item.status));
+    const newBatchNotification = finishedBatches.some(item =>
+      !currentReviewTaskIds.has(item.task_id) && !seenReviewTaskIds.has(item.task_id));
+    currentReviewTaskIds = new Set([
+      ...items.filter(item => item.status === "needs_review").map(item => item.task_id),
+      ...finishedBatches.map(item => item.task_id),
+    ]);
+    updateReviewBadge(newBatchNotification);
+    const list = document.getElementById("notification-list");
+    const openBatchErrors = new Set([...list.querySelectorAll("details[open]")].map(details => details.dataset.taskId));
+    list.replaceChildren();
     if (!items.length) { list.append(node("p", "muted", "Aucun traitement en cours ou à vérifier.")); return; }
     for (const item of items) {
       const row = node("div", "notification-item");
+      if (item.kind === "ai_batch_generation") {
+        const reviewable = item.status === "needs_review";
+        const summary = node(reviewable ? "button" : "div", "notification-open notification-batch-summary");
+        summary.append(
+          node("strong", "", item.label || "Génération IA par lot"),
+          node("span", "notification-status", notificationStatusLabel(item.status)),
+          node("span", "notification-detail", `${item.completed ?? 0}/${item.total} · ${item.detail || ""}`)
+        );
+        if (reviewable) {
+          summary.type = "button";
+          summary.append(node("span", "notification-status", "Ouvrir la revue"));
+          summary.addEventListener("click", () => void openAIBatchReview(item.task_id));
+        }
+        row.append(summary);
+        if (item.errors?.length) {
+          const details = node("details", "notification-batch-errors");
+          details.dataset.taskId = item.task_id;
+          details.open = openBatchErrors.has(item.task_id);
+          const errors = node("ul");
+          for (const error of item.errors) errors.append(node("li", "", error));
+          details.append(node("summary", "", `Images en échec (${item.errors.length})`), errors);
+          row.append(details);
+        }
+        list.append(row);
+        continue;
+      }
       const open = node("button", "notification-open", ""); open.type = "button";
       open.append(node("strong", "", item.label || (item.kind === "ai_generation" ? "Génération IA" : item.kind === "image_preview" ? "Recherche d’image" : item.kind || "Traitement")), node("span", "notification-status", notificationStatusLabel(item.status)), node("span", "notification-detail", `${item.completed != null && item.total ? `${item.completed}/${item.total} · ` : ""}${item.detail || ""}`));
       open.addEventListener("click", () => {
@@ -839,7 +1088,12 @@ function cardTile(item) {
     preview.addEventListener("click", () => openCard(item.provider_card_id));
     preview.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openCard(item.provider_card_id); } });
   }
-  card.append(main, preview);
+  if (preview.tagName === "IMG") {
+    const imageFrame = node("span", "ai-batch-image-frame");
+    imageFrame.append(preview);
+    registerAIBatchTarget(imageFrame, preview, item, slot.face_index, preview);
+    card.append(main, imageFrame);
+  } else card.append(main, preview);
   return card;
 }
 function renderItems(container, items, emptyText = "Aucun résultat.") {
@@ -865,6 +1119,7 @@ function editionTile(item) {
       art.onerror = () => art.replaceWith(node("div", "deck-card-image deck-card-image-empty", "Image indisponible"));
     }
     tile.append(art, node("span", "deck-card-name", item.printed_name || item.name));
+    registerAIBatchTarget(tile, art, item);
     return tile;
 }
 function renderEditionItems(container, items, emptyText = "Aucune carte dans cette édition.") {
@@ -2542,6 +2797,8 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
       } else visual = node("div", "card-viewer-missing", "Image absente");
       if (faceLoad !== faceRequest || request !== state.cardRequest || !dialog.open) return;
       imageWrap.replaceChildren(visual);
+      imageWrap.classList.remove("ai-batch-target");
+      registerAIBatchTarget(imageWrap, visual, card, selectedFace, visual);
       controls.replaceChildren();
       if (card.proxy && !card.proxy_source_id) return;
       if (!card.proxy) controls.append(buildImageSearch(ready));
@@ -3072,6 +3329,7 @@ async function openDeck(deckId, urlMode = "push") {
         const img = card.image_path ? node("img", "deck-card-image") : node("div", "deck-card-image deck-card-image-empty", "Image absente");
         if (card.image_path) { img.src = `/assets?${params({path: card.image_path})}`; img.alt = card.printed_name || card.name_fr || card.name || "Carte"; img.loading = "lazy"; img.onerror = () => img.replaceWith(node("div", "deck-card-image deck-card-image-empty", "Image indisponible")); }
         tile.append(img, node("span", "deck-card-name", `${card.count || 1} × ${card.printed_name || card.name_fr || card.name}`));
+        registerAIBatchTarget(tile, img, card);
         list.append(tile);
       }
       section.append(list); target.append(section);
@@ -5365,13 +5623,17 @@ function renderPersonalEditor() {
             const preview = personalImage(card);
             const tile = node("article", "deck-card-tile personal-card-edit");
             tile.dataset.personalCard = card.id;
-            tile.addEventListener("pointerdown", e => startPersonalCardDrag(e, root, tile, cards, section.id, card.id));
+            tile.addEventListener("pointerdown", e => {
+                if (!aiBatchPanel.hidden && e.target.closest(".ai-batch-target")) return;
+                startPersonalCardDrag(e, root, tile, cards, section.id, card.id);
+            });
             tile.addEventListener("dragstart", e => e.preventDefault());
             const open = personalButton("", () => void openCard(card.provider_card_id));
             open.className = "personal-card-open";
             open.setAttribute("aria-label", cardName);
             open.disabled = !card.provider_card_id;
             open.append(preview);
+            registerAIBatchTarget(open, preview, card);
             if (preview.tagName !== "IMG") open.append(node("span", "deck-card-name", cardName));
             tile.append(open);
             const countLabel = node("label", "personal-quantity", "Quantité"), count = node("input");

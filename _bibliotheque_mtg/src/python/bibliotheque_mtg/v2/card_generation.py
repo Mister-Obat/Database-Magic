@@ -441,6 +441,7 @@ def generate_card_candidate(visual_path: Path, text_path: Path | None,
                             previous_path: Path | None = None,
                             french_text: dict | None = None,
                             translate_text: bool = False,
+                            official_text_only: bool = False,
                             timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
                             executable: str | None = None,
                             cancel_event=None) -> dict:
@@ -453,6 +454,8 @@ def generate_card_candidate(visual_path: Path, text_path: Path | None,
     a correction attempt. Each call performs exactly one generation attempt.
     """
     correction_prompt = _validate_prompt(correction_prompt)
+    if official_text_only and (not french_text or text_path is not None or translate_text or correction_prompt):
+        raise CardGenerationError("Le lot exige le texte français officiel comme unique source de texte.")
     if text_path is not None and french_text is not None:
         raise CardGenerationError("Choisis une seule source de texte français.")
     executable = executable or resolve_codex_executable()
@@ -504,6 +507,13 @@ def generate_card_candidate(visual_path: Path, text_path: Path | None,
                 "Use the French text transcribed from the selected reference image as your guide. "
                 "Keep the names, rules and flavor text specific to the original card when they differ."
             )
+            if official_text_only:
+                visual_and_text = (
+                    "Use only the supplied official French fields for printed text. Reproduce their "
+                    "wording exactly. Use the attached image only as a visual reference. "
+                    "Do not transcribe or translate text from the image or invent missing text."
+                )
+            text_label = "SOLE SOURCE" if official_text_only else "SUBORDINATE REFERENCE"
             previous_instruction = (
                 "The last attached image is the prior generated attempt; use it as the base for the "
                 "correction while preserving the visual reference and all already-correct translated text. "
@@ -534,7 +544,7 @@ def generate_card_candidate(visual_path: Path, text_path: Path | None,
                 "so do not generate a second image for yourself. Do not run commands or use "
                 "another image service.\n\n"
                 f"REFERENCE_ORDER_JSON: {json.dumps([str(path) for path in prepared], ensure_ascii=False)}\n"
-                f"FRENCH_TEXT_JSON (SUBORDINATE REFERENCE): {json.dumps(french_text, ensure_ascii=False) if french_text else '(translate or reproduce text from the first card reference)'}\n"
+                f"FRENCH_TEXT_JSON ({text_label}): {json.dumps(french_text, ensure_ascii=False) if french_text else '(translate or reproduce text from the first card reference)'}\n"
                 "CORRECTION_INSTRUCTIONS: (none)"
             )
             args = [

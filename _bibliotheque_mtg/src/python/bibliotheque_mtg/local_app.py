@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from functools import lru_cache
 from collections import OrderedDict
 from contextlib import closing
@@ -107,6 +107,10 @@ _IMAGE_CANDIDATE_TTL = 24 * 60 * 60
 _IMAGE_CANDIDATE_LIMIT = 100
 _IMAGE_TASKS: dict[str, dict] = {}
 _IMAGE_TASKS_LOCK = threading.RLock()
+_AI_BATCH_REVIEW_LOCK = threading.Lock()
+_AI_BATCH_ROUTE = "/api/v2/image/ai/batch"
+_AI_BATCH_WAVE_SIZE = 10
+_AI_BATCH_EXECUTOR = ThreadPoolExecutor(max_workers=_AI_BATCH_WAVE_SIZE, thread_name_prefix="magic-ai")
 _IMAGE_TASK_CANCELS: dict[str, threading.Event] = {}
 _AI_CANDIDATES: dict[str, dict] = {}
 _AI_CANDIDATES_LOCK = threading.Lock()
@@ -143,7 +147,8 @@ def _store_image_candidate(candidate: dict) -> str:
     return candidate_id
 
 
-def _start_image_task(kind: str, label: str, work, *, metadata: dict | None = None) -> dict:
+def _start_image_task(kind: str, label: str, work, *, metadata: dict | None = None,
+                      report_progress: bool = False) -> dict:
     task_id = uuid.uuid4().hex
     cancel_event = threading.Event()
     task = {"task_id": task_id, "kind": kind, "label": label, "status": "queued",
@@ -152,12 +157,16 @@ def _start_image_task(kind: str, label: str, work, *, metadata: dict | None = No
         _IMAGE_TASKS[task_id] = task
         _IMAGE_TASK_CANCELS[task_id] = cancel_event
 
+    def progress(**updates):
+        with _IMAGE_TASKS_LOCK:
+            task.update(updates)
+
     def runner():
         with _IMAGE_TASKS_LOCK:
             if not cancel_event.is_set():
                 task["status"] = "running"
         try:
-            result = work(cancel_event)
+            result = work(cancel_event, progress) if report_progress else work(cancel_event)
             with _IMAGE_TASKS_LOCK:
                 review_metadata = ({key: result[key] for key in ("french_text", "text_provenance")
                                     if isinstance(result, dict) and key in result})
@@ -172,6 +181,227 @@ def _start_image_task(kind: str, label: str, work, *, metadata: dict | None = No
 
     threading.Thread(target=runner, daemon=True).start()
     return {"task_id": task_id, "status": "queued"}
+
+
+def _parse_ai_batch(payload: dict) -> list[dict]:
+    items = payload.get("items")
+    if set(payload) != {"items"} or not isinstance(items, list) or not 1 <= len(items) <= 200:
+        raise ValueError("Sélectionnez entre 1 et 200 images.")
+    unique = {}
+    for item in items:
+        if not isinstance(item, dict) or set(item) != {"provider_card_id", "face_index", "image_url"}:
+            raise ValueError("Référence d’image invalide.")
+        provider, face, url = item["provider_card_id"], item["face_index"], item["image_url"]
+        if (not isinstance(provider, str) or not 0 < len(provider) <= 100
+                or type(face) is not int or not 0 <= face < 10
+                or not isinstance(url, str) or not 0 < len(url) <= 1024):
+            raise ValueError("Référence d’image invalide.")
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme or parsed.netloc or parsed.path not in {"/assets", "/api/v2/proxies/image"}:
+            raise ValueError("Seules les images locales du projet peuvent servir de référence.")
+        unique.setdefault((provider, face), item)
+    return list(unique.values())
+
+
+def _ai_batch_reference(current: dict, item: dict) -> tuple[Path, str, dict]:
+    db = current["database"]
+    provider, face = item["provider_card_id"], item["face_index"]
+    url = urllib.parse.urlsplit(item["image_url"])
+    params = urllib.parse.parse_qs(url.query)
+    if provider.startswith("proxy-"):
+        linked = PROXIES.linked(db, provider)
+        if (url.path != "/api/v2/proxies/image" or params.get("id") != [provider]
+                or face != 0 or not linked):
+            raise ValueError("Image de proxy associé indisponible.")
+        card, path = linked
+        return path, card["name"], {"proxy_id": provider, "provider_card_id": card["proxy_source_id"],
+                                    "version_id": current["version_id"], "face_index": face}
+
+    with closing(connect(db)) as conn:
+        row = conn.execute(
+            "SELECT sr.name, sr.printing_id, s.status, s.asset_id, a.relative_path "
+            "FROM source_records sr JOIN image_slots s USING(printing_id) "
+            "LEFT JOIN image_assets a USING(asset_id) WHERE sr.provider_card_id=? AND s.face_index=?",
+            (provider, face)).fetchone()
+    if (row is None or row["status"] != "ready" or not row["relative_path"]
+            or url.path != "/assets" or params.get("path") != [row["relative_path"]]):
+        raise ValueError("L’image affichée n’est plus celle du catalogue.")
+    return _safe_child(db.parent, row["relative_path"]), row["name"], {
+        "version_id": current["version_id"], "printing_id": row["printing_id"],
+        "provider_card_id": provider, "face_index": face, "old_asset_id": row["asset_id"],
+        "old_status": row["status"],
+    }
+
+
+def _ai_batch_failure(item: dict, exc: Exception) -> None:
+    if isinstance(exc, (ValueError, CardGenerationError)):
+        detail = str(exc)
+    else:
+        detail = "Impossible de traiter cette image."
+        logging.exception("Échec du traitement IA par lot")
+    item.update(status="error", detail=detail)
+
+
+def _generate_ai_batch_item(current: dict, root: Path, item: dict, source: Path,
+                            identity: dict, cancel_event: threading.Event) -> dict | None:
+    if cancel_event.is_set():
+        return None
+    try:
+        text = _lookup_local_card_text(current["database"], identity["provider_card_id"],
+                                       identity["face_index"], cancel_event)
+        if source.stat().st_size > 20 * 1024 * 1024:
+            raise ValueError("L’image de référence dépasse 20 Mio.")
+        with tempfile.TemporaryDirectory(prefix="magic-ai-batch-", dir=root) as temp:
+            original = Path(temp) / source.name
+            original.write_bytes(source.read_bytes())
+            result = generate_card_candidate(original, None, Path(temp),
+                french_text=text["fields"], official_text_only=True, cancel_event=cancel_event)
+            if cancel_event.is_set():
+                return None
+            preview = root / f"batch-{item['id']}.png"
+            snapshot = root / f"batch-{item['id']}-original{source.suffix.lower()}"
+            os.replace(original, snapshot)
+            try:
+                os.replace(result["path"], preview)
+            except OSError:
+                snapshot.unlink(missing_ok=True)
+                raise
+        item.update(status="candidate", identity=identity, original=snapshot,
+                    preview=preview, generation=result)
+    except Exception as exc:
+        if cancel_event.is_set():
+            return None
+        _ai_batch_failure(item, exc)
+    return item
+
+
+def _run_ai_batch(current: dict, selection: list[dict], cancel_event, progress) -> dict:
+    results, errors = {}, []
+    seen = set()
+    generated = 0
+    root = card_candidate_root(OPS_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+
+    def record(index: int, item: dict) -> None:
+        nonlocal generated
+        results[index] = item
+        if item["status"] == "error":
+            errors.append(f"{item['name']} · {item['detail']}")
+        elif item["status"] == "candidate":
+            generated += 1
+        progress(completed=len(results), ready=generated, failed=len(errors), errors=errors.copy())
+
+    for start in range(0, len(selection), _AI_BATCH_WAVE_SIZE):
+        if cancel_event.is_set():
+            break
+        pending = {}
+        wave = selection[start:start + _AI_BATCH_WAVE_SIZE]
+        wave_number = start // _AI_BATCH_WAVE_SIZE + 1
+        progress(detail=f"Vague {wave_number} en cours")
+        for index, selected in enumerate(wave, start):
+            if cancel_event.is_set():
+                break
+            provider = selected["provider_card_id"]
+            item = {"id": uuid.uuid4().hex, "name": provider, "provider_card_id": provider, "detail": ""}
+            try:
+                source, item["name"], identity = _ai_batch_reference(current, selected)
+            except Exception as exc:
+                _ai_batch_failure(item, exc)
+                record(index, item)
+                continue
+            key = (identity.get("proxy_id") or identity["printing_id"], identity["face_index"])
+            if key in seen:
+                item.update(status="rejected", detail="Image déjà sélectionnée dans ce lot.")
+                record(index, item)
+                continue
+            seen.add(key)
+            future = _AI_BATCH_EXECUTOR.submit(
+                _generate_ai_batch_item, current, root, item, source, identity, cancel_event)
+            pending[future] = index
+        # Drain the entire wave before starting another, while reporting each completion.
+        for future in as_completed(pending):
+            item = future.result()
+            if item is not None:
+                record(pending[future], item)
+
+    ordered = [results[index] for index in sorted(results)]
+    return {"status": "candidate" if generated else "no_candidate", "items": ordered,
+            "detail": f"{generated} image(s) à vérifier · {len(errors)} erreur(s)"}
+
+
+def _ai_batch_task(task_id: str) -> dict | None:
+    task = _IMAGE_TASKS.get(task_id)
+    return task if task and task["kind"] == "ai_batch_generation" else None
+
+
+def _ai_batch_visible_item(task_id: str, item: dict) -> dict:
+    view = {key: item[key] for key in ("id", "name", "provider_card_id", "status", "detail")}
+    if item["status"] == "candidate":
+        query = urllib.parse.urlencode({"task_id": task_id, "id": item["id"]})
+        base = f"{_AI_BATCH_ROUTE}/image?{query}"
+        view.update(original_url=f"{base}&side=original", preview_url=f"{base}&side=preview")
+    return view
+
+
+def _choose_ai_batch_item(task_id: str, item_id: str, choice: str) -> tuple[dict, int]:
+    with _AI_BATCH_REVIEW_LOCK:
+        with _IMAGE_TASKS_LOCK:
+            task = _ai_batch_task(task_id)
+            result = task.get("result") if task else None
+            item = next((entry for entry in result["items"] if entry["id"] == item_id), None) if result else None
+            if item is None:
+                return {"error": "Résultat du lot introuvable."}, 404
+            if item["status"] != "candidate":
+                return _ai_batch_visible_item(task_id, item), 200
+        status = "rejected"
+        detail = ""
+        if choice == "accept":
+            identity, generation = item["identity"], item["generation"]
+            try:
+                with _MAINTENANCE_LOCK:
+                    if _maintenance_is_active():
+                        return {"error": "La mise à jour du catalogue est en cours."}, 409
+                    png = item["preview"].read_bytes()
+                    if identity.get("proxy_id"):
+                        proxy_id = identity["proxy_id"]
+                        current = resolve_current(CATALOGUE_ROOT)
+                        with PROXIES.lock:
+                            linked = PROXIES.linked(current["database"], proxy_id)
+                            if (current["version_id"] != identity["version_id"] or not linked
+                                    or linked[0]["proxy_source_id"] != identity["provider_card_id"]
+                                    or linked[1].read_bytes() != item["original"].read_bytes()):
+                                raise ValueError("Le proxy a changé depuis la sélection.")
+                            PROXIES.replace_image(current["database"], proxy_id, png)
+                    else:
+                        candidate = {**identity, "source_data": png, "mime_type": "image/png",
+                                     "source_width": generation["width"], "source_height": generation["height"],
+                                     "language": "fr", "source_url": "manual_import",
+                                     "source_provider": "manual_import",
+                                     "source_evidence": f"codex-imagegen:{generation['sha256']}"}
+                        publish_preview_candidate(candidate, catalogue_root=CATALOGUE_ROOT,
+                            provider_card_id=identity["provider_card_id"], face_index=identity["face_index"])
+                status = "accepted"
+            except ValueError as exc:
+                status, detail = "error", str(exc)
+        with _IMAGE_TASKS_LOCK:
+            item.update(status=status, detail=detail)
+            items = result["items"]
+            remaining = sum(entry["status"] == "candidate" for entry in items)
+            accepted = sum(entry["status"] == "accepted" for entry in items)
+            rejected = sum(entry["status"] == "rejected" for entry in items)
+            if status == "error":
+                task["errors"] = [*task["errors"], f"{item['name']} · {detail}"]
+                task["failed"] += 1
+            task.update(status="needs_review" if remaining else "ready", accepted=accepted,
+                        rejected=rejected, remaining=remaining,
+                        detail=f"{accepted} validée(s) · {rejected} refusée(s) · "
+                               f"{task['failed']} erreur(s) · {remaining} à vérifier")
+        for path in (item["original"], item["preview"]):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logging.warning("Impossible de supprimer une candidate IA déjà examinée.")
+        return _ai_batch_visible_item(task_id, item), 200
 
 
 def _local_card_text_fields(card: dict, face_index: int, physical_face_count: int,
@@ -1725,11 +1955,39 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     items.append({**maintenance, "kind": "maintenance", "label": "Mise à jour du catalogue"})
                 self._json({"items": items})
                 return
+            if route == _AI_BATCH_ROUTE:
+                task_id = params.get("task_id", "")
+                with _IMAGE_TASKS_LOCK:
+                    task = _ai_batch_task(task_id)
+                    if task:
+                        items = (task.get("result") or {}).get("items", [])
+                        view = {"status": task["status"], "detail": task["detail"],
+                                "items": [_ai_batch_visible_item(task_id, item) for item in items]}
+                self._json(view if task else {"error": "Lot introuvable."}, 200 if task else 404)
+                return
+            if route == f"{_AI_BATCH_ROUTE}/image":
+                task_id, item_id = params.get("task_id", ""), params.get("id", "")
+                side = params.get("side", "")
+                with _AI_BATCH_REVIEW_LOCK:
+                    with _IMAGE_TASKS_LOCK:
+                        task = _ai_batch_task(task_id)
+                        items = ((task.get("result") or {}).get("items", []) if task else [])
+                        item = next((entry for entry in items if entry["id"] == item_id
+                                     and entry["status"] == "candidate"), None)
+                    if not item or side not in {"original", "preview"}:
+                        self._json({"error": "Image de revue introuvable."}, 404)
+                        return
+                    path = item[side]
+                    data = path.read_bytes()
+                self._send(200, data, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+                return
             if route == "/api/v2/image/task":
                 task_id = params.get("task_id", "")
                 with _IMAGE_TASKS_LOCK:
                     item = _IMAGE_TASKS.get(task_id)
                     result = dict(item) if item else None
+                    if result and result["kind"] == "ai_batch_generation":
+                        result.pop("result", None)
                 self._json(result if result else {"error": "task_not_found"}, 200 if result else 404)
                 return
             if route in {"/", "/index.html", "/1", "/2"}:
@@ -2061,7 +2319,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _LIST_TASK, _BATCH_TASK
         route = urllib.parse.urlsplit(self.path).path
-        if route not in PERSONAL_POST_ROUTES and route not in {PROXY_ASSOCIATE, PROXY_OPEN_FOLDER, PROXY_IMPORT, PROXY_DELETE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
+        batch_routes = {_AI_BATCH_ROUTE, f"{_AI_BATCH_ROUTE}/choose"}
+        if route not in PERSONAL_POST_ROUTES and route not in batch_routes and route not in {PROXY_ASSOCIATE, PROXY_OPEN_FOLDER, PROXY_IMPORT, PROXY_DELETE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
             self._json({"error": "route_not_found"}, 404)
             return
         expected_origin = f"http://127.0.0.1:{self.server.server_port}"
@@ -2105,7 +2364,9 @@ class LibraryHandler(BaseHTTPRequestHandler):
                                                 catalogue_root=CATALOGUE_ROOT)
                 self._json({"status": "ready", "result": result})
                 return
-            maximum = 2 * 1024 * 1024 if route in PERSONAL_POST_ROUTES else (32768 if route in {"/api/v2/list-import", "/api/v2/search/image-slots"} else 4096)
+            maximum = (2 * 1024 * 1024 if route in PERSONAL_POST_ROUTES else
+                       256 * 1024 if route == _AI_BATCH_ROUTE else
+                       32768 if route in {"/api/v2/list-import", "/api/v2/search/image-slots"} else 4096)
             if length < 1 or length > maximum:
                 self._json({"error": "invalid_request_size"}, 400)
                 return
@@ -2245,6 +2506,23 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/v2/decks/recalculate":
                 self._json(_recalculate_deck_search(payload, self.db))
+                return
+            if route == _AI_BATCH_ROUTE:
+                selection = _parse_ai_batch(payload)
+                current = resolve_current(CATALOGUE_ROOT)
+                task = _start_image_task("ai_batch_generation", "Génération IA par lot",
+                    lambda stop, progress: _run_ai_batch(current, selection, stop, progress),
+                    metadata={"total": len(selection), "completed": 0, "ready": 0, "failed": 0,
+                              "current": "", "errors": []}, report_progress=True)
+                self._json(task, 202)
+                return
+            if route == f"{_AI_BATCH_ROUTE}/choose":
+                task_id, item_id, choice = payload.get("task_id"), payload.get("id"), payload.get("choice")
+                if (not isinstance(task_id, str) or not isinstance(item_id, str)
+                        or choice not in ("accept", "reject")):
+                    raise ValueError("Décision de revue invalide.")
+                result, status = _choose_ai_batch_item(task_id, item_id, choice)
+                self._json(result, status)
                 return
             if route == "/api/v2/image/ai/generate":
                 source_id = payload.get("candidate_id")

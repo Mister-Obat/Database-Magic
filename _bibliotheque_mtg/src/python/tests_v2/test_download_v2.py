@@ -712,3 +712,211 @@ def test_klingon_only_printing_keeps_the_source_language(tmp_path, image_server)
     assert report["results"][0]["status"] == "ready"
     assert report["results"][0]["language"] == "tlh"
     assert report["results"][0]["relative_path"].startswith("assets/webp/tlh/")
+
+def test_ai_batch_runs_concurrently_and_publishes_only_accepted_faces(tmp_path, monkeypatch):
+    from urllib.parse import urlencode
+    from uuid import uuid4
+
+    from bibliotheque_mtg import local_app
+
+    ops, version, db, manifest = make_catalogue(tmp_path, "http://unused.invalid", face_count=3)
+    assets = []
+    for face, color in enumerate(("red", "green", "blue")):
+        original = io.BytesIO()
+        image = patterned_image((531, 738))
+        ImageDraw.Draw(image).rectangle((0, 0, 130, 300), fill=color)
+        image.save(original, format="PNG")
+        report = image_download.import_local_image(
+            "provider-en", face, original.getvalue(), catalogue_root=ops)
+        assets.append(report["relative_path"])
+    initial_manifest = manifest.read_bytes()
+    monkeypatch.setattr(local_app, "OPS_ROOT", ops)
+    monkeypatch.setattr(local_app, "CATALOGUE_ROOT", ops)
+    monkeypatch.setattr(local_app, "_IMAGE_TASKS", {})
+    monkeypatch.setattr(local_app, "_IMAGE_TASK_CANCELS", {})
+
+    def official_text(_db, provider, face, *_args, **_kwargs):
+        assert provider == "provider-en"
+        if face == 1:
+            raise local_app.FrenchTextUnavailable("Texte officiel absent pour le test.")
+        return {"fields": {"name": f"Face {face}", "type_line": "Artefact"}, "verified": True}
+
+    both_running = threading.Barrier(2)
+    allow_finish = threading.Event()
+    seen_originals = []
+
+    def generate(visual_path, text_path, candidate_root, *_args, **kwargs):
+        name = kwargs["french_text"]["name"]
+        assert text_path is None and kwargs["official_text_only"] is True
+        seen_originals.append((name, visual_path.read_bytes()))
+        if name == "Face 0":
+            both_running.wait(timeout=5)
+            assert allow_finish.wait(timeout=5)
+        identifier = uuid4().hex
+        candidate_root.mkdir(parents=True, exist_ok=True)
+        path = candidate_root / f"{identifier}.png"
+        image = patterned_image((531, 738))
+        ImageDraw.Draw(image).rectangle((0, 0, 130, 300), fill="gold")
+        image.save(path)
+        return {"candidate_id": identifier, "path": str(path), "width": 531, "height": 738,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+    monkeypatch.setattr(local_app, "_lookup_local_card_text", official_text)
+    monkeypatch.setattr(local_app, "generate_card_candidate", generate)
+
+    def item(face):
+        return {"provider_card_id": "provider-en", "face_index": face,
+                "image_url": "/assets?" + urlencode({"path": assets[face]})}
+
+    def wait_for_review(task_id):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = requests.get(base + route, params={"task_id": task_id}, timeout=5)
+            result.raise_for_status()
+            if result.json()["status"] == "needs_review":
+                return result.json()["items"]
+            time.sleep(0.02)
+        pytest.fail(f"AI batch did not become reviewable: {result.text}")
+
+    route = "/api/v2/image/ai/batch"
+    server = local_app.LocalServer(("127.0.0.1", 0), local_app.LibraryHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path, payload):
+        response = requests.post(base + path, json=payload, headers={"Origin": base}, timeout=5)
+        response.raise_for_status()
+        return response
+
+    try:
+        first = post(route, {"items": [item(0), item(1), item(2)]})
+        second = post(route, {"items": [item(0)]})
+        assert first.status_code == second.status_code == 202
+        first_id, second_id = first.json()["task_id"], second.json()["task_id"]
+        assert first_id != second_id
+        notices = requests.get(base + "/api/v2/notifications", timeout=5).json()["items"]
+        assert {notice["task_id"] for notice in notices if notice["status"] in {"queued", "running"}} == {
+            first_id, second_id}
+        allow_finish.set()
+
+        candidates = wait_for_review(first_id)
+        assert [entry["status"] for entry in candidates] == ["candidate", "error", "candidate"]
+        assert "Texte officiel absent" in candidates[1]["detail"]
+        other, = wait_for_review(second_id)
+        assert other["status"] == "candidate"
+        assert [name for name, _ in seen_originals].count("Face 0") == 2
+        assert all(data == (version / assets[int(name[-1])]).read_bytes()
+                   for name, data in seen_originals)
+        assert manifest.read_bytes() == initial_manifest
+
+        original = requests.get(base + candidates[0]["original_url"], timeout=5)
+        generated = requests.get(base + candidates[0]["preview_url"], timeout=5)
+        assert original.content == (version / assets[0]).read_bytes()
+        assert generated.headers["Content-Type"] == "image/png"
+        assert Image.open(io.BytesIO(generated.content)).getpixel((0, 0)) == (255, 215, 0)
+
+        for task_id, candidate, choice, status in (
+                (first_id, candidates[0], "accept", "accepted"),
+                (first_id, candidates[2], "reject", "rejected")):
+            assert post(route + "/choose", {"task_id": task_id, "id": candidate["id"],
+                                            "choice": choice}).json()["status"] == status
+
+        published_manifest = manifest.read_bytes()
+        stale = post(route + "/choose", {"task_id": second_id, "id": other["id"],
+                                        "choice": "accept"}).json()
+        assert stale["status"] == "error" and stale["detail"]
+        assert manifest.read_bytes() == published_manifest
+
+        with sqlite3.connect(db) as conn:
+            current = conn.execute("SELECT selected_language,relative_path FROM image_slots "
+                                   "JOIN image_assets USING(asset_id) ORDER BY face_index").fetchall()
+        assert current[0][0] == "fr" and current[0][1] != assets[0]
+        assert current[1:] == [("en", assets[1]), ("en", assets[2])]
+        assert json.loads(manifest.read_bytes())["slots"][0]["path"] == current[0][1]
+    finally:
+        allow_finish.set()
+        both_running.abort()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_ai_batch_waits_for_a_full_wave_before_starting_the_next(tmp_path, monkeypatch):
+    from bibliotheque_mtg import local_app
+
+    source = tmp_path / "source.png"
+    patterned_image((40, 56)).save(source)
+    selection = [{"provider_card_id": str(index), "face_index": 0} for index in range(20)]
+    other_selection = [{"provider_card_id": "20", "face_index": 0}]
+    current = {"database": tmp_path / "catalogue.sqlite"}
+    monkeypatch.setattr(local_app, "OPS_ROOT", tmp_path)
+
+    def reference(_current, item):
+        identifier = item["provider_card_id"]
+        if identifier == "20":
+            other_prepared.set()
+        return source, identifier, {"provider_card_id": identifier, "printing_id": identifier, "face_index": 0}
+
+    def official_text(_db, provider, _face, _cancel):
+        return {"fields": {"name": provider}, "verified": True}
+
+    wave_started = threading.Condition()
+    started = set()
+    release_first_nine = threading.Event()
+    release_tenth = threading.Event()
+    tenth_finished = threading.Event()
+    first_nine_reported = threading.Event()
+    premature_start = threading.Event()
+    other_prepared = threading.Event()
+    other_started = threading.Event()
+
+    def generate(_visual, _text, _root, **options):
+        identifier = int(options["french_text"]["name"])
+        if identifier == 20:
+            other_started.set()
+            raise local_app.CardGenerationError("Generation test failure")
+        if identifier >= 10 and not tenth_finished.is_set():
+            premature_start.set()
+        with wave_started:
+            started.add(identifier)
+            wave_started.notify_all()
+        if identifier < 9:
+            assert release_first_nine.wait(timeout=10)
+        elif identifier == 9:
+            assert release_tenth.wait(timeout=10)
+            tenth_finished.set()
+        raise local_app.CardGenerationError("Generation test failure")
+
+    def progress(**fields):
+        if fields.get("completed") == 9:
+            first_nine_reported.set()
+
+    monkeypatch.setattr(local_app, "_ai_batch_reference", reference)
+    monkeypatch.setattr(local_app, "_lookup_local_card_text", official_text)
+    monkeypatch.setattr(local_app, "generate_card_candidate", generate)
+
+    with ThreadPoolExecutor(max_workers=2) as coordinator:
+        batch = coordinator.submit(local_app._run_ai_batch, current, selection, threading.Event(), progress)
+        try:
+            with wave_started:
+                assert wave_started.wait_for(lambda: len(started) >= 10, timeout=10)
+                assert started == set(range(10))
+            other = coordinator.submit(local_app._run_ai_batch, current, other_selection, threading.Event(), progress)
+            assert other_prepared.wait(timeout=10)
+            assert not other_started.wait(timeout=0.25)
+            release_first_nine.set()
+            assert first_nine_reported.wait(timeout=10)
+            assert other_started.wait(timeout=10)
+            assert not premature_start.wait(timeout=0.25)
+            release_tenth.set()
+            result = batch.result(timeout=10)
+            assert other.result(timeout=10)["items"][0]["status"] == "error"
+        finally:
+            release_first_nine.set()
+            release_tenth.set()
+
+    assert started == set(range(20))
+    assert not premature_start.is_set()
+    assert [item["name"] for item in result["items"]] == [str(index) for index in range(20)]
+    assert all(item["status"] == "error" for item in result["items"])

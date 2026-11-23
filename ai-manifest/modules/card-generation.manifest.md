@@ -93,6 +93,31 @@ pour revue explicite; il ne modifie pas le catalogue ou ses slots.
   publication dans la collection gérée exige un parcours distinct et un choix
   explicite de l’utilisateur.
 
+## Génération par lot depuis la barre supérieure
+
+- Le bouton IA permet de cocher les images locales de cartes affichées. Le POST
+  `/api/v2/image/ai/batch` accepte jusqu'à 200 références
+  `{provider_card_id, face_index, image_url}`. Le serveur vérifie leur
+  correspondance avec le slot actif ou le proxy associé. Il n'effectue ni
+  recherche ni téléchargement d'image de référence.
+- Plusieurs lots peuvent tourner simultanément. Chaque lot est traité par
+  vagues de dix cartes au maximum. La vague suivante attend la fin de toutes
+  les tentatives de la vague en cours, échecs inclus. Le serveur partage
+  dix créneaux de génération entre les lots actifs. L'avancement reste
+  visible à la cloche et la revue respecte l'ordre de la sélection.
+  L'image affichée
+  sert de référence graphique et le texte français officiel vérifié est
+  l'unique source de texte. Une référence indisponible, un texte introuvable
+  ou un échec de génération est signalé et le lot poursuit les autres cartes.
+- Le résultat complet permet une revue originale/candidate par carte. Refuser
+  conserve l'image du projet. Accepter publie dans le slot exact ou remplace
+  le fichier du proxy associé, après contrôle de l'image originale. En cas
+  de modification concurrente, la candidate devenue périmée est signalée.
+  La revue et les notifications restent attachées au processus serveur actif.
+- La comptabilisation des tentatives par image reprend le principe de
+  [ComfyUI Batch Image Processing](https://github.com/dchuk/comfyui-batch-image-processing)
+  avec le mécanisme de tâches et le fournisseur déjà présents dans le projet.
+
 ## Fournisseur et sécurité
 
 - Le CLI Codex installé est résolu depuis PATH puis depuis son installation

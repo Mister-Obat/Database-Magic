@@ -24,10 +24,16 @@
       <button data-view="archives" class="nav-button" aria-label="Archives" title="Archives"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-archive"></use></svg><span class="compact-nav-label">Archives</span></button>
     </nav>
     <div class="topbar-actions">
+      <button id="ai-batch-mode" class="secondary-button card-size-control" type="button" aria-label="Sélection IA" aria-expanded="false" aria-controls="ai-batch-panel">IA</button>
       <button id="refresh-view" class="secondary-button card-size-control" type="button" aria-label="Rafraîchir la page"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg></button>
       <button id="card-size-minus" class="secondary-button card-size-control" type="button" aria-label="Réduire les vignettes"></button>
       <button id="card-size-plus" class="secondary-button card-size-control" type="button" aria-label="Agrandir les vignettes"></button>
       <button id="close-application" class="secondary-button" type="button" aria-label="Fermer l’application"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-power-off"></use></svg></button><div class="notification-center"><button id="notification-button" class="secondary-button" type="button" aria-label="Traitements et notifications" aria-expanded="false"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-bell"></use></svg><span id="notification-count" hidden>0</span></button><div id="notification-panel" class="notification-panel" hidden><h2>Traitements et cartes à vérifier</h2><div id="notification-list"></div></div></div></div>
+    <div id="ai-batch-panel" hidden>
+      <span id="ai-batch-status" role="status"></span>
+      <button id="ai-batch-start" class="primary-button" type="button" disabled>Lancer la génération</button>
+      <button id="ai-batch-clear" class="secondary-button" type="button">Annuler</button>
+    </div>
   </header>
   <main>
     <svg class="mana-symbol-library" aria-hidden="true" focusable="false">
@@ -190,6 +196,11 @@
       <div class="shutdown-actions"><button id="shutdown-cancel" class="secondary-button" type="button" autofocus>Annuler</button><button id="shutdown-confirm" class="primary-button" type="button">Confirmer</button></div>
     </dialog>
     <dialog id="image-choice-dialog" class="image-choice-dialog" aria-label="Comparer et choisir une image"><button class="dialog-close comparison-dialog-close" type="button" aria-label="Fermer la comparaison">×</button><div id="image-choice-content"></div></dialog>
+    <dialog id="ai-batch-review" class="card-dialog" aria-labelledby="ai-batch-review-title">
+      <button id="ai-batch-review-close" class="dialog-close" type="button" aria-label="Fermer la revue" autofocus>×</button>
+      <h2 id="ai-batch-review-title">Revue des cartes générées</h2>
+      <div id="ai-batch-review-content"></div>
+    </dialog>
     <dialog id="ai-translation-dialog" class="ai-translation-dialog" aria-labelledby="ai-translation-title" aria-describedby="ai-translation-message">
       <div class="ai-translation-panel">
         <h2 id="ai-translation-title">Traduction française absente</h2>
