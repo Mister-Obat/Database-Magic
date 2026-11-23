@@ -8,6 +8,8 @@ import logging
 import sqlite3
 import mimetypes
 import os
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -1788,8 +1790,12 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 self._send(200, (UI_ROOT / "assets/deck-box-grain.png").read_bytes(), "image/png")
             elif route == "/deck-box-fallback.webp":
                 self._send(200, (UI_ROOT / "assets/deck-box-fallback.webp").read_bytes(), "image/webp")
-            elif route == "/deck-box-obsidian.webp":
-                self._send(200, (UI_ROOT / "assets/deck-box-obsidian.webp").read_bytes(), "image/webp")
+            elif (route.startswith("/deck-box-preview-") and route.endswith(".webp")
+                  and route[len("/deck-box-preview-"):-len(".webp")] in personal_decks.BOX_DESIGNS):
+                self._send(200, (UI_ROOT / "assets" / route[1:]).read_bytes(), "image/webp")
+            elif (route.startswith("/deck-box-") and route.endswith(".webp")
+                  and route[len("/deck-box-"):-len(".webp")] in personal_decks.PANORAMIC_BOX_DESIGNS):
+                self._send(200, (UI_ROOT / "assets" / route[1:]).read_bytes(), "image/webp")
             elif route == "/app.js":
                 file = _safe_child(UI_ROOT, "app.js")
                 self._send(200, file.read_bytes(), "text/javascript; charset=utf-8")
@@ -2826,27 +2832,38 @@ def _deck_index_network_busy() -> bool:
     return colors_running or _maintenance_is_active() or bool(_maintenance_busy_reason())
 
 
+def _refresh_deck_box_previews():
+    generator = OPS_ROOT / "tools" / "generate_deck_box_previews.py"
+    try:
+        subprocess.run([sys.executable, str(generator), "--refresh"], check=True)
+    except (OSError, subprocess.CalledProcessError):
+        logging.warning("La mise à jour des aperçus de boîtes de deck a échoué.", exc_info=True)
+
+
 def main():
     host = DEFAULT_HOST
     port = int(os.environ.get("MAGIC_LIBRARY_PORT", DEFAULT_PORT))
     if not (CATALOGUE_ROOT / "current.json").is_file():
         raise SystemExit("Catalogue absent. Lancez Initialiser_Bibliotheque_Magic.bat "
                          "ou restaurez un catalogue avant de démarrer.")
-    server = open_existing_or_start(host, port)
+    server = open_existing_or_start(host, port, open_browser=False)
     if server is None:
         print(f"Bibliothèque Magic déjà active : http://{host}:{port}/")
+        webbrowser.open(f"http://{host}:{port}/")
         return
     print(f"Bibliothèque Magic : http://{host}:{port}/")
     print("Serveur local lié uniquement à 127.0.0.1. Ctrl+C pour arrêter.")
     stop_deck_index = threading.Event()
-    threading.Thread(
-        name="deck-composition-index", target=run_deck_composition_index, daemon=True,
-        args=(stop_deck_index, DECK_DB), kwargs={
-            "catalog_db_provider": lambda: resolve_current(CATALOGUE_ROOT)["database"],
-            "network_busy": _deck_index_network_busy,
-        },
-    ).start()
     try:
+        _refresh_deck_box_previews()
+        threading.Timer(0.5, webbrowser.open, args=(server.app_url,)).start()
+        threading.Thread(
+            name="deck-composition-index", target=run_deck_composition_index, daemon=True,
+            args=(stop_deck_index, DECK_DB), kwargs={
+                "catalog_db_provider": lambda: resolve_current(CATALOGUE_ROOT)["database"],
+                "network_busy": _deck_index_network_busy,
+            },
+        ).start()
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass

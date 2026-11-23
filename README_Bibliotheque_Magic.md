@@ -22,6 +22,17 @@ L'onglet **Decks** permet de consulter les préconstruits issus de MTGJSON. L'on
 
 Les decks peuvent être exportés en images sur le Bureau. Les images nécessaires doivent être disponibles : récupérer les cartes manquantes depuis leurs fiches. La page Info accepte aussi l'import d'une liste de cartes.
 
+Pour personnaliser une finition panoramique, remplacez son fichier
+`deck-box-<identifiant>.webp` dans
+`_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/` en gardant le même
+nom et un panorama au format 2:1. Relancez la bibliothèque avec son lanceur
+habituel. Elle régénère l’aperçu fixe avec le modèle 3D si le contenu de la
+texture a changé. Le rendu utilise une installation locale de Chrome ou d’Edge.
+Si le rendu échoue, l’ancien aperçu est conservé et la bibliothèque s’ouvre.
+Pour ajouter une finition au sélecteur, déclarez son identifiant dans
+`PANORAMIC_BOX_DESIGNS` dans `personal_decks.py`, puis ajoutez son libellé dans
+le groupe voulu dans `ui/deck-box.js`. Le prochain démarrage crée son aperçu.
+
 ## Données locales et sauvegarde
 
 Le dépôt ne sauvegarde pas les données produites sur votre machine. Pour les protéger, conserver une copie externe du catalogue et de ses sauvegardes, de `_bibliotheque_mtg/Images/`, de `_bibliotheque_mtg/state/` (notamment `personal-decks.sqlite` et `personal-decks-backups/`), des archives et de tout fonds historique personnel. La sauvegarde du catalogue ne comprend pas les images : copier `Images/` séparément. Éviter les mises à jour et téléchargements d'images pendant la sauvegarde.

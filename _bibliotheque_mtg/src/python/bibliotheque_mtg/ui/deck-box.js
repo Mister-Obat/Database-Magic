@@ -2,12 +2,26 @@
 
 const deckBoxRest = { pitch: -10, yaw: -14, scale: 1 };
 const deckBoxViewport = { width: 1.24, height: 1.56 };
-const deckBoxDesigns = [
-    ["standard", "Standard"], ["obsidian", "Obsidienne"],
-    ["plains", "Plaine"], ["island", "Île"], ["swamp", "Marais"],
-    ["mountain", "Montagne"], ["forest", "Forêt"],
-    ["silver", "Argent"], ["copper", "Cuivre"], ["indigo", "Indigo"],
+const deckBoxFantasy = [
+    ["obsidian", "Obsidienne"], ["braise", "Braise"], ["abyssal", "Abysses"],
+    ["canopy", "Canopée"], ["glacier", "Glacier"],
+    ["amethyst", "Améthyste"],
 ];
+const deckBoxSciFi = [
+    ["orbital", "Orbital"], ["reactor", "Réacteur"], ["biotech", "Biotech"],
+    ["hyperspace", "Hyperespace"], ["cryovault", "Cryostase"],
+];
+const deckBoxPanoramas = new Map([...deckBoxFantasy, ...deckBoxSciFi]);
+const deckBoxDesignGroups = [
+    ["Couleurs unies", [
+        ["standard", "Standard"], ["plains", "Plaine"], ["island", "Île"],
+        ["swamp", "Marais"], ["mountain", "Montagne"], ["forest", "Forêt"],
+        ["silver", "Argent"], ["copper", "Cuivre"], ["indigo", "Indigo"],
+    ]],
+    ["Fantasy", deckBoxFantasy],
+    ["Science-fiction", deckBoxSciFi],
+];
+const deckBoxDesigns = deckBoxDesignGroups.flatMap(([, designs]) => designs);
 // Both pieces use the same pigment under the mesh's baked lighting.
 const deckBoxColors = new Map([
     ["plains", { color: [174, 157, 129], lightMaterial: true }],
@@ -20,8 +34,11 @@ const deckBoxColors = new Map([
     ["indigo", { color: [72, 67, 147] }],
 ]);
 const deckBoxFinishes = new Map();
+let deckBoxMesh;
 let deckBoxModel;
 let deckBoxTitleMeasure;
+let releaseActiveDeckBox;
+let deckBoxMotion;
 
 function fitDeckBoxTitle(name) {
     if (!deckBoxTitleMeasure) {
@@ -90,7 +107,8 @@ function deckBoxPanoramaU(x, z, [back, front]) {
 }
 
 function createDeckBoxRenderer(mesh, grain, finish = null) {
-    const width = 384;
+    // The bitmap is smaller during pointer motion; the cached rest pose stays at 512 px.
+    const width = 256;
     const height = Math.round(width * deckBoxViewport.height / deckBoxViewport.width);
     const rest = document.createElement("canvas");
     rest.width = 512;
@@ -317,12 +335,17 @@ function createDeckBoxRenderer(mesh, grain, finish = null) {
     return { draw, width, height, still: rest.toDataURL() };
 }
 
+function loadDeckBoxMesh() {
+    deckBoxMesh ??= fetch("/deck-box-mesh.json").then(response => {
+        if (!response.ok) throw new Error(`Maillage de deckbox : HTTP ${response.status}`);
+        return response.json();
+    }).then(hydrateDeckBoxMesh);
+    return deckBoxMesh;
+}
+
 function loadDeckBoxModel() {
     deckBoxModel ??= Promise.all([
-        fetch("/deck-box-mesh.json").then(response => {
-            if (!response.ok) throw new Error(`Maillage de deckbox : HTTP ${response.status}`);
-            return response.json();
-        }).then(hydrateDeckBoxMesh),
+        loadDeckBoxMesh(),
         loadDeckBoxGrain().catch(error => {
             console.warn("Texture de la deckbox indisponible.", error);
             return null;
@@ -338,13 +361,13 @@ function loadDeckBoxModel() {
 
 function loadDeckBoxFinish(design) {
     const standard = loadDeckBoxModel();
-    if (design !== "obsidian" && !deckBoxColors.has(design)) return standard;
+    if (!deckBoxPanoramas.has(design) && !deckBoxColors.has(design)) return standard;
     if (!deckBoxFinishes.has(design)) {
         deckBoxFinishes.set(design, standard.then(async model => {
             try {
                 let finish = deckBoxColors.get(design);
-                if (design === "obsidian") {
-                    const texture = await loadDeckBoxTexture("/deck-box-obsidian.webp");
+                if (deckBoxPanoramas.has(design)) {
+                    const texture = await loadDeckBoxTexture(`/deck-box-${design}.webp`);
                     finish = { texture };
                 }
                 const renderer = createDeckBoxRenderer(model.mesh, model.grain, finish);
@@ -358,8 +381,29 @@ function loadDeckBoxFinish(design) {
     return deckBoxFinishes.get(design);
 }
 
-function mountDeckBox(tile, box, panel, artwork, title, mana, design = "standard") {
-    loadDeckBoxFinish(design).then(({ mesh, renderer }) => {
+let deckBoxFallback;
+
+function prepareDeckBoxFallback(box) {
+    if (!deckBoxFallback) {
+        const image = new Image();
+        image.src = "/deck-box-fallback.webp";
+        deckBoxFallback = image.decode().then(() => true, () => false);
+    }
+    return deckBoxFallback.then(available => {
+        if (!available) box.classList.add("deck-box-fallback-unavailable");
+    });
+}
+
+async function mountDeckBox(tile, box, panel, artwork, title, mana, design = "standard", { preview = false } = {}) {
+    try {
+        const still = document.createElement("img");
+        still.className = "deck-box-model";
+        still.alt = "";
+        still.draggable = false;
+        const [mesh, renderer] = await Promise.all([
+            loadDeckBoxMesh(),
+            preview ? loadDeckBoxPreview(still, design) : loadDeckBoxFinish(design).then(model => model.renderer),
+        ]);
         if (!tile.isConnected) return;
         const { width } = deckBoxViewport;
         const percent = value => `${value * 100}%`;
@@ -373,23 +417,18 @@ function mountDeckBox(tile, box, panel, artwork, title, mana, design = "standard
             element.style.height = percent(h / mesh.height);
             element.style.transform = `translateZ(calc(${z * 100 / width} * 1cqi))`;
         }
-        if (!renderer) return;
-        const still = document.createElement("img");
-        still.className = "deck-box-model";
-        still.alt = "";
-        still.src = renderer.still;
-        still.draggable = false;
+        if (!preview) {
+            if (!renderer) return prepareDeckBoxFallback(box);
+            still.src = renderer.still;
+            await still.decode();
+        }
+        if (!tile.isConnected) return;
         box.prepend(still);
         box.classList.add("deck-box-rendered");
 
-        const motion = matchMedia("(any-hover: hover) and (prefers-reduced-motion: no-preference)");
         let pose = deckBoxRest;
-        let target = deckBoxRest;
-        let frame = null;
-        let canvas = null;
-        let context = null;
 
-        function paint() {
+        function positionPanel() {
             const radians = Math.PI / 180;
             const pitch = pose.pitch * radians;
             const yaw = pose.yaw * radians;
@@ -403,13 +442,24 @@ function mountDeckBox(tile, box, panel, artwork, title, mana, design = "standard
             box.style.setProperty("--deck-shadow-width", percent(.94 * pose.scale / width));
             box.style.setProperty("--deck-shadow-height", percent(.065 + .12 * Math.abs(Math.sin(pitch))));
             panel.style.transform = `scale(${pose.scale}) rotateX(${pose.pitch}deg) rotateY(${pose.yaw}deg)`;
-            still.hidden = pose !== deckBoxRest;
-            if (pose === deckBoxRest) {
-                canvas?.remove();
-                canvas = null;
-                context = null;
-                return;
-            }
+        }
+        positionPanel();
+        if (preview) return;
+
+        if (!deckBoxMotion) {
+            deckBoxMotion = matchMedia("(any-hover: hover) and (prefers-reduced-motion: no-preference)");
+            deckBoxMotion.addEventListener("change", () => {
+                if (!deckBoxMotion.matches) releaseActiveDeckBox?.();
+            });
+        }
+        let target = deckBoxRest;
+        let frame = null;
+        let canvas = null;
+        let context = null;
+        let leaving = null;
+
+        function paint() {
+            positionPanel();
             if (!canvas) {
                 canvas = document.createElement("canvas");
                 canvas.className = "deck-box-model";
@@ -418,12 +468,46 @@ function mountDeckBox(tile, box, panel, artwork, title, mana, design = "standard
                 canvas.height = renderer.height;
                 context = canvas.getContext("2d");
                 still.after(canvas);
+                still.hidden = true;
             }
             if (context) renderer.draw(context, pose);
         }
+        function release() {
+            if (releaseActiveDeckBox === release) releaseActiveDeckBox = null;
+            if (frame !== null) cancelAnimationFrame(frame);
+            frame = null;
+            if (!canvas) return;
+            if (deckBoxMotion.matches && tile.isConnected) {
+                // Keep the body and its printed panel aligned while fading to the cached rest pose.
+                const layer = document.createElement("span");
+                layer.className = "deck-box-return";
+                layer.setAttribute("aria-hidden", "true");
+                layer.append(canvas, panel.cloneNode(true));
+                box.append(layer);
+                leaving = layer;
+                layer.animate([{ opacity: 1 }, { opacity: 0 }], {
+                    duration: 150,
+                    easing: "ease-out",
+                    fill: "forwards",
+                }).onfinish = () => {
+                    layer.remove();
+                    if (leaving === layer) leaving = null;
+                };
+            } else {
+                canvas.remove();
+            }
+            canvas = null;
+            context = null;
+            still.hidden = false;
+            pose = deckBoxRest;
+            positionPanel();
+        }
         function tick() {
             frame = null;
-            if (!tile.isConnected) return;
+            if (!tile.isConnected) {
+                release();
+                return;
+            }
             const close = Math.abs(target.pitch - pose.pitch) < .08
                 && Math.abs(target.yaw - pose.yaw) < .08
                 && Math.abs(target.scale - pose.scale) < .001;
@@ -436,11 +520,17 @@ function mountDeckBox(tile, box, panel, artwork, title, mana, design = "standard
             if (!close) frame = requestAnimationFrame(tick);
         }
         function aim(next) {
+            if (releaseActiveDeckBox !== release) {
+                releaseActiveDeckBox?.();
+                releaseActiveDeckBox = release;
+            }
+            leaving?.remove();
+            leaving = null;
             target = next;
             if (frame === null) frame = requestAnimationFrame(tick);
         }
         function hover(event) {
-            if (!motion.matches || event.pointerType === "touch" || event.buttons
+            if (!deckBoxMotion.matches || event.pointerType === "touch" || event.buttons
                 || tile.classList.contains("personal-deck-dragging")) return;
             const bounds = box.getBoundingClientRect();
             if (!bounds.width || !bounds.height) return;
@@ -451,13 +541,26 @@ function mountDeckBox(tile, box, panel, artwork, title, mana, design = "standard
         for (const event of ["pointerenter", "pointermove"]) tile.addEventListener(event, hover, { passive: true });
         for (const event of ["pointerleave", "pointercancel"]) {
             tile.addEventListener(event, () => {
-                if (!tile.classList.contains("personal-deck-dragging")) aim(deckBoxRest);
+                if (!tile.classList.contains("personal-deck-dragging")) release();
             });
         }
         tile.addEventListener("deckboxlift", () => {
-            if (motion.matches) aim({ pitch: -9, yaw: -17, scale: 1.045 });
+            if (deckBoxMotion.matches) aim({ pitch: -9, yaw: -17, scale: 1.045 });
         });
-        tile.addEventListener("deckboxrelease", () => aim(deckBoxRest));
-        paint();
-    }).catch(error => console.warn("Modèle de deckbox indisponible.", error));
+        tile.addEventListener("deckboxrelease", release);
+    } catch (error) {
+        console.warn("Modèle de deckbox indisponible.", error);
+        return prepareDeckBoxFallback(box);
+    }
+}
+
+async function loadDeckBoxPreview(still, design) {
+    still.src = `/deck-box-preview-${design}.webp`;
+    try {
+        await still.decode();
+    } catch (error) {
+        if (design === "standard") throw error;
+        still.src = "/deck-box-preview-standard.webp";
+        await still.decode();
+    }
 }

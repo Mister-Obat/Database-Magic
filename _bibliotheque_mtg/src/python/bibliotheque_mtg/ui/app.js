@@ -917,28 +917,29 @@ async function refreshHomeStats() {
 }
 async function refreshHomeActivity() {
   const errorBox = $("home-activity-error");
+  const grid = $("home-recent-decks");
+  if (homeActivitySnapshot === undefined) showDeckGridSkeleton(grid, 7);
   try {
     const { personal_decks: decks } = await getJSON("/api/v2/recent-activity");
     const snapshot = JSON.stringify(decks);
     if (snapshot !== homeActivitySnapshot) {
-      const recentDecks = decks.map(deck => {
-        const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card, () => {
+      const recentDecks = decks.map(deck =>
+        deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card, () => {
           location.hash = `#perso?deck=${encodeURIComponent(deck.id)}`;
-        }, null, deck.box_design);
-        tile.title = deck.name;
-        return tile;
-      });
-      $("home-recent-decks").replaceChildren(...(recentDecks.length ? recentDecks :
+        }, null, deck.box_design));
+      grid.replaceChildren(...(recentDecks.length ? recentDecks :
         [node("p", "muted", "Aucun deck personnel.")]));
       homeActivitySnapshot = snapshot;
     }
     errorBox.hidden = true;
   } catch (error) {
     if (homeActivitySnapshot === undefined) {
-      $("home-recent-decks").replaceChildren();
+      grid.replaceChildren();
     }
     setText(errorBox, `Activité récente indisponible : ${error.message}`);
     errorBox.hidden = false;
+  } finally {
+    grid.removeAttribute("aria-busy");
   }
 }
 function loadHome() {
@@ -2770,7 +2771,7 @@ function refreshCurrentCollection(proxyImage = false) {
   else if (state.view === "proxy" && proxyImage) void renderProxies({ quiet: true });
   else if (state.view === "perso" && proxyImage) {
     if (personalState.deck) renderPersonalEditor();
-    else renderPersonalList();
+    else void personalState.refreshList?.(true, true);
   }
 }
 function renderVerifiedFrenchText(container, frenchText, provenance = null) {
@@ -2833,7 +2834,7 @@ async function renderDeckPage(background = false) {
   const container = $("deck-list");
   if (!background) {
     pageControls.get("deck-pager")(0, 1);
-    container.replaceChildren(pageLoading("Chargement des decks…"));
+    showDeckGridSkeleton(container, 9, true);
   }
   try {
     const data = await fetchCataloguePage("/api/v2/decks", query, { signal: controller.signal });
@@ -2847,11 +2848,11 @@ async function renderDeckPage(background = false) {
       const edition = node("span", "deck-tile-edition");
       if (deck.edition_icon_url) {
         const icon = node("img");
-        icon.src = deck.edition_icon_url;
         icon.alt = "";
         icon.draggable = false;
         icon.loading = "lazy";
         icon.addEventListener("error", () => icon.remove(), { once: true });
+        icon.src = deck.edition_icon_url;
         edition.append(icon);
       }
       edition.append(deck.set_name_fr || deck.set_name || deck.set_code || "Édition inconnue");
@@ -2868,7 +2869,12 @@ async function renderDeckPage(background = false) {
       showError(container, error.message);
     }
   }
-  finally { if (state.deckController === controller) state.deckController = null; }
+  finally {
+    if (state.deckController === controller) {
+      state.deckController = null;
+      container.removeAttribute("aria-busy");
+    }
+  }
 }
 
 async function loadDeckFacets(force = false) {
@@ -3536,6 +3542,7 @@ $("clear-deck-filters").addEventListener("click", () => {
   state.deckExecuted = false; state.deckAppliedFilters = null; state.deckPage = 0; state.deckTotal = 0;
   state.deckListKey = null; state.deckController?.abort(); state.deckController = null; ++state.deckRequest;
   $("deck-list").replaceChildren();
+  $("deck-list").removeAttribute("aria-busy");
   pageControls.get("deck-pager")(0, 1);
   updateBatchButtons();
   if (state.view === "decks") syncRoute();
@@ -3642,7 +3649,7 @@ if (imageDemoMode) {
 }
 
 // Personal compositions live outside the versioned catalogue. Drafts survive navigation/reload.
-const personalState = { editing: false, sectionOrganization: null, deck: null, change: 0, saved: 0, saving: null, error: null, timer: null, listRequest: 0, refreshList: null, drag: null };
+const personalState = { editing: false, sectionOrganization: null, deck: null, change: 0, saved: 0, saving: null, error: null, timer: null, list: null, refreshList: null, drag: null };
 const proxyState = { page: 0, total: 0, request: 0, loading: false, deleting: false, snapshot: null };
 const PERSONAL_CURRENT_KEY = "database-magic-personal-current-v1";
 function personalButton(label, action, primary = false) {
@@ -4057,17 +4064,20 @@ function personalColors(values, onChange) {
     }
     return group;
 }
-function personalImage(card, className = "deck-card-image") {
+function personalImageUrl(card) {
     const path = card?.image_path || card?.image_slots?.find(s => s.status === "ready" && s.face_index === 0)?.relative_path;
-    const imageUrl = currentCardImageUrl(card) || (path ? `/assets?${params({ path })}` : "");
+    return currentCardImageUrl(card) || (path ? `/assets?${params({ path })}` : "");
+}
+function personalImage(card, className = "deck-card-image") {
+    const imageUrl = personalImageUrl(card);
     if (!imageUrl)
         return node("div", `${className} deck-card-image-empty`, card ? "Image absente" : "Deck vide");
     const img = node("img", className);
     img.draggable = false;
-    img.src = imageUrl;
     img.alt = card.printed_name || card.name || "Carte";
     img.loading = "lazy";
     img.onerror = () => img.replaceWith(node("div", `${className} deck-card-image-empty`, "Image indisponible"));
+    img.src = imageUrl;
     return img;
 }
 async function showPersonalDecks() {
@@ -4121,11 +4131,21 @@ function personalColorField(values, onChange) {
         colors => onChange(colors.filter(color => color !== "C"))));
     return field;
 }
-function deckCoverTile(name, colors, cover, open, edition = null, design = "standard") {
+function showDeckGridSkeleton(grid, count, withEdition = false) {
+    grid.setAttribute("aria-busy", "true");
+    grid.replaceChildren(...Array.from({ length: count }, () => {
+        const tile = node("span", "personal-deck-tile deck-tile-loading");
+        tile.setAttribute("aria-hidden", "true");
+        tile.append(node("span", "deck-box"));
+        if (withEdition) tile.append(node("span", "deck-tile-edition", "\u00a0"));
+        return tile;
+    }));
+}
+function deckCoverTile(name, colors, cover, open, edition = null, design = "standard", options) {
     const tile = personalButton("", open);
-    tile.className = "personal-deck-tile";
-    tile.title = name;
+    tile.className = "personal-deck-tile deck-tile-loading";
     tile.setAttribute("aria-label", name);
+    tile.setAttribute("aria-busy", "true");
     const box = node("span", "deck-box");
     const panel = node("span", "deck-box-panel");
     const frame = node("span", "deck-box-window");
@@ -4143,7 +4163,29 @@ function deckCoverTile(name, colors, cover, open, edition = null, design = "stan
     box.append(node("span", "deck-box-fallback"), panel);
     tile.append(box);
     if (edition) tile.append(edition);
-    mountDeckBox(tile, box, panel, frame, title, mana, design);
+    const images = [image, edition?.querySelector("img")].filter(element => element?.tagName === "IMG");
+    const imagesReady = images.map(async element => {
+        if (!element.complete) {
+            // A lazy image has no current request to decode until it approaches the viewport.
+            await new Promise(resolve => {
+                const controller = new AbortController();
+                const settle = () => {
+                    controller.abort();
+                    resolve();
+                };
+                const options = { signal: controller.signal };
+                element.addEventListener("load", settle, options);
+                element.addEventListener("error", settle, options);
+            });
+        }
+        try { await element.decode(); }
+        catch { element.remove(); }
+    });
+    void Promise.all([mountDeckBox(tile, box, panel, frame, title, mana, design, options), ...imagesReady]).then(() => {
+        tile.title = tile.getAttribute("aria-label");
+        tile.removeAttribute("aria-busy");
+        tile.classList.remove("deck-tile-loading");
+    });
     return tile;
 }
 async function readPersonalTextFile(file) {
@@ -4180,12 +4222,43 @@ function keepPersonalDropInView(findGrid, update) {
         page.style.overflowAnchor = previousAnchor;
     }
 }
+function personalDetailContent() {
+    const root = $("personal-content");
+    let detail = root.querySelector(":scope > .personal-detail-content");
+    if (!detail) {
+        detail = node("div", "personal-detail-content");
+        root.append(detail);
+    }
+    const list = personalState.list;
+    if (list && !list.root.hidden) {
+        if (state.view === "perso") list.scroll = window.scrollY;
+        list.root.hidden = true;
+    }
+    detail.hidden = false;
+    return detail;
+}
+
 function renderPersonalList() {
     updatePersonalHeading();
-    const root = $("personal-content");
+    personalStatus("");
+    const detail = $("personal-content").querySelector(":scope > .personal-detail-content");
+    if (detail) {
+        detail.hidden = true;
+        detail.replaceChildren();
+    }
+    if (personalState.list) {
+        const { root, actions, scroll } = personalState.list;
+        $("personal-heading-content").querySelector(".deck-heading").append(actions);
+        root.hidden = false;
+        if (state.view === "perso") window.scrollTo({ top: scroll, behavior: "instant" });
+        void personalState.refreshList?.(true);
+        return;
+    }
+    const root = node("div", "personal-list-content");
     let decks = null, groups = [], organizing = false, importing = false;
     let busy = false, drag = null, landedDeckId = null, latestLoad = 0;
     let ungroupedSection = null;
+    let visibleEntries = new Map();
     const create = personalButton("Créer un deck", renderPersonalCreate, true);
     const actions = node("div", "search-header-actions personal-list-actions");
     const filePicker = node("input");
@@ -4284,11 +4357,12 @@ function renderPersonalList() {
     filters.append(row, refine);
     const list = node("div", "personal-list-groups");
     $("personal-heading-content").querySelector(".deck-heading").append(actions);
-    root.replaceChildren(importReport, filters, groupForm, list, scrollTopFooter("personal-title"));
-    personalState.refreshList = (manual = false) => {
-        if (list.isConnected && !busy && !importing && !drag && (manual || !organizing)) return load(true);
+    root.append(importReport, filters, groupForm, list, scrollTopFooter("personal-title"));
+    $("personal-content").append(root);
+    personalState.list = { root, actions, scroll: 0 };
+    personalState.refreshList = (manual = false, forceRender = false) => {
+        if (!root.hidden && !busy && !importing && !drag && (manual || !organizing)) return load(true, forceRender);
     };
-    personalStatus("");
     const normalize = value => value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("fr").trim();
     function render() {
         if (!decks) return;
@@ -4325,6 +4399,7 @@ function renderPersonalList() {
         if (!items.length && !groups.length && !organizing)
             content.append(node("p", "empty-state", "Aucun deck personnel pour cette sélection."));
         list.replaceChildren(content);
+        visibleEntries = new Map(items.map(deck => [deck.id, visibleEntries.get(deck.id)]));
     }
     function renderGrid(groupId, items) {
         const grid = node("div", "personal-deck-grid");
@@ -4333,23 +4408,31 @@ function renderPersonalList() {
         return grid;
     }
     function renderDeck(deck) {
+        const deckId = deck.id;
+        const colors = deck.composition_colors ?? deck.colors ?? [];
+        const manual = sort.value === "manual";
+        const key = JSON.stringify([deck.name, colors, personalImageUrl(deck.cover_card),
+            Boolean(deck.cover_card), deck.box_design, manual]);
+        const previous = visibleEntries.get(deckId);
+        if (previous?.key === key && deckId !== landedDeckId) return previous.entry;
         const entry = node("article", "personal-list-entry");
-        entry.dataset.deckId = deck.id;
-        const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card,
-            () => void openPersonalDeck(deck.id), null, deck.box_design);
-        if (deck.id === landedDeckId) {
+        entry.dataset.deckId = deckId;
+        visibleEntries.set(deckId, { key, entry });
+        const tile = deckCoverTile(deck.name, colors, deck.cover_card,
+            () => void openPersonalDeck(deckId), null, deck.box_design);
+        if (deckId === landedDeckId) {
             tile.classList.add("personal-deck-landed");
             landedDeckId = null;
         }
         entry.append(tile);
-        if (sort.value === "manual") {
+        if (manual) {
             tile.classList.add("personal-deck-grabbable");
             tile.addEventListener("pointerdown", event => {
                 if (busy || drag || !event.isPrimary || event.button !== 0) return;
                 const listeners = new AbortController();
                 const options = { signal: listeners.signal };
                 drag = {
-                    deck, entry, tile, pointer: event.pointerId, listeners,
+                    deck: decks.find(item => item.id === deckId), entry, tile, pointer: event.pointerId, listeners,
                     x: event.clientX, y: event.clientY, source: entry.parentElement,
                     next: entry.nextElementSibling, animations: new Map(), frame: 0,
                 };
@@ -4592,25 +4675,30 @@ function renderPersonalList() {
             await action();
             if (list.isConnected) renderResult();
         } catch (error) {
-            if (list.isConnected) personalStatus(error.message, true);
+            if (!root.hidden) personalStatus(error.message, true);
         } finally {
             if (button) button.disabled = button === importText && organizing;
             busy = false;
         }
     }
-    async function load(quiet = false) {
+    async function load(quiet = false, forceRender = false) {
         const request = ++latestLoad;
-        if (!quiet) list.replaceChildren(node("p", "muted", "Chargement…"));
+        if (!quiet) {
+            const grid = node("div", "personal-deck-grid");
+            showDeckGridSkeleton(grid, 9);
+            list.replaceChildren(grid);
+        }
         try {
             const response = await getJSON("/api/v2/personal-decks", { summary: 1 });
             if (request !== latestLoad || !list.isConnected) return;
+            if (!forceRender && JSON.stringify([response.items, response.groups || []]) === JSON.stringify([decks, groups])) return;
             decks = response.items;
             groups = response.groups || [];
             importText.disabled = organizing || (busy && importing);
             organize.disabled = false;
             render();
         } catch (error) {
-            if (request !== latestLoad || !list.isConnected || quiet) return;
+            if (request !== latestLoad || !list.isConnected || (quiet && decks)) return;
             showError(list, error.message);
             list.append(personalButton("Réessayer", () => void load()));
         }
@@ -4621,7 +4709,7 @@ function renderPersonalList() {
 }
 function renderPersonalCreate() {
     updatePersonalHeading();
-    const root = $("personal-content"), form = node("form", "panel personal-create"), label = node("label", "", "Nom du deck"), name = node("input");
+    const root = personalDetailContent(), form = node("form", "panel personal-create"), label = node("label", "", "Nom du deck"), name = node("input");
     name.required = true;
     name.maxLength = 200;
     label.append(name);
@@ -4666,7 +4754,7 @@ function adoptPersonalDeck(deck) {
     personalStatus("Enregistré");
 }
 async function openPersonalDeck(id) {
-    const root = $("personal-content");
+    const root = personalDetailContent();
     const loading = node("p", "muted", "Chargement du deck…");
     root.replaceChildren(loading);
     try {
@@ -5008,11 +5096,12 @@ function confirmPersonalDeckDeletion(deck) {
     dialog.showModal();
 }
 function renderPersonalEditor() {
-    const deck = personalState.deck, root = $("personal-content"), editing = personalState.editing;
+    const deck = personalState.deck, editing = personalState.editing;
     const sectionOrganization = personalState.sectionOrganization;
     hoverPreview.hidden = true;
     if (!deck)
         return;
+    const root = personalDetailContent();
     const content = document.createDocumentFragment();
     const actions = node("div", "personal-toolbar"), back = personalButton("Retour à la liste", async () => {
         back.disabled = true;
@@ -5268,16 +5357,21 @@ function choosePersonalBoxDesign(deck, editing, onSelect) {
     const gallery = node("div", "personal-picker-body personal-box-design-gallery");
     const cover = deck.sections.find(section => section.cards.length)?.cards[0];
     const colors = deck.composition_colors ?? deck.colors ?? [];
-    for (const [id, label] of deckBoxDesigns) {
-        const tile = deckCoverTile(editing.name.trim() || deck.name, colors, cover, () => {
-            onSelect(id, label);
-            dialog.close();
-        }, node("span", "personal-box-design-name", label), id);
-        tile.setAttribute("aria-label", label);
-        tile.title = label;
-        tile.setAttribute("aria-pressed", String(id === editing.boxDesign));
-        if (id === editing.boxDesign) tile.autofocus = true;
-        gallery.append(tile);
+    for (const [category, designs] of deckBoxDesignGroups) {
+        const section = node("section", "personal-box-design-category");
+        const grid = node("div", "personal-box-design-grid");
+        section.append(node("h3", "", category), grid);
+        for (const [id, label] of designs) {
+            const tile = deckCoverTile(editing.name.trim() || deck.name, colors, cover, () => {
+                onSelect(id, label);
+                dialog.close();
+            }, node("span", "personal-box-design-name", label), id, { preview: true });
+            tile.setAttribute("aria-label", label);
+            tile.setAttribute("aria-pressed", String(id === editing.boxDesign));
+            if (id === editing.boxDesign) tile.autofocus = true;
+            grid.append(tile);
+        }
+        gallery.append(section);
     }
     const footer = node("div", "personal-picker-footer");
     footer.append(personalButton("Annuler", () => dialog.close()));

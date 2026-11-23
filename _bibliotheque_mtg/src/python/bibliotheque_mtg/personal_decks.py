@@ -24,8 +24,12 @@ SECTION_LABELS = {"commander": "Commandant", "mainboard": "Deck principal",
 _BACKUP_LOCK = threading.Lock()
 _UNSPECIFIED_POSITION = object()
 DEFAULT_BOX_DESIGN = "standard"
-BOX_DESIGNS = frozenset({
-    DEFAULT_BOX_DESIGN, "obsidian", "plains", "island", "swamp", "mountain",
+PANORAMIC_BOX_DESIGNS = frozenset({
+    "obsidian", "braise", "abyssal", "canopy", "glacier", "amethyst",
+    "orbital", "reactor", "biotech", "hyperspace", "cryovault",
+})
+BOX_DESIGNS = PANORAMIC_BOX_DESIGNS | frozenset({
+    DEFAULT_BOX_DESIGN, "plains", "island", "swamp", "mountain",
     "forest", "silver", "copper", "indigo",
 })
 
@@ -117,6 +121,8 @@ def composition_sections(deck):
 
 def _read_document(document):
     deck = json.loads(document)
+    if deck.get("box_design") == "eclipse":
+        deck["box_design"] = DEFAULT_BOX_DESIGN
     deck.setdefault("box_design", DEFAULT_BOX_DESIGN)
     sections = composition_sections(deck)
     if not sections and deck["sections"]:
@@ -552,7 +558,8 @@ def _composition_cards(deck):
 
 def summary_with_media(deck, catalog_db, proxy_lookup=None):
     summary = {key: deck.get(key) for key in ("id", "name", "colors", "revision", "updated_at")}
-    summary["box_design"] = deck.get("box_design", DEFAULT_BOX_DESIGN)
+    design = deck.get("box_design", DEFAULT_BOX_DESIGN)
+    summary["box_design"] = DEFAULT_BOX_DESIGN if design == "eclipse" else design
     if "group_id" in deck:
         summary["group_id"] = deck["group_id"]
     if "creation_order" in deck:

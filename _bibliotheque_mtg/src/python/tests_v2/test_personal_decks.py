@@ -78,7 +78,8 @@ def test_durable_revisions_backup_and_conflict(tmp_path):
 
 @pytest.mark.parametrize("design", [
     "standard", "obsidian", "plains", "island", "swamp", "mountain", "forest",
-    "silver", "copper", "indigo",
+    "silver", "copper", "indigo", "braise", "abyssal", "canopy", "glacier", "amethyst",
+    "orbital", "reactor", "biotech", "hyperspace", "cryovault",
 ])
 def test_box_design_defaults_and_survives_save_and_duplicate(tmp_path, design):
     db = tmp_path / "personal.sqlite"
@@ -97,6 +98,20 @@ def test_box_design_defaults_and_survives_save_and_duplicate(tmp_path, design):
     assert personal.get_deck(db, deck["id"])["box_design"] == design
     copied = personal.duplicate_deck(db, deck["id"], "Copie", deck["revision"])
     assert copied["box_design"] == design
+
+
+def test_retired_eclipse_deck_can_still_be_saved(tmp_path):
+    db = tmp_path / "personal.sqlite"
+    deck = personal.create_deck(db, "Ancien deck", [])
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE personal_decks SET document=? WHERE id=?",
+                     (json.dumps({**deck, "box_design": "eclipse"}), deck["id"]))
+    opened = personal.get_deck(db, deck["id"])
+    assert opened["box_design"] == "standard"
+    saved = personal.save_deck(db, opened)
+    assert saved["box_design"] == "standard"
+    with pytest.raises(ValueError, match="Modèle de boîte"):
+        personal.save_deck(db, {**saved, "box_design": "eclipse"})
 
 
 def test_deck_groups_migrate_a_legacy_database_and_preserve_compositions(tmp_path):
@@ -416,9 +431,14 @@ def test_http_origin_routes_and_stale_save(cards, tmp_path, monkeypatch):
         assert opened["revision"] == 2 and opened["box_design"] == "standard"
         opened["box_design"] = "obsidian"
         assert request("/api/v2/personal-decks/save", {"deck": opened})[0] == 200
-        with urllib.request.urlopen(base + "/deck-box-obsidian.webp", timeout=5) as texture:
-            assert texture.headers.get_content_type() == "image/webp"
-            assert texture.read(12)[8:] == b"WEBP"
+        for design in personal.PANORAMIC_BOX_DESIGNS:
+            with urllib.request.urlopen(base + f"/deck-box-{design}.webp", timeout=5) as texture:
+                assert texture.headers.get_content_type() == "image/webp"
+                assert texture.read(12)[8:] == b"WEBP"
+        for design in personal.BOX_DESIGNS:
+            with urllib.request.urlopen(base + f"/deck-box-preview-{design}.webp", timeout=5) as texture:
+                assert texture.headers.get_content_type() == "image/webp"
+                assert texture.read(12)[8:] == b"WEBP"
         assert request("/api/v2/recent-activity")[1]["personal_decks"][0]["box_design"] == "obsidian"
         assert request("/api/v2/personal-decks?summary=1")[1]["items"][0]["box_design"] == "obsidian"
         assert len(request("/api/v2/personal-decks?q=HTTP&colors=W")[1]["items"]) == 1

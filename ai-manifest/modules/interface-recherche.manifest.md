@@ -809,18 +809,26 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   conserve le deck actif lors des allers-retours avec Recherche ; un retour
   explicite ouvre la liste. La liste et le sélecteur de deck utilisent la
   projection `summary=1`, qui résout la couverture seule.
+  La liste reste montée pendant la consultation d’un deck. Au retour, la
+  vérification de la liste se fait en arrière-plan et les boîtes dont la
+  présentation est inchangée restent affichées.
 - Les decks personnels portent un UUID, un nom, des couleurs W/U/B/R/G (vide
   pour incolore), une révision et des sections ordonnées identifiées par UUID.
   Les entrées conservent les identités exactes fournisseur/impression, leur
   quantité et les métadonnées utiles à la consultation hors catalogue futur.
 - Le champ `box_design` indique le modèle de boîte du deck personnel.
   Les valeurs admises sont `standard`, `obsidian`, `plains`, `island`,
-  `swamp`, `mountain`, `forest`, `silver`, `copper` et `indigo`. Les
+  `swamp`, `mountain`, `forest`, `silver`, `copper`, `indigo`, `braise`,
+  `abyssal`, `canopy`, `glacier`, `amethyst`, `orbital`, `reactor`,
+  `biotech`, `hyperspace` et `cryovault`. Les
   nouveaux decks et les anciens decks sans modèle utilisent `standard`.
+  La lecture d’un ancien deck Éclipse utilise également `standard`.
   Une sauvegarde qui omet ce champ conserve le choix existant et une
   duplication le reprend. La liste, l’Accueil et le détail du deck le renvoient.
-- Le décor panoramique WebP de la boîte Obsidienne est servi depuis les
-  ressources de l’interface à l’adresse `/deck-box-obsidian.webp`.
+- Les décors panoramiques WebP sont servis depuis les ressources de l’interface
+  par `/deck-box-<design>.webp`, pour les finitions panoramiques autorisées.
+  Le sélecteur charge les aperçus WebP pré-rendus par
+  `/deck-box-preview-<design>.webp` pour chaque finition proposée.
 - Stocker les compositions dans une SQLite dédiée sous `_bibliotheque_mtg/state/`,
   indépendante des versions du catalogue. Transactions durables, historique des
   révisions et contrôle de concurrence évitent les écrasements silencieux.

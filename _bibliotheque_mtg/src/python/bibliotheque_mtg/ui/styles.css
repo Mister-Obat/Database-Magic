@@ -1384,6 +1384,37 @@ img.edition-symbol{object-fit:contain;filter:invert(.85)}
   aspect-ratio:124 / 156;
   pointer-events:none;
 }
+.personal-deck-tile::before {
+  content:"";
+  position:absolute;
+  top:46%;
+  left:50%;
+  width:1.35rem;
+  aspect-ratio:1;
+  margin:-.675rem 0 0 -.675rem;
+  border:2px solid #a794c43b;
+  border-top-color:#c5b1ec;
+  border-radius:50%;
+  visibility:hidden;
+  pointer-events:none;
+}
+.personal-deck-tile.deck-tile-loading::before {
+  visibility:visible;
+}
+.personal-deck-tile.deck-tile-loading > * {
+  opacity:0;
+}
+@media (prefers-reduced-motion:no-preference) {
+  .personal-deck-tile.deck-tile-loading::before {
+    animation:deck-tile-spin 750ms linear infinite;
+  }
+  @keyframes deck-tile-spin {
+    to { transform:rotate(1turn); }
+  }
+  .personal-deck-tile > * {
+    transition:opacity 220ms ease-out;
+  }
+}
 .deck-box::before {
   content:"";
   position:absolute;
@@ -1402,6 +1433,15 @@ img.edition-symbol{object-fit:contain;filter:invert(.85)}
   width:100%;
   height:100%;
 }
+.deck-box-return {
+  position:absolute;
+  inset:0;
+}
+@media (prefers-reduced-motion:reduce) {
+  .deck-box-return {
+    display:none;
+  }
+}
 .deck-box-fallback {
   width:83.177%;
   height:88.105%;
@@ -1411,6 +1451,12 @@ img.edition-symbol{object-fit:contain;filter:invert(.85)}
 }
 .deck-box-rendered .deck-box-fallback {
   display:none;
+}
+.deck-box-fallback-unavailable .deck-box-fallback {
+  width:80.645%;
+  height:86.092%;
+  border-radius:8%;
+  background:linear-gradient(#45404f 0% 27%, #262330 28% 100%);
 }
 .deck-box-panel {
   inset:0;
@@ -1506,6 +1552,9 @@ body.personal-deck-drag-active * {
 @media (prefers-reduced-motion:no-preference) {
   .personal-deck-landed .deck-box {
     animation:deck-box-settle 260ms ease-out;
+  }
+  .personal-deck-landed:not(.deck-tile-loading) .deck-box {
+    animation:deck-box-settle 260ms ease-out, deck-tile-reveal 220ms ease-out;
   }
   @keyframes deck-box-settle {
     from { transform:translateY(-5px) rotateZ(-2deg); }
@@ -1726,8 +1775,16 @@ body.personal-deck-drag-active * {
   width:min(960px, 94vw);
 }
 .personal-box-design-gallery {
-  grid-template-columns:repeat(auto-fit,minmax(min(100%, max(8rem, calc((100% - 3rem) / 5))),1fr));
   align-content:start;
+  gap:1rem;
+}
+.personal-box-design-category h3 {
+  margin:0 0 .6rem;
+  font-size:1rem;
+}
+.personal-box-design-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(min(100%, max(8rem, calc((100% - 3rem) / 5))),1fr));
   gap:.75rem;
 }
 .personal-box-design-gallery .personal-deck-tile {

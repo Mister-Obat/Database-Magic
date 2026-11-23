@@ -79,8 +79,8 @@ Ces deux fichiers, le grain PNG et le WebP de repli sont versionnés dans
 `_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/`. Le serveur lit
 les ressources d’exécution depuis ce dossier. L’interface dessine le volume
 dans Canvas avec un tampon de profondeur. Les vignettes partagent l’image
-calculée avec suréchantillonnage au repos et redessinent la géométrie à
-résolution interactive pendant les mouvements. Un WebP
+calculée en haute résolution au repos. Une seule boîte redessine sa géométrie
+à la résolution interactive pendant le survol ou la prise. Un WebP
 frontal du même modèle sert de repli. La texture PNG reprend le grain du
 polymère Blender, atténué pour une finition noire satinée. Le couvercle et le corps partagent le même graphite et le même éclairage
 selon leurs normales. Le côté droit est plus sombre que la façade sur toute
@@ -99,7 +99,8 @@ La fenêtre montre le rectangle intérieur de l’illustration d’une carte
 standard de 531 × 738 pixels, avec une marge de sécurité à l’intérieur du
 cadre. La boîte est légèrement inclinée au repos. Le survol la redresse,
 l’agrandit discrètement puis adapte ses angles au déplacement du pointeur.
-La sortie du pointeur rétablit la pose de repos. Pendant le glisser-déposer
+À la sortie du pointeur, la dernière pose complète s’efface en fondu pour
+retrouver l’image de repos. Pendant le glisser-déposer
 dans Deck perso, la boîte saisie suit le pointeur à pleine opacité, avec son
 rendu 3D et une inclinaison de prise. Un emplacement lilas marque l’insertion
 dans la grille et les autres boîtes glissent vers leurs nouvelles positions.
@@ -107,17 +108,40 @@ La préférence de mouvement réduit conserve une pose fixe et un déplacement
 des voisines sans transition.
 
 Les decks personnels proposent des finitions unies en plus de Standard et
-d’Obsidienne. Sur chaque finition unie, le corps et le couvercle ont la même
+des finitions panoramiques. Sur chaque finition unie, le corps et le couvercle ont la même
 teinte avec un grain discret. Un reflet satiné léger suit l’inclinaison.
-Le rebord de fermeture suit la géométrie des deux pièces. La finition
-Obsidienne projette un même panorama WebP
+Le rebord de fermeture suit la géométrie des deux pièces. Chaque finition
+panoramique projette un même panorama WebP
 du flanc gauche au flanc droit, en passant par la façade, avec une coordonnée
 verticale commune. Le dessus prolonge le bord supérieur du panorama sur sa profondeur. Le volume, l’éclairage et
 l’illustration de couverture suivent le même maillage. Le marquage « Deck Box »
 est noir sur un corps clair et blanc sur un corps sombre, avec un léger
 relief dans les deux cas.
-La texture est chargée seulement pour Obsidienne. Si elle est indisponible,
+Chaque texture est chargée à la demande. Si elle est indisponible,
 la boîte utilise le rendu Standard.
+
+Dans les grilles de l’Accueil, des decks personnels et des préconstruits,
+un indicateur circulaire tourne dans l’emprise réservée à chaque boîte pendant
+le chargement.
+Le volume, le titre, le mana, l’illustration et, le cas échéant, l’édition
+apparaissent ensemble une fois le rendu et les images disponibles prêts.
+En cas d’échec, le rendu de repli ou la fenêtre noire prennent la place de
+la ressource indisponible. Le mouvement réduit immobilise l’indicateur et
+supprime le fondu.
+
+Le sélecteur regroupe les finitions en Couleurs unies, Fantasy et
+Science-fiction. Il utilise des aperçus fixes WebP du même modèle, avec la
+couverture du deck. Le survol du sélecteur s’appuie sur les styles CSS.
+
+Au démarrage d’une nouvelle instance, le générateur compare les empreintes des
+textures panoramiques aux dernières empreintes connues. Il régénère les aperçus
+concernés avec le moteur de rendu du modèle, via un navigateur Chromium local.
+Une texture inchangée dont l’aperçu existe ne déclenche aucun rendu. Un échec
+conserve l’aperçu précédent et peut être retenté au démarrage suivant.
+Les empreintes livrées se trouvent dans
+`_bibliotheque_mtg/tools/deck_box_preview_sources.json`. Les empreintes
+actualisées localement se trouvent dans
+`_bibliotheque_mtg/state/deck-box-preview-sources.json`.
 
 ## Vérification d’une retouche
 
