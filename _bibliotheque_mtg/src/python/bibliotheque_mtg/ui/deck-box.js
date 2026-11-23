@@ -256,7 +256,7 @@ function mountDeckBox(tile, box, panel, artwork, title, mana) {
         }
         function hover(event) {
             if (!motion.matches || event.pointerType === "touch" || event.buttons
-                || tile.matches(".personal-deck-dragging,.personal-deck-drag-rest")) return;
+                || tile.classList.contains("personal-deck-dragging")) return;
             const bounds = box.getBoundingClientRect();
             if (!bounds.width || !bounds.height) return;
             const x = Math.max(-.5, Math.min(.5, (event.clientX - bounds.left) / bounds.width - .5));
@@ -264,9 +264,15 @@ function mountDeckBox(tile, box, panel, artwork, title, mana) {
             aim({ pitch: -3 + y * 8, yaw: -4 - x * 12, scale: 1.035 });
         }
         for (const event of ["pointerenter", "pointermove"]) tile.addEventListener(event, hover, { passive: true });
-        for (const event of ["pointerleave", "pointercancel", "dragstart"]) {
-            tile.addEventListener(event, () => aim(deckBoxRest));
+        for (const event of ["pointerleave", "pointercancel"]) {
+            tile.addEventListener(event, () => {
+                if (!tile.classList.contains("personal-deck-dragging")) aim(deckBoxRest);
+            });
         }
+        tile.addEventListener("deckboxlift", () => {
+            if (motion.matches) aim({ pitch: -9, yaw: -17, scale: 1.045 });
+        });
+        tile.addEventListener("deckboxrelease", () => aim(deckBoxRest));
         paint();
     }).catch(error => console.warn("Modèle de deckbox indisponible.", error));
 }

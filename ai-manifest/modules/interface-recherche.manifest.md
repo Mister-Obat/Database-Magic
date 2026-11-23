@@ -38,8 +38,8 @@ action que Valider. Annuler ferme le sélecteur et abandonne la saisie en cours.
 Dans un deck personnel, la grille reste en présentation de consultation avec
 quantités, retrait confirmé et déplacement par glisser-déposer. Le nom de
 chaque section se modifie sur place, avec validation, annulation ou suppression.
-Le formulaire du nom et des couleurs garde les changements en brouillon
-jusqu’à validation. L’annulation conserve le nom et les couleurs existants.
+Le formulaire Modifier du titre garde le nom en brouillon jusqu’à validation.
+Les couleurs restent affichées dans le titre.
 Les sections de la liste Deck perso sont ordonnées et les nouvelles sections
 s'ajoutent après les autres. Sans section reste en tête. Le glisser-déposer
 entre sections reste actif en consultation comme en organisation. Dans le
@@ -843,6 +843,16 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   section. Supprimer une section rend ses decks « Sans section » et conserve
   leurs compositions. La recherche par nom et couleurs s’applique aux sections
   de la liste.
+- L’ordre manuel des decks est enregistré par section dans la SQLite des decks
+  personnels, y compris pour « Sans section ». Le déplacement ne crée pas de
+  révision de composition. La liste renvoie cet ordre, avec les decks encore
+  non classés en tête, du plus récent au plus ancien par création.
+- `POST /api/v2/personal-decks/group-move` accepte `before_deck_id` en plus de
+  `deck_id` et `group_id`. L’identifiant désigne le deck qui suit dans la
+  destination ; `null` ajoute à la fin. Sans ce champ, la route conserve le
+  déplacement de section historique. Section et position sont enregistrées
+  dans la même transaction. Supprimer une section ajoute ses decks dans leur
+  ordre à la fin de « Sans section ».
 - Réutiliser HTML/CSS/JS natif, sqlite3 et la palette violette existante ; aucune
   dépendance supplémentaire. Montrer l'état de sauvegarde et les erreurs ; ne
   jamais afficher « enregistré » avant confirmation serveur.
@@ -892,14 +902,19 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - Pendant l’organisation, Créer et Importer sont désactivés dans la liste.
   Dans une composition, Retour à la liste, les deux exports et Dupliquer sont
   désactivés. Les boutons concernés sont désaturés, y compris au survol.
-  Les vignettes de decks déplaçables affichent un curseur de prise.
+  Les vignettes de decks et de cartes déplaçables gardent le curseur de clic.
+  L’ordre manuel est le tri par défaut pour la liste. Il permet de déposer un
+  deck à un emplacement précis dans chaque section, y compris Sans section.
+  Les tris par nom et par ajout restent des vues non modifiables.
   Chaque section de la liste, y compris la première, reprend le séparateur
   et l’espacement des sections d’une composition ouverte.
 - Réutiliser la présentation des filtres Recherche, avec Incolore exclusif,
   correspondance normale ou exacte et tri. La création est hors des filtres.
-- En édition, le glisser-déposer fait défiler la page près des bords.
-  Dans la section source, les cartes voisines se décalent pour prévisualiser
-  le point de dépôt. Seul le dépôt valide le nouvel ordre.
+- Dans la composition, le glisser-déposer fait défiler la page près des bords.
+  La carte saisie suit le pointeur en relief. Un emplacement visible décale les
+  cartes voisines dans la section survolée, y compris entre sections.
+  Seul le dépôt valide le nouvel ordre. La préférence de mouvement réduit
+  conserve l’emplacement visible sans animation des cartes voisines.
 - Retirer une carte du deck demande une confirmation avant de modifier la liste.
 - **Supprimer le deck** est disponible entre **Valider** et **Annuler** dans
   le formulaire **Modifier** du titre. La boîte de confirmation reprend le

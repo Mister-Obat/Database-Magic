@@ -1686,7 +1686,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 return
             if route == "/api/v2/personal-decks":
                 items = personal_decks.list_decks(PERSONAL_DECK_DB, params.get("q", ""),
-                                                  list(params.get("colors", "")), include_groups=True)
+                                                  list(params.get("colors", "")), include_groups=True,
+                                                  include_creation_order=True)
                 database = self.db
                 with_media = (personal_decks.summary_with_media if params.get("summary") == "1"
                               else personal_decks.with_media)
@@ -2139,9 +2140,10 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     self._json({"group": personal_decks.delete_deck_group(PERSONAL_DECK_DB, payload.get("group_id"))})
                     return
                 if action == "group-move":
-                    if set(payload) != {"deck_id", "group_id"}:
+                    fields = {"deck_id", "group_id"}
+                    if not fields <= payload.keys() or payload.keys() - fields - {"before_deck_id"}:
                         raise ValueError("Le deck et sa section doivent être indiqués.")
-                    self._json(personal_decks.move_deck_to_group(PERSONAL_DECK_DB, payload["deck_id"], payload["group_id"]))
+                    self._json(personal_decks.move_deck_to_group(PERSONAL_DECK_DB, **payload))
                     return
                 if action == "export-text":
                     result = personal_deck_text.export_text(PERSONAL_DECK_DB, payload.get("deck_id"))

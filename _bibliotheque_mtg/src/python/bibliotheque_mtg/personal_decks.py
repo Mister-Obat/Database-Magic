@@ -22,6 +22,7 @@ SECTION_LABELS = {"commander": "Commandant", "mainboard": "Deck principal",
                   "sideboard": "Réserve", "display_commander": "Commandant de présentation",
                   "planar_deck": "Deck planaire", "scheme_deck": "Machinations", "tokens": "Jetons"}
 _BACKUP_LOCK = threading.Lock()
+_UNSPECIFIED_POSITION = object()
 
 
 class RevisionConflict(ValueError):
@@ -68,6 +69,8 @@ def _database(path):
         conn.execute("BEGIN IMMEDIATE")
         if not _has_group_position(conn):
             conn.execute("ALTER TABLE personal_deck_groups ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+        if not _has_deck_position(conn):
+            conn.execute("ALTER TABLE personal_decks ADD COLUMN list_position INTEGER")
         yield conn
         conn.commit()
         if conn.total_changes:
@@ -143,7 +146,8 @@ def restore_backup(backup_path, destination):
 def _write(conn, deck):
     deck["updated_at"] = datetime.now(timezone.utc).isoformat()
     document = json.dumps(deck, ensure_ascii=False)
-    conn.execute("INSERT INTO personal_decks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,document=excluded.document",
+    conn.execute("""INSERT INTO personal_decks (id, revision, document) VALUES(?,?,?)
+        ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,document=excluded.document""",
                  (deck["id"], deck["revision"], document))
     conn.execute("INSERT INTO personal_deck_revisions VALUES(?,?,?)", (deck["id"], deck["revision"], document))
     return deck
@@ -204,23 +208,26 @@ def get_deck(path, deck_id):
         return _read(conn, deck_id)
 
 
-def list_decks(path, query="", colors=None, *, include_groups=False):
+def list_decks(path, query="", colors=None, *, include_groups=False, include_creation_order=False):
     if not Path(path).is_file():
         return []
     with _read_connection(path) as conn:
         if include_groups and _has_deck_groups(conn):
-            rows = conn.execute("""
-                SELECT decks.document, assignments.group_id FROM personal_decks AS decks
+            order = "decks.list_position, decks.rowid DESC" if _has_deck_position(conn) else "decks.rowid DESC"
+            rows = conn.execute(f"""
+                SELECT decks.document, assignments.group_id, decks.rowid FROM personal_decks AS decks
                 LEFT JOIN personal_deck_group_assignments AS assignments ON assignments.deck_id=decks.id
-                ORDER BY decks.rowid DESC
+                ORDER BY {order}
             """)
         else:
-            rows = conn.execute("SELECT document, NULL FROM personal_decks ORDER BY rowid DESC")
+            rows = conn.execute("SELECT document, NULL, rowid FROM personal_decks ORDER BY rowid DESC")
         decks = []
-        for document, group_id in rows:
+        for document, group_id, rowid in rows:
             deck = _read_document(document)
             if include_groups:
                 deck["group_id"] = group_id
+            if include_creation_order:
+                deck["creation_order"] = rowid
             decks.append(deck)
     needle = str(query).casefold().strip()
     selected = _colors(colors) if colors else []
@@ -237,6 +244,10 @@ def _has_deck_groups(conn):
 
 def _has_group_position(conn):
     return any(row[1] == "position" for row in conn.execute("PRAGMA table_info(personal_deck_groups)"))
+
+
+def _has_deck_position(conn):
+    return any(row[1] == "list_position" for row in conn.execute("PRAGMA table_info(personal_decks)"))
 
 
 def list_deck_groups(path):
@@ -289,22 +300,54 @@ def rename_deck_group(path, group_id, name, move=0):
 def delete_deck_group(path, group_id):
     with _database(path) as conn:
         group = _read_deck_group(conn, group_id)
+        moved_ids = _decks_in_group(conn, group_id)
+        if moved_ids:
+            _set_deck_positions(conn, _decks_in_group(conn, None) + moved_ids)
         conn.execute("DELETE FROM personal_deck_groups WHERE id=?", (group_id,))
     return group
 
 
-def move_deck_to_group(path, deck_id, group_id):
+def _decks_in_group(conn, group_id):
+    return [deck_id for (deck_id,) in conn.execute("""
+        SELECT decks.id FROM personal_decks AS decks
+        LEFT JOIN personal_deck_group_assignments AS assignments ON assignments.deck_id=decks.id
+        WHERE assignments.group_id IS ?
+        ORDER BY decks.list_position, decks.rowid DESC
+    """, (group_id,))]
+
+
+def _set_deck_positions(conn, ids):
+    conn.executemany("""
+        UPDATE personal_decks SET list_position=? WHERE id=? AND list_position IS NOT ?
+    """, ((position, deck_id, position) for position, deck_id in enumerate(ids)))
+
+
+def move_deck_to_group(path, deck_id, group_id, *, before_deck_id=_UNSPECIFIED_POSITION):
     with _database(path) as conn:
         _read(conn, deck_id)
-        if group_id is None:
-            conn.execute("DELETE FROM personal_deck_group_assignments WHERE deck_id=?", (deck_id,))
-        else:
+        if group_id is not None:
             _read_deck_group(conn, group_id)
-            conn.execute("""
+        if before_deck_id is not _UNSPECIFIED_POSITION:
+            ids = [other_id for other_id in _decks_in_group(conn, group_id) if other_id != deck_id]
+            if before_deck_id is None:
+                ids.append(deck_id)
+            else:
+                _read(conn, before_deck_id)
+                if before_deck_id not in ids:
+                    raise ValueError("Le deck de référence doit être dans la section de destination.")
+                ids.insert(ids.index(before_deck_id), deck_id)
+            _set_deck_positions(conn, ids)
+
+        if group_id is None:
+            assignment = conn.execute("DELETE FROM personal_deck_group_assignments WHERE deck_id=?", (deck_id,))
+        else:
+            assignment = conn.execute("""
                 INSERT INTO personal_deck_group_assignments (deck_id, group_id) VALUES (?, ?)
                 ON CONFLICT(deck_id) DO UPDATE SET group_id=excluded.group_id
                 WHERE group_id<>excluded.group_id
             """, (deck_id, group_id))
+        if before_deck_id is _UNSPECIFIED_POSITION and assignment.rowcount:
+            conn.execute("UPDATE personal_decks SET list_position=NULL WHERE id=?", (deck_id,))
     return {"id": deck_id, "group_id": group_id}
 
 
@@ -496,6 +539,8 @@ def summary_with_media(deck, catalog_db, proxy_lookup=None):
     summary = {key: deck.get(key) for key in ("id", "name", "colors", "revision", "updated_at")}
     if "group_id" in deck:
         summary["group_id"] = deck["group_id"]
+    if "creation_order" in deck:
+        summary["creation_order"] = deck["creation_order"]
     section = _cover_section(deck)
     cover_cards = section["cards"][:1] if section else []
     cover = None

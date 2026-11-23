@@ -113,6 +113,41 @@ def test_deck_groups_migrate_a_legacy_database_and_preserve_compositions(tmp_pat
         assert conn.execute("SELECT count(*) FROM personal_deck_revisions").fetchone()[0] == 1
 
 
+def test_manual_deck_order_survives_reopening_and_section_moves(tmp_path):
+    db = tmp_path / "personal.sqlite"
+    a, b, c, d, e = [personal.create_deck(db, name, [])["id"] for name in "ABCDE"]
+    group = personal.create_deck_group(db, "Favoris")["id"]
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE personal_decks DROP COLUMN list_position")
+
+    def ids(path, group_id):
+        return [deck["id"] for deck in personal.list_decks(path, include_groups=True)
+                if deck["group_id"] == group_id]
+
+    assert ids(db, None) == [e, d, c, b, a]
+    personal.move_deck_to_group(db, e, None, before_deck_id=b)
+    assert ids(db, None) == [d, c, e, b, a]
+    personal.move_deck_to_group(db, d, group, before_deck_id=None)
+    personal.move_deck_to_group(db, c, group, before_deck_id=d)
+    personal.move_deck_to_group(db, a, group, before_deck_id=d)
+    assert ids(db, group) == [c, a, d]
+    with pytest.raises(ValueError, match="destination"):
+        personal.move_deck_to_group(db, a, None, before_deck_id=c)
+    assert ids(db, group) == [c, a, d]
+    personal.move_deck_to_group(db, a, None, before_deck_id=b)
+    assert ids(db, None) == [e, a, b]
+    personal.move_deck_to_group(db, c, group, before_deck_id=None)
+    assert ids(db, group) == [d, c]
+
+    backup = tmp_path / "personal-decks-backups/latest.sqlite"
+    reopened = personal.restore_backup(backup, tmp_path / "reopened.sqlite")
+    assert ids(reopened, group) == [d, c]
+    assert ids(reopened, None) == [e, a, b]
+    assert personal.get_deck(reopened, c)["revision"] == 1
+    personal.delete_deck_group(reopened, group)
+    assert ids(reopened, None) == [e, a, b, d, c]
+
+
 def test_create_from_text_preserves_unresolved_cards_and_empty_sections(tmp_path):
     db = tmp_path / "personal.sqlite"
     card = {"name": "Carte inconnue", "count": 2, "set_code": "TST", "collector_number": "42"}
@@ -386,6 +421,9 @@ def test_http_origin_routes_and_stale_save(cards, tmp_path, monkeypatch):
         listing = request("/api/v2/personal-decks?summary=1")[1]
         assert listing["groups"] == [{"id": group_id, "name": "Favoris"}]
         assert listing["items"][0]["group_id"] == group_id
+        assert request("/api/v2/personal-decks/group-move", {
+            "deck_id": deck_id, "group_id": None, "before_deck_id": None,
+        }) == (200, {"id": deck_id, "group_id": None})
         status, result = request("/api/v2/personal-decks/export-text", {"deck_id": deck_id})
         assert status == 200 and result["total"] == 2
         target = Path(result["path"])

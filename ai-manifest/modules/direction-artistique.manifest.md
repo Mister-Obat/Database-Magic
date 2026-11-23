@@ -95,8 +95,12 @@ La fenêtre montre le rectangle intérieur de l’illustration d’une carte
 standard de 531 × 738 pixels, avec une marge de sécurité à l’intérieur du
 cadre. La boîte est légèrement inclinée au repos. Le survol la redresse,
 l’agrandit discrètement puis adapte ses angles au déplacement du pointeur.
-La sortie du pointeur et le glisser-déposer rétablissent la pose de repos.
-La préférence de mouvement réduit conserve une vue fixe.
+La sortie du pointeur rétablit la pose de repos. Pendant le glisser-déposer
+dans Deck perso, la boîte saisie suit le pointeur à pleine opacité, avec son
+rendu 3D et une inclinaison de prise. Un emplacement lilas marque l’insertion
+dans la grille et les autres boîtes glissent vers leurs nouvelles positions.
+La préférence de mouvement réduit conserve une pose fixe et un déplacement
+des voisines sans transition.
 
 ## Vérification d’une retouche
 

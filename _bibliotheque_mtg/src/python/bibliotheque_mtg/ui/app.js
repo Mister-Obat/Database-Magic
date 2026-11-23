@@ -4160,7 +4160,7 @@ function renderPersonalList() {
     updatePersonalHeading();
     const root = $("personal-content");
     let decks = null, groups = [], organizing = false, importing = false;
-    let busy = false, draggedDeck = null, landedDeckId = null, latestLoad = 0;
+    let busy = false, drag = null, landedDeckId = null, latestLoad = 0;
     const create = personalButton("Créer un deck", renderPersonalCreate, true);
     const actions = node("div", "search-header-actions personal-list-actions");
     const filePicker = node("input");
@@ -4247,7 +4247,7 @@ function renderPersonalList() {
     row.append(nameLabel, field);
     const refine = node("div", "catalogue-refine"), orderFields = node("div", "catalogue-refine-fields");
     const sortLabel = node("label", "", "Trier par"), sort = node("select");
-    sort.append(new Option("Ajout récent", "recent"), new Option("Nom du deck", "name"));
+    sort.append(new Option("Ordre manuel", "manual"), new Option("Ajout récent", "recent"), new Option("Nom du deck", "name"));
     sortLabel.append(sort);
     const orderLabel = node("label", "", "Ordre"), order = node("select");
     order.append(new Option("Décroissant", "desc"), new Option("Croissant", "asc"));
@@ -4268,12 +4268,14 @@ function renderPersonalList() {
     $("personal-heading-content").querySelector(".deck-heading").append(actions);
     root.replaceChildren(importReport, form, groupForm, list, scrollTopFooter("personal-title"));
     personalState.refreshList = (manual = false) => {
-        if (list.isConnected && !busy && !importing && (manual || !organizing)) return load(true);
+        if (list.isConnected && !busy && !importing && !drag && (manual || !organizing)) return load(true);
     };
     personalStatus("");
     const normalize = value => value.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase("fr").trim();
     function render() {
         if (!decks) return;
+        finishDrag();
+        order.disabled = sort.value === "manual";
         const query = normalize(name.value);
         const items = decks.filter(deck => {
             if (!normalize(deck.name).includes(query)) return false;
@@ -4282,10 +4284,11 @@ function renderPersonalList() {
             return colors.every(color => current.includes(color))
                 && (!colors.length || mode.value !== "exact" || colors.length === current.length);
         });
+        const direction = order.value === "asc" ? 1 : -1;
         if (sort.value === "name") {
-            items.sort((a, b) => a.name.localeCompare(b.name, "fr") * (order.value === "asc" ? 1 : -1));
-        } else if (order.value === "asc") {
-            items.reverse();
+            items.sort((a, b) => direction * a.name.localeCompare(b.name, "fr"));
+        } else if (sort.value === "recent") {
+            items.sort((a, b) => direction * (a.creation_order - b.creation_order));
         }
         list.replaceChildren();
         const groupsById = new Map(groups.map(group => [group.id, []]));
@@ -4295,48 +4298,187 @@ function renderPersonalList() {
             list.append(renderGroup(null, ungrouped));
             for (const group of groups) list.append(renderGroup(group, groupsById.get(group.id)));
         } else if (ungrouped.length) {
-            const grid = node("div", "personal-deck-grid");
-            grid.append(...ungrouped.map(renderDeck));
-            list.append(grid);
+            list.append(renderGrid(null, ungrouped));
         }
         if (!items.length && !groups.length && !organizing)
             list.append(node("p", "empty-state", "Aucun deck personnel pour cette sélection."));
     }
+    function renderGrid(groupId, items) {
+        const grid = node("div", "personal-deck-grid");
+        grid.dataset.groupId = groupId || "";
+        grid.append(...items.map(renderDeck));
+        return grid;
+    }
     function renderDeck(deck) {
         const entry = node("article", "personal-list-entry");
+        entry.dataset.deckId = deck.id;
         const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card, () => void openPersonalDeck(deck.id));
         if (deck.id === landedDeckId) {
             tile.classList.add("personal-deck-landed");
             landedDeckId = null;
         }
         entry.append(tile);
-        if (groups.length) {
-            tile.draggable = true;
-            tile.addEventListener("dragstart", event => {
-                if (busy) { event.preventDefault(); return; }
-                draggedDeck = deck;
-                tile.classList.remove("personal-deck-drag-rest");
-                tile.classList.add("personal-deck-dragging");
-                event.dataTransfer.effectAllowed = "move";
-                event.dataTransfer.setData("text/plain", deck.id);
+        if (sort.value === "manual") {
+            tile.classList.add("personal-deck-grabbable");
+            tile.addEventListener("pointerdown", event => {
+                if (busy || drag || !event.isPrimary || event.button !== 0) return;
+                const listeners = new AbortController();
+                const options = { signal: listeners.signal };
+                drag = {
+                    deck, entry, tile, pointer: event.pointerId, listeners,
+                    x: event.clientX, y: event.clientY, source: entry.parentElement,
+                    next: entry.nextElementSibling, animations: new Map(), frame: 0,
+                };
+                window.addEventListener("pointermove", updateDrag, options);
+                window.addEventListener("pointerup", releaseDrag, options);
+                window.addEventListener("pointercancel", cancelPointerDrag, options);
+                list.addEventListener("lostpointercapture", cancelPointerDrag, options);
+                window.addEventListener("blur", () => finishDrag(), options);
+                window.addEventListener("keydown", event => {
+                    if (event.key === "Escape") finishDrag();
+                }, options);
             });
-            tile.addEventListener("dragend", () => {
-                tile.classList.remove("personal-deck-dragging");
-                tile.classList.add("personal-deck-drag-rest");
-                draggedDeck = null;
-                list.querySelectorAll(".personal-list-drop-target").forEach(section =>
-                    section.classList.remove("personal-list-drop-target"));
-            });
-            tile.addEventListener("pointermove", () => tile.classList.remove("personal-deck-drag-rest"), { passive: true });
+            tile.addEventListener("dragstart", event => event.preventDefault());
         }
         return entry;
     }
-    function moveDeck(deck, groupId) {
-        if ((deck.group_id || null) === groupId) return;
+    function updateDrag(event) {
+        if (event.pointerId !== drag?.pointer) return;
+        if (!drag.active) {
+            if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+            if (!list.isConnected) { finishDrag(); return; }
+            const bounds = drag.tile.getBoundingClientRect();
+            drag.offsetX = drag.x - bounds.left;
+            drag.offsetY = drag.y - bounds.top;
+            drag.tile.style.width = `${bounds.width}px`;
+            // Set both coordinates before moving the live tile out of its grid.
+            drag.tile.style.translate = `${bounds.left}px ${bounds.top}px`;
+            // Keep a section target available when its only box is lifted.
+            if (drag.source.childElementCount === 1) {
+                drag.source.style.minHeight = `${drag.source.offsetHeight}px`;
+            }
+            drag.entry.classList.add("personal-deck-slot");
+            drag.tile.classList.add("personal-deck-dragging");
+            document.body.append(drag.tile);
+            document.body.classList.add("personal-deck-drag-active");
+            list.setPointerCapture(event.pointerId);
+            drag.active = true;
+            drag.tile.dispatchEvent(new Event("deckboxlift"));
+            drag.frame = requestAnimationFrame(scrollDrag);
+        }
+        drag.x = event.clientX;
+        drag.y = event.clientY;
+        drag.tile.style.translate = `${drag.x - drag.offsetX}px ${drag.y - drag.offsetY}px`;
+        previewDrag();
+    }
+    function previewDrag() {
+        const hovered = document.elementFromPoint(drag.x, drag.y);
+        const grid = hovered?.closest(".personal-deck-grid")
+            || hovered?.closest(".personal-list-group")?.querySelector(".personal-deck-grid");
+        drag.target = grid && list.contains(grid) ? grid : null;
+        if (!drag.target) {
+            positionSlot(drag.source, drag.next);
+            return;
+        }
+        const bounds = grid.getBoundingClientRect();
+        const x = drag.x - bounds.left;
+        const y = drag.y - bounds.top;
+        const entries = [...grid.querySelectorAll(":scope > .personal-list-entry")];
+        const slot = drag.entry;
+        // Offset geometry excludes the FLIP transforms used by neighbouring tiles.
+        if (slot.parentElement === grid
+            && x >= slot.offsetLeft && x < slot.offsetLeft + slot.offsetWidth
+            && y >= slot.offsetTop && y < slot.offsetTop + slot.offsetHeight) return;
+        const before = entries.find(entry => entry !== slot && (
+            y < entry.offsetTop || (y < entry.offsetTop + entry.offsetHeight
+                && x < entry.offsetLeft + entry.offsetWidth / 2)
+        ));
+        positionSlot(grid, before || grid.querySelector(":scope > .empty-state"));
+    }
+    function positionSlot(grid, before) {
+        const slot = drag.entry;
+        if (before === slot || (slot.parentElement === grid && slot.nextElementSibling === before)) return;
+        const previous = new Map();
+        if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+            const affected = new Set([slot.parentElement, grid]);
+            for (const parent of affected) {
+                for (const entry of parent.querySelectorAll(":scope > .personal-list-entry")) {
+                    if (entry !== slot) previous.set(entry, entry.getBoundingClientRect());
+                }
+            }
+        }
+        grid.insertBefore(slot, before);
+        for (const [entry, from] of previous) {
+            drag.animations.get(entry)?.cancel();
+            const to = entry.getBoundingClientRect();
+            const x = from.left - to.left, y = from.top - to.top;
+            if (x || y) {
+                drag.animations.set(entry, entry.animate([
+                    { transform: `translate(${x}px,${y}px)` }, { transform: "none" },
+                ], { duration: 170, easing: "cubic-bezier(.2,.75,.3,1)" }));
+            }
+        }
+    }
+    function scrollDrag() {
+        if (!list.isConnected || list.getClientRects().length === 0) { finishDrag(); return; }
+        const top = document.querySelector(".topbar").getBoundingClientRect().bottom;
+        const edge = 80;
+        const up = Math.max(0, Math.min(1, 1 - (drag.y - top) / edge));
+        const down = Math.max(0, Math.min(1, 1 - (innerHeight - drag.y) / edge));
+        if (up || down) {
+            const previous = scrollY;
+            window.scrollBy({ top: 18 * (down - up), behavior: "instant" });
+            if (scrollY !== previous) previewDrag();
+        }
+        drag.frame = requestAnimationFrame(scrollDrag);
+    }
+    function cancelPointerDrag(event) {
+        if (event.pointerId === drag?.pointer) finishDrag();
+    }
+    function finishDrag(keepPosition = false) {
+        if (!drag) return;
+        const { listeners, active, pointer, tile, entry, source, next, animations, frame } = drag;
+        drag = null;
+        listeners.abort();
+        if (!active) return;
+        cancelAnimationFrame(frame);
+        for (const animation of animations.values()) animation.cancel();
+        if (list.hasPointerCapture(pointer)) list.releasePointerCapture(pointer);
+        if (!keepPosition) source.insertBefore(entry, next);
+        source.style.removeProperty("min-height");
+        tile.style.removeProperty("width");
+        tile.style.removeProperty("translate");
+        tile.classList.remove("personal-deck-dragging");
+        entry.classList.remove("personal-deck-slot");
+        entry.append(tile);
+        document.body.classList.remove("personal-deck-drag-active");
+        tile.dispatchEvent(new Event("deckboxrelease"));
+    }
+    function releaseDrag(event) {
+        if (event.pointerId !== drag?.pointer) return;
+        if (!drag.active) { finishDrag(); return; }
+        if (event.clientX !== drag.x || event.clientY !== drag.y) updateDrag(event);
+        // Keep the pointerup under capture so its click cannot open a deck.
+        const { deck, entry, target, source, next } = drag;
+        const changed = target && (target !== source || entry.nextElementSibling !== next);
+        const beforeId = entry.nextElementSibling?.dataset.deckId || null;
+        const groupId = target?.dataset.groupId || null;
+        finishDrag(Boolean(changed));
+        if (!changed) return;
         void mutate(async () => {
-            const result = await postJSON("/api/v2/personal-decks/group-move", { deck_id: deck.id, group_id: groupId });
-            deck.group_id = result.group_id;
-            landedDeckId = deck.id;
+            try {
+                await postJSON("/api/v2/personal-decks/group-move", {
+                    deck_id: deck.id, group_id: groupId, before_deck_id: beforeId,
+                });
+                decks.splice(decks.indexOf(deck), 1);
+                const before = decks.findIndex(item => item.id === beforeId);
+                decks.splice(before < 0 ? decks.length : before, 0, deck);
+                deck.group_id = groupId;
+                landedDeckId = deck.id;
+            } catch (error) {
+                if (list.isConnected) render();
+                throw error;
+            }
         });
     }
     function renderGroup(group, items) {
@@ -4399,37 +4541,17 @@ function renderPersonalList() {
                 if (!window.confirm(`Supprimer la section « ${group.name} » ? Ses decks seront déplacés dans « Sans section ».`)) return;
                 void mutate(async () => {
                     await postJSON("/api/v2/personal-decks/group-delete", { group_id: group.id });
-                    groups = groups.filter(item => item.id !== group.id);
-                    for (const deck of decks) if (deck.group_id === group.id) deck.group_id = null;
+                    await load(true);
                 }, remove);
             });
             heading.append(edit);
             renameForm.append(remove);
             section.append(renameForm);
         }
-        const grid = node("div", "personal-deck-grid");
-        grid.append(...items.map(renderDeck));
-        if (!items.length) grid.append(node("p", "empty-state", groups.length ? "Déposez un deck ici." : "Aucun deck dans cette section."));
+        const grid = renderGrid(group?.id || null, items);
+        if (!items.length) grid.append(node("p", "empty-state",
+            sort.value === "manual" ? "Déposez un deck ici." : "Aucun deck dans cette section."));
         section.append(grid);
-        if (groups.length) {
-            const groupId = group?.id || null;
-            section.addEventListener("dragover", event => {
-                if (!draggedDeck || (draggedDeck.group_id || null) === groupId) return;
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-                section.classList.add("personal-list-drop-target");
-            });
-            section.addEventListener("dragleave", event => {
-                if (!section.contains(event.relatedTarget)) section.classList.remove("personal-list-drop-target");
-            });
-            section.addEventListener("drop", event => {
-                if (!draggedDeck) return;
-                event.preventDefault();
-                section.classList.remove("personal-list-drop-target");
-                moveDeck(draggedDeck, groupId);
-                draggedDeck = null;
-            });
-        }
         return section;
     }
     async function mutate(action, button) {
@@ -4556,77 +4678,174 @@ async function openPersonalDeck(id) {
         }));
     }
 }
-let personalDragFrame = 0;
-let personalDragSpeed = 0;
-function showPersonalDropIndex(drag, index) {
-    if (index === drag.index) return;
-    const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const previous = reduceMotion ? [] : drag.tiles.map(tile => tile.getBoundingClientRect());
+function personalCardInsertion(grid, tile, point) {
+    const bounds = grid.getBoundingClientRect();
+    const x = point.clientX - bounds.left;
+    const y = point.clientY - bounds.top;
+    const contains = (left, top, width, height) =>
+        x >= left && x < left + width && y >= top && y < top + height;
+
+    // Layout offsets stay steady while the tiles animate toward them.
+    if (tile.parentElement === grid && contains(tile.offsetLeft, tile.offsetTop, tile.offsetWidth, tile.offsetHeight)) {
+        return tile.nextElementSibling;
+    }
+
+    const tiles = [...grid.querySelectorAll("[data-personal-card]")].filter(item => item !== tile);
+    if (y < 0) return tiles[0] || null;
+    let rowTop = null;
+    let rowBottom = null;
+    for (const item of tiles) {
+        if (item.offsetTop !== rowTop) {
+            if (rowBottom !== null && y < (rowBottom + item.offsetTop) / 2) return item;
+            rowTop = item.offsetTop;
+            rowBottom = rowTop;
+        }
+        rowBottom = Math.max(rowBottom, rowTop + item.offsetHeight);
+        if (y < rowBottom && x < item.offsetLeft + item.offsetWidth / 2) return item;
+    }
+    return null;
+}
+function previewPersonalCardDrop(drag, point) {
+    const { tile, ghost } = drag;
+    ghost.style.left = `${point.clientX - drag.grabX}px`;
+    ghost.style.top = `${point.clientY - drag.grabY}px`;
+    const section = document.elementFromPoint(point.clientX, point.clientY)?.closest(".personal-section");
+    const target = drag.root.contains(section) ? section.querySelector(".personal-cards-edit") : null;
+    const grid = target || drag.source;
+    const before = target ? personalCardInsertion(target, tile, point) : drag.originalNext;
+    if (drag.target !== target) {
+        drag.target?.parentElement.classList.remove("personal-drop-target");
+        target?.parentElement.classList.add("personal-drop-target");
+        drag.target = target;
+    }
+
+    if (tile.parentElement === grid && tile.nextElementSibling === before) return;
+    const neighbors = drag.reduceMotion ? [] : [...new Set([tile.parentElement, grid])]
+        .flatMap(container => [...container.querySelectorAll("[data-personal-card]")])
+        .filter(item => item !== tile);
+    const previous = neighbors.map(item => item.getBoundingClientRect());
     drag.animations.forEach(animation => animation.cancel());
-    const order = drag.tiles.filter(tile => tile !== drag.tile);
-    order.splice(index, 0, drag.tile);
-    order.forEach((tile, position) => { tile.style.order = position; });
-    drag.index = index;
-    drag.animations = [];
-    if (reduceMotion) return;
-    drag.tiles.forEach((tile, position) => {
-        if (tile === drag.tile) return;
-        const next = tile.getBoundingClientRect();
-        const x = previous[position].left - next.left;
-        const y = previous[position].top - next.top;
-        if (x || y) drag.animations.push(tile.animate(
-            [{ transform: `translate(${x}px, ${y}px)` }, { transform: "none" }],
-            { duration: 150, easing: "ease-out" },
-        ));
+    grid.insertBefore(tile, before);
+    const destinations = neighbors.map(item => item.getBoundingClientRect());
+    drag.animations = neighbors.flatMap((item, index) => {
+        const x = previous[index].left - destinations[index].left;
+        const y = previous[index].top - destinations[index].top;
+        if (!x && !y) return [];
+        return [item.animate([
+            { transform: `translate(${x}px, ${y}px)`, zIndex: 1 },
+            { transform: `translate(${x * .75}px, ${y * .75 - 3}px) scale(1.02)`, zIndex: 1, offset: .25 },
+            { transform: "none", zIndex: 1 },
+        ], { duration: 190, easing: "ease-out" })];
     });
 }
-function previewPersonalDrop(drag, event) {
-    const bounds = drag.grid.getBoundingClientRect();
-    const x = event.clientX - bounds.left;
-    const y = event.clientY - bounds.top;
-    // Hit-test layout slots rather than cards that are still animating.
-    const hovered = drag.tiles.find(tile => x >= tile.offsetLeft && x < tile.offsetLeft + tile.offsetWidth
-        && y >= tile.offsetTop && y < tile.offsetTop + tile.offsetHeight);
-    if (!hovered || hovered === drag.tile) return;
-    const stationary = drag.tiles.filter(tile => tile !== drag.tile);
-    const target = stationary.indexOf(hovered);
-    const after = x >= hovered.offsetLeft + hovered.offsetWidth / 2;
-    showPersonalDropIndex(drag, target + Number(after));
-}
-function endPersonalDrag() {
-    const drag = personalState.drag;
-    if (drag) {
+function startPersonalCardDrag(event, root, tile, source, sectionId, cardId) {
+    if (event.button !== 0 || !event.isPrimary || event.pointerType === "touch"
+        || event.target.closest("input,select,label,.personal-card-remove") || personalState.drag) return;
+
+    const pointerId = event.pointerId;
+    const startX = event.clientX, startY = event.clientY;
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    let drag;
+    let frame = 0;
+    let point = event;
+    let speed = 0;
+
+    function finish(commit) {
+        controller.abort();
+        cancelAnimationFrame(frame);
+        if (!drag) return;
+        if (root.hasPointerCapture(pointerId)) root.releasePointerCapture(pointerId);
+
+        const target = commit ? drag.target : null;
+        const before = tile.nextElementSibling;
+        const changed = target && (target !== source || before !== drag.originalNext);
         drag.animations.forEach(animation => animation.cancel());
-        drag.tiles.forEach(tile => { tile.style.order = ""; });
-        drag.tile.classList.remove("personal-card-placeholder");
+        drag.target?.parentElement.classList.remove("personal-drop-target");
+        drag.ghost.remove();
+        source.style.minHeight = "";
+        tile.classList.remove("personal-card-placeholder");
+        if (source.isConnected) source.insertBefore(tile, drag.originalNext);
+        personalState.drag = null;
+
+        if (changed) personalMove(sectionId, cardId, target.dataset.personalCardSection, before?.dataset.personalCard);
     }
-    personalState.drag = null;
-    cancelAnimationFrame(personalDragFrame);
-    personalDragFrame = 0;
-    personalDragSpeed = 0;
-    document.querySelectorAll(".personal-drop-target").forEach(node => node.classList.remove("personal-drop-target"));
-}
-function scrollPersonalDrag() {
-    personalDragFrame = 0;
-    if (!personalState.drag || !personalDragSpeed) return;
-    window.scrollBy({ top: personalDragSpeed, behavior: "instant" });
-    personalDragFrame = requestAnimationFrame(scrollPersonalDrag);
-}
-document.addEventListener("dragover", event => {
-    const drag = personalState.drag;
-    if (!drag) return;
-    if (!drag.grid.closest(".personal-section").contains(event.target)) {
-        showPersonalDropIndex(drag, drag.originalIndex);
+
+    function scroll() {
+        frame = 0;
+        if (!speed) return;
+        const position = window.scrollY;
+        window.scrollBy({ top: speed, behavior: "instant" });
+        if (window.scrollY === position) return;
+        previewPersonalCardDrop(drag, point);
+        frame = requestAnimationFrame(scroll);
     }
-    const top = document.querySelector(".topbar").getBoundingClientRect().bottom;
-    const edge = 85;
-    const up = Math.max(0, 1 - (event.clientY - top) / edge);
-    const down = Math.max(0, 1 - (innerHeight - event.clientY) / edge);
-    personalDragSpeed = 20 * (Math.min(1, down) - Math.min(1, up));
-    if (personalDragSpeed && !personalDragFrame) personalDragFrame = requestAnimationFrame(scrollPersonalDrag);
-});
-document.addEventListener("drop", endPersonalDrag);
-window.addEventListener("blur", endPersonalDrag);
+
+    window.addEventListener("pointermove", e => {
+        if (e.pointerId !== pointerId) return;
+        if (!tile.isConnected) {
+            finish(false);
+            return;
+        }
+        if (!drag) {
+            if (Math.hypot(e.clientX - startX, e.clientY - startY) < 6) return;
+            const face = tile.querySelector(".personal-card-open");
+            const ghost = node("div", "personal-card-drag-preview");
+            ghost.setAttribute("aria-hidden", "true");
+            ghost.append(...[...face.children].map(child => child.cloneNode(true)));
+            const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+            root.querySelectorAll("[data-personal-card]").forEach(item => {
+                item.getAnimations().forEach(animation => {
+                    if (animation.id === "personal-card-sort") animation.cancel();
+                });
+            });
+            const bounds = face.getBoundingClientRect();
+            const grabX = startX - bounds.left, grabY = startY - bounds.top;
+            ghost.style.width = `${bounds.width}px`;
+            ghost.style.setProperty("--card-grab-origin", `${grabX}px ${grabY}px`);
+            drag = { root, tile, source, ghost, originalNext: tile.nextElementSibling, target: null,
+                grabX, grabY, animations: [], reduceMotion };
+            personalState.drag = drag;
+            hoverPreview.hidden = true;
+            source.style.minHeight = `${source.offsetHeight}px`;
+            root.setPointerCapture(pointerId);
+            tile.classList.add("personal-card-placeholder");
+            document.body.append(ghost);
+        }
+        e.preventDefault();
+        point = e;
+        previewPersonalCardDrop(drag, e);
+        const top = document.querySelector(".topbar").getBoundingClientRect().bottom;
+        const edge = 85;
+        const up = Math.max(0, 1 - (e.clientY - top) / edge);
+        const down = Math.max(0, 1 - (innerHeight - e.clientY) / edge);
+        speed = 20 * (Math.min(1, down) - Math.min(1, up));
+        if (speed && !frame) frame = requestAnimationFrame(scroll);
+    }, options);
+    window.addEventListener("pointerup", e => {
+        if (e.pointerId !== pointerId) return;
+        if (drag && tile.isConnected) {
+            const suppressClick = click => {
+                click.preventDefault();
+                click.stopImmediatePropagation();
+            };
+            window.addEventListener("click", suppressClick, { capture: true, once: true });
+            setTimeout(() => window.removeEventListener("click", suppressClick, true), 0);
+            previewPersonalCardDrop(drag, e);
+        }
+        finish(tile.isConnected);
+    }, options);
+    window.addEventListener("pointercancel", e => {
+        if (e.pointerId === pointerId) finish(false);
+    }, options);
+    window.addEventListener("blur", () => finish(false), options);
+    window.addEventListener("keydown", e => {
+        if (e.key !== "Escape" || !drag) return;
+        e.preventDefault();
+        e.stopPropagation();
+        finish(false);
+    }, { ...options, capture: true });
+}
 function personalMove(sourceId, cardId, targetId, beforeId = null) {
     const deck = personalState.deck, source = deck.sections.find(s => s.id === sourceId), target = deck.sections.find(s => s.id === targetId);
     if (!source || !target || cardId === beforeId)
@@ -4792,7 +5011,7 @@ function renderPersonalEditor() {
             "Écriture du fichier TXT…", result => `Fichier créé sur le Bureau · ${result.file || result.path}`),
     );
     const editButton = personalButton("Modifier", () => {
-        personalState.editing = { name: deck.name, colors: [...(deck.colors || [])] };
+        personalState.editing = { name: deck.name };
         renderPersonalEditor();
         $("personal-content").querySelector(".personal-deck-fields input")?.focus();
     });
@@ -4861,13 +5080,12 @@ function renderPersonalEditor() {
         };
         buttons.append(validate, personalButton("Supprimer le deck", () => confirmPersonalDeckDeletion(deck)),
             personalButton("Annuler", finish));
-        fields.append(label, personalColorField(editing.colors, colors => { editing.colors = colors; }), buttons);
+        fields.append(label, buttons);
         fields.addEventListener("submit", event => {
             event.preventDefault();
             const nextName = name.value.trim();
             if (!nextName) { name.focus(); return; }
             deck.name = nextName;
-            deck.colors = editing.colors;
             personalChanged();
             finish();
         });
@@ -4929,63 +5147,17 @@ function renderPersonalEditor() {
         if (sectionOrganization) container.append(form);
         const cards = node("div", "deck-cards personal-cards-edit");
         sectionGrids.set(section.id, cards);
-        container.addEventListener("dragover", e => {
-            if (personalState.drag) {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                container.classList.add("personal-drop-target");
-                if (personalState.drag.sectionId === section.id) previewPersonalDrop(personalState.drag, e);
-            }
-        });
-        container.addEventListener("dragleave", e => {
-            if (!container.contains(e.relatedTarget))
-                container.classList.remove("personal-drop-target");
-        });
-        container.addEventListener("drop", e => {
-            e.preventDefault();
-            container.classList.remove("personal-drop-target");
-            if (personalState.drag) {
-                const drag = personalState.drag;
-                const sameSection = drag.sectionId === section.id;
-                const beforeId = sameSection
-                    ? drag.tiles.filter(tile => tile !== drag.tile)[drag.index]?.dataset.personalCard
-                    : e.target.closest("[data-personal-card]")?.dataset.personalCard;
-                endPersonalDrag();
-                if (!sameSection || drag.index !== drag.originalIndex) {
-                    personalMove(drag.sectionId, drag.cardId, section.id, beforeId);
-                }
-            }
-        });
+        cards.dataset.personalCardSection = section.id;
         for (const card of section.cards) {
             const cardName = card.printed_name || card.name_fr || card.name || "Carte non résolue";
             const preview = personalImage(card);
             const tile = node("article", "deck-card-tile personal-card-edit");
-            tile.draggable = true;
             tile.dataset.personalCard = card.id;
-            tile.addEventListener("dragstart", e => {
-                if (e.target.closest("input,select,.personal-card-remove")) {
-                    e.preventDefault();
-                    return;
-                }
-                const tiles = [...cards.children];
-                tiles.forEach(item => item.getAnimations().forEach(animation => {
-                    if (animation.id === "personal-card-sort") animation.cancel();
-                }));
-                const index = tiles.indexOf(tile);
-                const drag = { sectionId: section.id, cardId: card.id, grid: cards, tile, tiles,
-                    index, originalIndex: index, animations: [] };
-                personalState.drag = drag;
-                e.dataTransfer.setData("text/plain", card.id);
-                e.dataTransfer.effectAllowed = "move";
-                requestAnimationFrame(() => {
-                    if (personalState.drag === drag) tile.classList.add("personal-card-placeholder");
-                });
-            });
-            tile.addEventListener("dragend", endPersonalDrag);
+            tile.addEventListener("pointerdown", e => startPersonalCardDrag(e, root, tile, cards, section.id, card.id));
+            tile.addEventListener("dragstart", e => e.preventDefault());
             const open = personalButton("", () => void openCard(card.provider_card_id));
             open.className = "personal-card-open";
             open.setAttribute("aria-label", cardName);
-            open.draggable = true;
             open.disabled = !card.provider_card_id;
             open.append(preview);
             if (preview.tagName !== "IMG") open.append(node("span", "deck-card-name", cardName));

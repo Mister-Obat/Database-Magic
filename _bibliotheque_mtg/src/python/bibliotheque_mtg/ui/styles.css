@@ -1346,12 +1346,20 @@ img.edition-symbol{object-fit:contain;filter:invert(.85)}
 }
 .personal-deck-grid {
   --tile-minimum:6rem;
+  position:relative;
   display:grid;
 }
-.personal-list-group.personal-list-drop-target {
-  border-radius:12px;
-  outline:2px dashed var(--green);
-  outline-offset:.25rem;
+.personal-deck-grid:has(> .personal-list-entry) > .empty-state {
+  display:none;
+}
+.personal-list-entry.personal-deck-slot {
+  aspect-ratio:124 / 156;
+  padding-block:.28rem .58rem;
+  box-sizing:content-box;
+  border-radius:14px;
+  outline:1px dashed #b9a2ff;
+  outline-offset:-3px;
+  background:#7962b025;
 }
 .personal-import-report:not(:empty) {
   margin-bottom:1rem;
@@ -1478,20 +1486,28 @@ img.deck-box-art {
 }
 @media (hover:hover) {
   .personal-list-entry:hover,
-  .personal-deck-tile:hover:not(.personal-deck-drag-rest,.personal-deck-dragging) {
+  .personal-deck-tile:hover:not(.personal-deck-dragging) {
     z-index:1;
   }
 }
-.personal-list-entry .personal-deck-tile[draggable="true"] {
-  cursor:grab;
+.personal-deck-grabbable {
+  cursor:pointer;
+  touch-action:none;
+  user-select:none;
 }
-.personal-list-entry .personal-deck-tile.personal-deck-dragging {
-  cursor:grabbing;
+body.personal-deck-drag-active,
+body.personal-deck-drag-active * {
+  cursor:pointer;
+  user-select:none;
+}
+.personal-deck-tile.personal-deck-dragging {
+  position:fixed;
+  inset:0 auto auto 0;
+  z-index:1000;
+  pointer-events:none;
+  filter:drop-shadow(0 12px 15px #080611ab);
 }
 @media (prefers-reduced-motion:no-preference) {
-  .personal-deck-tile.personal-deck-dragging .deck-box {
-    transform:translateY(-4px) rotateZ(-2deg);
-  }
   .personal-deck-landed .deck-box {
     animation:deck-box-settle 260ms ease-out;
   }
@@ -1669,9 +1685,6 @@ img.deck-box-art {
   color:#bba5ff;
 }
 
-.personal-drag-handle:active {
-  cursor:grabbing;
-}
 #personal-content .personal-card {
   cursor:default;
   padding:0;
@@ -1727,9 +1740,6 @@ img.deck-box-art {
 .personal-cards-edit > p {
   grid-column:1/-1;
 }
-.personal-card-edit .personal-card-open {
-  cursor:grab;
-}
 #view-perso .personal-edit-actions {
   margin-left:0;
   gap:.8rem;
@@ -1777,12 +1787,54 @@ img.deck-box-art {
   #view-perso .personal-filter-row { grid-template-columns:minmax(0,1fr); }
 }
 
-.personal-card-placeholder {
+#view-perso .personal-card-placeholder {
   border:1px dashed #b9a2ff;
-  background:#252035;
+  background:#2e2543;
 }
 .personal-card-placeholder > * {
   visibility:hidden;
+}
+.personal-cards-edit:has(.personal-card-placeholder) > p {
+  display:none;
+}
+.personal-card-edit {
+  cursor:pointer;
+  user-select:none;
+}
+.personal-card-edit input {
+  user-select:auto;
+}
+.personal-card-edit .personal-card-open:disabled {
+  pointer-events:none;
+}
+.personal-card-drag-preview {
+  position:fixed;
+  z-index:100;
+  pointer-events:none;
+  display:grid;
+  gap:.5rem;
+  color:#f2effb;
+  transform-origin:var(--card-grab-origin);
+}
+.personal-card-drag-preview .deck-card-image {
+  display:block;
+  border-radius:5px;
+  background:#262237;
+  box-shadow:0 5px 0 #211b2d, 0 12px 24px #080611b0;
+}
+.personal-card-drag-preview .deck-card-image-empty {
+  display:grid;
+  place-items:center;
+  color:#bdb8cf;
+}
+@media (prefers-reduced-motion:no-preference) {
+  .personal-card-drag-preview {
+    transform:perspective(600px) rotateX(7deg) rotateY(-9deg) scale(1.065);
+    animation:personal-card-lift 150ms ease-out;
+  }
+  @keyframes personal-card-lift {
+    from { transform:none; }
+  }
 }
 
 .card-size-control :is(.card-action-icon, .search-icon) {
