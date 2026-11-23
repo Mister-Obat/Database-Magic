@@ -72,6 +72,33 @@ de même taille et de même trait, intégrées sans dépendance React.
   fenêtre large, quatre en fenêtre intermédiaire et deux en fenêtre étroite.
   Le réglage de zoom des vignettes ne modifie pas cette grille.
 
+## Boîtes de deck
+
+L’Accueil, les decks préconstruits et les decks personnels partagent le
+maillage triangulé `deck-box-mesh.json` du modèle source `deck-box.blend`.
+Ces deux fichiers, le grain PNG et le WebP de repli sont versionnés dans
+`_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/`. Le serveur lit
+les ressources d’exécution depuis ce dossier. L’interface dessine le volume
+dans Canvas avec un tampon de profondeur. Les vignettes partagent l’image
+calculée au repos et redessinent la géométrie pendant les mouvements. Un WebP
+frontal du même modèle sert de repli. La texture PNG reprend le grain du
+polymère Blender, atténué pour une finition noire satinée. Le couvercle et
+le corps partagent le même graphite et le même éclairage selon leurs normales. Le côté droit est plus sombre que la façade sur toute
+la hauteur et un reflet doux souligne le biseau avant droit. La paroi se
+raccorde au couvercle sur toute sa profondeur. Le joint modélisé combine
+un creux sombre et une lèvre éclairée, avec une remontée vers l’arrière.
+L’ombre suit la projection de la base.
+Le nom complet du deck apparaît sur le couvercle avec les symboles de mana.
+Les textes et logos suivent la taille de la boîte. Les préconstruits
+affichent aussi leur édition.
+
+La fenêtre montre le rectangle intérieur de l’illustration d’une carte
+standard de 531 × 738 pixels, avec une marge de sécurité à l’intérieur du
+cadre. La boîte est légèrement inclinée au repos. Le survol la redresse,
+l’agrandit discrètement puis adapte ses angles au déplacement du pointeur.
+La sortie du pointeur et le glisser-déposer rétablissent la pose de repos.
+La préférence de mouvement réduit conserve une vue fixe.
+
 ## Vérification d’une retouche
 
 Recharger l’application et contrôler les cinq vues côte à côte à largeur comparable. Vérifier en vue large et en portrait l’alignement des titres, la barre sur une ligne, le téléchargement sur une ligne et les dimensions du rafraîchissement. Comparer les actions au repos, au survol, au focus clavier et lorsqu’elles sont désactivées. Ouvrir le panneau de notifications et un deck, puis vérifier la surface pendant le chargement, la composition et les vignettes sans image. Contrôler Firefox pour les changements de dimensions ou de retour à la ligne et comparer au navigateur intégré. Vérifier les modales si la retouche touche un sélecteur partagé.

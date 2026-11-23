@@ -18,7 +18,7 @@ def catalog(tmp_path):
     CREATE TABLE editions(set_id TEXT, code TEXT, eligibility TEXT);
     CREATE TABLE printings(printing_id TEXT, set_id TEXT, layout TEXT);
     CREATE TABLE source_records(provider_card_id TEXT, printing_id TEXT, lang TEXT,
-      printed_name TEXT, name TEXT, mana_value REAL);
+      printed_name TEXT, name TEXT, mana_value REAL, colors_key TEXT);
     CREATE TABLE card_faces(printing_id TEXT, face_index INTEGER, physical_image INTEGER);
     CREATE TABLE image_assets(asset_id TEXT, relative_path TEXT);
     CREATE TABLE image_slots(printing_id TEXT, face_index INTEGER, status TEXT, asset_id TEXT);
@@ -29,9 +29,9 @@ def catalog(tmp_path):
     ]:
         conn.execute("INSERT INTO editions VALUES(?,?,?)", ("set", "TST", "eligible"))
         conn.execute("INSERT INTO printings VALUES(?,?,?)", (printing, "set", "modal_dfc" if faces > 1 else "normal"))
-        conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?)", (provider, printing, "en", None, en, mana))
+        conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?)", (provider, printing, "en", None, en, mana, "R"))
         if fr:
-            conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?)", (provider + "fr", printing, "fr", fr, fr, mana))
+            conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?)", (provider + "fr", printing, "fr", fr, fr, mana, "R"))
         for face in range(faces):
             conn.execute("INSERT INTO card_faces VALUES(?,?,1)", (printing, face))
             rel = f"assets/webp/fr/{printing}-{face}.webp"

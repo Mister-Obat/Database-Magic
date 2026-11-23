@@ -440,9 +440,16 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   principal ; les jetons sont séparés en fin de liste. Les préconstruits
   reprennent la mosaïque des decks personnels. Chaque tuile affiche la
   couverture, le nom, les couleurs et une ligne avec le nom de l’édition et son
-  icône lorsqu’elle est connue. L’API fournit l’URL Scryfall validée de l’icône.
-  Les mosaïques de Recherche, Éditions, Decks et Perso ne proposent pas
-  d’agrandissement au survol.
+  icône lorsqu’elle est connue. La couverture des deux types de decks suit la
+  première carte de la première section non vide dans l’ordre affiché. Les
+  symboles affichent l’union W/U/B/R/G des couleurs des cartes jouables, réserve
+  comprise. Les jetons, commandants de présentation, plans et machinations ne
+  contribuent pas. Le symbole incolore s’affiche seul quand aucune carte connue
+  de la composition n’a de couleur. L’API fournit l’URL Scryfall validée de l’icône.
+  Les vignettes de cartes gardent leur taille au survol. Les boîtes de deck
+  suivent le pointeur et s’agrandissent légèrement selon la direction artistique.
+  La première carte fournit l’illustration. Le titre du couvercle est le
+  nom du deck, affiché en entier.
 - La page d'une édition liste chaque impression et son numéro de collection
   dans cette édition, avant pagination. Elle privilégie une ligne française de cette
   impression ; à défaut, une ligne anglaise, puis japonaise, phyrexiane ou une

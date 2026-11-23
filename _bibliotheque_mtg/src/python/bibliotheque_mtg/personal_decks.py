@@ -12,7 +12,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .deck_media import enrich_deck_media, export_deck_to_desktop
+from .deck_media import NON_PLAYABLE_SECTIONS, composition_colors, enrich_deck_media, export_deck_to_desktop
 from .v2.query import connect
 
 
@@ -379,7 +379,7 @@ def _snapshot(catalog_db, provider_id, printing_id=None):
             COALESCE((SELECT COALESCE(fr.printed_name,fr.name) FROM source_records fr
                       WHERE fr.printing_id=sr.printing_id AND fr.lang='fr'
                       ORDER BY fr.provider_card_id LIMIT 1),sr.printed_name) AS printed_name,
-            sr.type_line,sr.mana_value,p.collector_number,e.code AS set_code
+            sr.type_line,sr.mana_value,sr.colors_key,p.collector_number,e.code AS set_code
             FROM source_records sr JOIN printings p USING(printing_id)
             JOIN editions e USING(set_id) WHERE sr.provider_card_id=? AND e.eligibility='eligible'""",
                            (provider_id,)).fetchone()
@@ -468,6 +468,13 @@ def _cover_section(deck):
     return next((section for section in deck["sections"] if section["cards"]), None)
 
 
+def _composition_cards(deck):
+    return (card for section in deck["sections"]
+            if section.get("source_section") not in NON_PLAYABLE_SECTIONS and section["name"] != "Jetons"
+            for card in section["cards"]
+            if "Token" not in (card.get("type_line") or ""))
+
+
 def summary_with_media(deck, catalog_db, proxy_lookup=None):
     summary = {key: deck.get(key) for key in ("id", "name", "colors", "revision", "updated_at")}
     if "group_id" in deck:
@@ -479,6 +486,7 @@ def summary_with_media(deck, catalog_db, proxy_lookup=None):
         cover = with_media({"sections": [{**section, "cards": cover_cards}]},
                            catalog_db, proxy_lookup)["cover_card"]
     return {**summary, "cover_card": cover,
+            "composition_colors": composition_colors(_composition_cards(deck), catalog_db),
             "cover_image_path": cover.get("image_path") if cover else None,
             "card_count": sum(card["count"] for section in deck["sections"] for card in section["cards"])}
 
@@ -490,17 +498,21 @@ def with_media(deck, catalog_db, proxy_lookup=None):
     for section in result["sections"]:
         for card, media in zip(section["cards"], enriched["sections"][section["id"]]):
             card.update({key: value for key, value in media.items() if key.startswith("image_")})
+            for key in ("mana_value", "colors_key"):
+                if media.get(key) is not None:
+                    card[key] = media[key]
             if proxy_lookup and card.get("set_code") == "proxy":
                 linked = proxy_lookup(card.get("provider_card_id"))
                 if linked:
                     current, _ = linked
-                    for key in ("name", "printed_name", "type_line", "mana_value", "collector_number", "image_url"):
+                    for key in ("name", "printed_name", "type_line", "mana_value", "colors_key", "collector_number", "image_url"):
                         card[key] = current.get(key)
                     card.update(image_ready=True, image_status="ready")
     cover_section = _cover_section(result)
     first = cover_section["cards"] if cover_section else []
     result["cover_card"] = copy.deepcopy(first[0]) if first else None
     result["cover_image_path"] = first[0].get("image_path") if first else None
+    result["composition_colors"] = composition_colors(_composition_cards(result))
     result["card_count"] = sum(c["count"] for s in result["sections"] for c in s["cards"])
     return result
 

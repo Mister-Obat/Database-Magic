@@ -16,6 +16,37 @@ SECTIONS = ("mainboard", "sideboard", "commander", "display_commander",
 _WINDOWS_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
+NON_PLAYABLE_SECTIONS = frozenset({"tokens", "display_commander", "planar_deck", "scheme_deck"})
+
+
+def composition_colors(cards, catalog_db=None):
+    """Collect actual card colors, looking up older snapshots without colors."""
+    colors = set()
+    missing = set()
+    known = False
+    for card in cards:
+        values = card.get("colors_key")
+        if values is None:
+            values = (card.get("raw") or {}).get("colors")
+        if values is not None:
+            known = True
+            colors.update(values)
+        elif catalog_db and card.get("provider_card_id"):
+            missing.add(card["provider_card_id"])
+    if missing:
+        conn, _ = _catalog(catalog_db)
+        try:
+            for identifier in missing:
+                row = conn.execute("SELECT colors_key FROM source_records WHERE provider_card_id=?",
+                                   (identifier,)).fetchone()
+                if row and row["colors_key"] is not None:
+                    known = True
+                    colors.update(row["colors_key"])
+        finally:
+            conn.close()
+    return [color for color in "WUBRG" if color in colors] if known else None
+
+
 def _catalog(catalog_db: Path):
     catalog_db = Path(catalog_db).resolve()
     if not catalog_db.is_file():
@@ -26,7 +57,7 @@ def _catalog(catalog_db: Path):
 
 
 def _printing(conn: sqlite3.Connection, provider_id: str, expected_set: str | None = None) -> dict[str, Any] | None:
-    row = conn.execute("""SELECT p.printing_id,p.layout,e.code AS set_code,sr.mana_value,
+    row = conn.execute("""SELECT p.printing_id,p.layout,e.code AS set_code,sr.mana_value,sr.colors_key,
         COALESCE(fr.printed_name,fr.name) AS printed_name
         FROM source_records sr JOIN printings p USING(printing_id)
         JOIN editions e USING(set_id)
@@ -85,6 +116,7 @@ def enrich_deck_media(deck: dict[str, Any], catalog_db: Path) -> dict[str, Any]:
             if not printing:
                 continue
             card["mana_value"] = printing["mana_value"]
+            card["colors_key"] = printing["colors_key"]
             if printing["printed_name"]:
                 card["printed_name"] = printing["printed_name"]
                 card["printed_name_status"] = "available"

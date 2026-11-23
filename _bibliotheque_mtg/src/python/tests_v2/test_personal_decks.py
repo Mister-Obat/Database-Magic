@@ -26,7 +26,7 @@ def cards(tmp_path):
             CREATE TABLE editions(set_id TEXT, code TEXT, eligibility TEXT);
             CREATE TABLE printings(printing_id TEXT, set_id TEXT, layout TEXT, collector_number TEXT);
             CREATE TABLE source_records(provider_card_id TEXT, printing_id TEXT, lang TEXT,
-                printed_name TEXT, name TEXT, mana_value REAL, type_line TEXT);
+                printed_name TEXT, name TEXT, mana_value REAL, type_line TEXT, colors_key TEXT);
             CREATE TABLE card_faces(printing_id TEXT, face_index INTEGER, physical_image INTEGER);
             CREATE TABLE image_assets(asset_id TEXT, relative_path TEXT);
             CREATE TABLE image_slots(printing_id TEXT, face_index INTEGER, status TEXT, asset_id TEXT);
@@ -38,11 +38,11 @@ def cards(tmp_path):
         ]:
             conn.execute("INSERT INTO printings VALUES(?,?,?,?)",
                          (printing, "set", "modal_dfc" if faces > 1 else "normal", provider))
-            conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?)",
-                         (provider, printing, "en", None, name, mana, kind))
+            conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?)",
+                         (provider, printing, "en", None, name, mana, kind, "UR" if faces > 1 else "R"))
             if french:
-                conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?)",
-                             (provider + "fr", printing, "fr", french, french, mana, kind))
+                conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?)",
+                             (provider + "fr", printing, "fr", french, french, mana, kind, "UR"))
             for face in range(faces):
                 asset = f"{printing}-{face}"
                 relative = f"assets/webp/fr/{asset}.webp"

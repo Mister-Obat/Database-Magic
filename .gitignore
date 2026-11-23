@@ -23,6 +23,8 @@
 **/*.jpg
 **/*.jpeg
 **/*.webp
+!/_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/deck-box-fallback.webp
+!/_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/deck-box-grain.png
 **/*.gif
 **/*.bmp
 **/*.tif

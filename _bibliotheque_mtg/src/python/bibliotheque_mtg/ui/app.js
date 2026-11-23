@@ -921,7 +921,7 @@ async function refreshHomeActivity() {
     const snapshot = JSON.stringify(decks);
     if (snapshot !== homeActivitySnapshot) {
       const recentDecks = decks.map(deck => {
-        const tile = deckCoverTile(deck.name, deck.colors || [], deck.cover_card, () => {
+        const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card, () => {
           location.hash = `#perso?deck=${encodeURIComponent(deck.id)}`;
         });
         tile.title = deck.name;
@@ -2836,19 +2836,19 @@ async function renderDeckPage(background = false) {
     if (!data.items.length) container.append(node("p", "empty-state", "Aucun deck préconstruit trouvé."));
     for (const deck of data.items) {
       const name = deckNameLabel(deck);
-      const tile = deckCoverTile(name, deck.colors, { name, image_path: deck.cover_image_path }, () => void openDeck(deck.id));
       const edition = node("span", "deck-tile-edition");
       if (deck.edition_icon_url) {
         const icon = node("img");
         icon.src = deck.edition_icon_url;
         icon.alt = "";
+        icon.draggable = false;
         icon.loading = "lazy";
         icon.addEventListener("error", () => icon.remove(), { once: true });
         edition.append(icon);
       }
       edition.append(deck.set_name_fr || deck.set_name || deck.set_code || "Édition inconnue");
-      tile.append(edition);
-      container.append(tile);
+      container.append(deckCoverTile(name, deck.composition_colors ?? deck.colors, { image_path: deck.cover_image_path },
+        () => void openDeck(deck.id), edition));
     }
     const pages = Math.max(1, Math.ceil(data.total / DECK_PAGE_SIZE));
     pageControls.get("deck-pager")(state.deckPage, pages, `${formatNumber(data.total)} decks`);
@@ -4151,12 +4151,29 @@ function personalColorField(values, onChange) {
         colors => onChange(colors.filter(color => color !== "C"))));
     return field;
 }
-function deckCoverTile(name, colors, cover, open) {
+function deckCoverTile(name, colors, cover, open, edition = null) {
     const tile = personalButton("", open);
     tile.className = "personal-deck-tile";
-    tile.append(personalImage(cover, "personal-cover"), node("h2", "", name));
+    tile.title = name;
+    tile.setAttribute("aria-label", name);
+    const box = node("span", "deck-box");
+    const panel = node("span", "deck-box-panel");
+    const frame = node("span", "deck-box-window");
+    const image = personalImage(cover, "deck-box-art");
+    if (image.tagName === "IMG") image.alt = "";
+    frame.append(image);
+
+    const title = node("span", "deck-box-title");
+    title.append(node("span", "", name));
+    title.style.fontSize = fitDeckBoxTitle(name);
+    const mana = node("span", "deck-box-mana");
     const symbols = colorSymbols(colors);
-    if (symbols) tile.append(symbols);
+    if (symbols) mana.append(symbols);
+    panel.append(frame, title, mana);
+    box.append(node("span", "deck-box-fallback"), panel);
+    tile.append(box);
+    if (edition) tile.append(edition);
+    mountDeckBox(tile, box, panel, frame, title, mana);
     return tile;
 }
 async function readPersonalTextFile(file) {
@@ -4177,7 +4194,7 @@ function renderPersonalList() {
     updatePersonalHeading();
     const root = $("personal-content");
     let decks = null, groups = [], organizing = false, importing = false;
-    let busy = false, draggedDeck = null, latestLoad = 0;
+    let busy = false, draggedDeck = null, landedDeckId = null, latestLoad = 0;
     const create = personalButton("Créer un deck", renderPersonalCreate, true);
     const actions = node("div", "search-header-actions personal-list-actions");
     const filePicker = node("input");
@@ -4323,7 +4340,11 @@ function renderPersonalList() {
     }
     function renderDeck(deck) {
         const entry = node("article", "personal-list-entry");
-        const tile = deckCoverTile(deck.name, deck.colors || [], deck.cover_card, () => void openPersonalDeck(deck.id));
+        const tile = deckCoverTile(deck.name, deck.composition_colors ?? deck.colors ?? [], deck.cover_card, () => void openPersonalDeck(deck.id));
+        if (deck.id === landedDeckId) {
+            tile.classList.add("personal-deck-landed");
+            landedDeckId = null;
+        }
         const remove = personalRemoveButton(`Supprimer le deck ${deck.name}`, () => {
             if (!window.confirm(`Supprimer le deck « ${deck.name} » ?`)) return;
             void mutate(async () => {
@@ -4338,16 +4359,19 @@ function renderPersonalList() {
             tile.addEventListener("dragstart", event => {
                 if (busy) { event.preventDefault(); return; }
                 draggedDeck = deck;
+                tile.classList.remove("personal-deck-drag-rest");
                 tile.classList.add("personal-deck-dragging");
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", deck.id);
             });
             tile.addEventListener("dragend", () => {
                 tile.classList.remove("personal-deck-dragging");
+                tile.classList.add("personal-deck-drag-rest");
                 draggedDeck = null;
                 list.querySelectorAll(".personal-list-drop-target").forEach(section =>
                     section.classList.remove("personal-list-drop-target"));
             });
+            tile.addEventListener("pointermove", () => tile.classList.remove("personal-deck-drag-rest"), { passive: true });
         }
         return entry;
     }
@@ -4356,6 +4380,7 @@ function renderPersonalList() {
         void mutate(async () => {
             const result = await postJSON("/api/v2/personal-decks/group-move", { deck_id: deck.id, group_id: groupId });
             deck.group_id = result.group_id;
+            landedDeckId = deck.id;
         });
     }
     function renderGroup(group, items) {

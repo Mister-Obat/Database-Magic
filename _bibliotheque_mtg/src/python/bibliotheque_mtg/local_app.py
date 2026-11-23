@@ -36,7 +36,7 @@ from .image_download import (download_printing, ensure_catalogue_wal,
 from .decks import (_SET_NAMES_FR, _resolve_provider_ids, deck_facets, ensure_deck_index, get_deck,
                     index_deck_colors, list_decks, refresh_deck_index,
                     run_deck_composition_index)
-from .deck_media import enrich_deck_media, export_deck_to_desktop
+from .deck_media import NON_PLAYABLE_SECTIONS, composition_colors, enrich_deck_media, export_deck_to_desktop
 from .list_import import resolve_list, parse_list
 from .list_export import export_card_to_desktop, export_list_to_desktop, export_local_card_image
 from . import personal_decks, personal_deck_text
@@ -70,7 +70,7 @@ PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                          "group-delete", "group-move")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 42
+APP_API_REVISION = 44
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -751,8 +751,12 @@ def _deck_with_media(payload: dict, catalog_db: Path) -> dict:
         ready = sum(bool(card.get("image_ready")) for card in entries)
         deck["media_summary"] = {"total": len(entries), "ready": ready,
                                  "missing": len(entries) - ready}
-        commanders = deck.get("sections", {}).get("commander", [])
-        deck["cover_image_path"] = commanders[0].get("image_path") if commanders and commanders[0].get("image_ready") else None
+        sections = deck.get("sections") or {}
+        ordered = ("commander", *(key for key in sections if key not in {"commander", "tokens"}), "tokens")
+        cover = next((sections[key][0] for key in ordered if sections.get(key)), None)
+        deck["cover_image_path"] = cover.get("image_path") if cover else None
+        deck["composition_colors"] = composition_colors(
+            card for key, cards in sections.items() if key not in NON_PLAYABLE_SECTIONS for card in cards)
         payload["deck"] = deck
     return payload
 
@@ -773,7 +777,7 @@ def _deck_media_context(catalog_db: Path) -> tuple:
 
 
 def _deck_cover_ready(deck_id: str, catalog_db: Path, context: tuple | None = None) -> bool:
-    """Resolve only the commander cover; do not derive or fetch deck tokens."""
+    """Resolve the first card cover without deriving or fetching deck tokens."""
     context = context or _deck_media_context(catalog_db)
     cache_key = (str(deck_id), context)
     with _DECK_MEDIA_CACHE_LOCK:
@@ -808,14 +812,12 @@ def _deck_list_media(deck_id: str, catalog_db: Path) -> dict:
     if not deck:
         result = {"cover_image_path": None, "media_summary": None, "complete": None}
         return _cache_deck_media(cache_key, result)
-    cover = deck.get("cover_image_path")
-    if not deck.get("loaded") or not deck.get("tokens_loaded"):
-        result = {"cover_image_path": cover, "media_summary": None, "complete": None}
-        return _cache_deck_media(cache_key, result)
-    summary = deck.get("media_summary") or {"total": 0, "ready": 0, "missing": 0}
-    result = {"cover_image_path": cover,
-              "media_summary": summary,
-              "complete": bool(summary["total"] and not summary["missing"])}
+    result = {"cover_image_path": deck.get("cover_image_path"),
+              "composition_colors": deck.get("composition_colors"),
+              "media_summary": None, "complete": None}
+    if deck.get("loaded") and deck.get("tokens_loaded"):
+        summary = deck.get("media_summary") or {"total": 0, "ready": 0, "missing": 0}
+        result.update(media_summary=summary, complete=bool(summary["total"] and not summary["missing"]))
     return _cache_deck_media(cache_key, result)
 
 
@@ -1777,6 +1779,14 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     self._send(200, candidates[0].read_bytes(), "image/png")
                 else:
                     self._json({"error": "Aucune image IA locale disponible."}, 404)
+            elif route == "/deck-box.js":
+                self._send(200, (UI_ROOT / "deck-box.js").read_bytes(), "text/javascript; charset=utf-8")
+            elif route == "/deck-box-mesh.json":
+                self._send(200, (UI_ROOT / "assets/deck-box-mesh.json").read_bytes(), "application/json")
+            elif route == "/deck-box-grain.png":
+                self._send(200, (UI_ROOT / "assets/deck-box-grain.png").read_bytes(), "image/png")
+            elif route == "/deck-box-fallback.webp":
+                self._send(200, (UI_ROOT / "assets/deck-box-fallback.webp").read_bytes(), "image/webp")
             elif route == "/app.js":
                 file = _safe_child(UI_ROOT, "app.js")
                 self._send(200, file.read_bytes(), "text/javascript; charset=utf-8")

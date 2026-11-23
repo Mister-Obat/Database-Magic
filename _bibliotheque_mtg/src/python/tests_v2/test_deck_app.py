@@ -44,6 +44,27 @@ def test_card_usage_exposes_edition_icon_and_deck_colors(monkeypatch, tmp_path):
     assert usage["exact"]["personal_decks"][0]["colors"] == ["B"]
 
 
+def test_deck_cover_follows_display_order_and_colors_ignore_tokens(monkeypatch):
+    main = {"name": "First", "image_path": "first.webp", "colors_key": "R"}
+    second = {"name": "Second", "image_path": "second.webp", "colors_key": "U"}
+    artifact = {"name": "Artifact", "colors_key": ""}
+    token = {"name": "Token", "colors_key": "G"}
+    section_data = {"mainboard": [main, second, artifact], "commander": [], "tokens": [token]}
+    monkeypatch.setattr(local_app, "enrich_deck_media", lambda deck, _: deck)
+
+    def project():
+        return local_app._deck_with_media({"found": True, "deck": {"sections": section_data}}, None)["deck"]
+
+    assert project()["cover_image_path"] == "first.webp"
+    assert project()["composition_colors"] == ["U", "R"]
+    section_data["commander"] = [{"name": "Commander", "colors_key": "R"}]
+    assert project()["cover_image_path"] is None
+    section_data["mainboard"] = [artifact]
+    assert project()["composition_colors"] == ["R"]
+    section_data["commander"] = []
+    assert project()["composition_colors"] == []
+
+
 def test_manual_image_import_is_allowed_during_batch_download(monkeypatch):
     monkeypatch.setattr(local_app, "_MAINTENANCE_TASK", None)
     monkeypatch.setattr(local_app, "_BATCH_TASK", {"status": "running"})
