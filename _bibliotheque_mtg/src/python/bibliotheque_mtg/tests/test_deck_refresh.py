@@ -30,7 +30,8 @@ def test_recalculate_deck_search_visits_all_matching_pages(monkeypatch):
 
 def test_deck_list_media_keeps_commander_cover_when_tokens_are_unloaded(monkeypatch):
     payload = {"found": True, "deck": {"loaded": True, "tokens_loaded": False,
-                                        "cover_image_path": "assets/commander.webp"}}
+                                        "cover_image_path": "assets/commander.webp",
+                                        "composition_colors": ["U", "G"]}}
     monkeypatch.setattr(local_app, "_deck_media_context", lambda _db: ("test-cover",))
     monkeypatch.setattr(local_app, "get_deck", lambda *args, **kwargs: payload)
     monkeypatch.setattr(local_app, "_deck_with_media", lambda value, _catalog: value)
@@ -38,4 +39,5 @@ def test_deck_list_media_keeps_commander_cover_when_tokens_are_unloaded(monkeypa
     result = local_app._deck_list_media("deck-id", Path("catalog.sqlite"))
 
     assert result == {"cover_image_path": "assets/commander.webp",
+                      "composition_colors": ["U", "G"],
                       "media_summary": None, "complete": None}
