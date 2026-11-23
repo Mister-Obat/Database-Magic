@@ -95,13 +95,28 @@ def _database(path):
         conn.close()
 
 
+def composition_sections(deck):
+    """Return playable and auxiliary sections, excluding packaged display copies."""
+    return [section for section in deck["sections"]
+            if section.get("source_section") != "display_commander"]
+
+
+def _read_document(document):
+    deck = json.loads(document)
+    sections = composition_sections(deck)
+    if not sections and deck["sections"]:
+        sections = [{"id": deck["sections"][0]["id"], "name": "Deck principal", "cards": []}]
+    deck["sections"] = sections
+    return deck
+
+
 def _read(conn, deck_id, *, include_deleted=False):
     if not isinstance(deck_id, str):
         raise ValueError("Identifiant de deck requis.")
     row = conn.execute("SELECT document FROM personal_decks WHERE id=?", (deck_id,)).fetchone()
     if row is None:
         raise KeyError("Deck personnel introuvable.")
-    deck = json.loads(row[0])
+    deck = _read_document(row[0])
     if deck.get("deleted_at") and not include_deleted:
         raise KeyError("Deck personnel introuvable.")
     return deck
@@ -203,7 +218,7 @@ def list_decks(path, query="", colors=None, *, include_groups=False):
             rows = conn.execute("SELECT document, NULL FROM personal_decks ORDER BY rowid DESC")
         decks = []
         for document, group_id in rows:
-            deck = json.loads(document)
+            deck = _read_document(document)
             if include_groups:
                 deck["group_id"] = group_id
             decks.append(deck)
@@ -425,6 +440,8 @@ def import_preconstructed(path, source, catalog_db):
         sections[0]["source_section"] = "commander"
     by_name = {s["name"]: s for s in sections}
     for key, entries in (source.get("sections") or {}).items():
+        if key == "display_commander":
+            continue
         cards = []
         for entry in entries:
             card = dict(entry)

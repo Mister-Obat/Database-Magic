@@ -19,7 +19,8 @@ _ZONE_NAMES = {
     "maybeboard": ("maybeboard", "maybe board", "cartes envisagees"),
     "companion": ("companion", "compagnon"),
     "tokens": ("tokens", "token", "jetons"),
-    "display_commander": ("commandant de presentation",),
+    "display_commander": ("commandant de presentation", "commandants de presentation",
+                          "display commander", "display commanders", "displaycommander"),
     "planar_deck": ("planar deck", "deck planaire", "planes"),
     "scheme_deck": ("scheme deck", "machinations", "schemes"),
 }
@@ -28,7 +29,7 @@ _ZONE_HEADERS = {alias: zone for zone, aliases in _ZONE_NAMES.items() for alias 
 _EXPORT_HEADERS = {
     "commander": "Commander", "mainboard": "Deck", "sideboard": "Sideboard",
     "companion": "Companion", "maybeboard": "Maybeboard", "tokens": "Tokens",
-    "display_commander": "Commandant de présentation", "planar_deck": "Planar Deck",
+    "planar_deck": "Planar Deck",
     "scheme_deck": "Scheme Deck",
 }
 _NAME = re.compile(r"^(?:deck\s+name\s*:\s*|name(?:\s*:\s*|\s+))(.+)$", re.I)
@@ -113,7 +114,7 @@ def _resolve(conn, name, set_code, collector):
         parameters.append("{name printed_name}: " + phrase)
     rows = conn.execute(
         f"""SELECT sr.provider_card_id, sr.printing_id, sr.name, sr.printed_name,
-            sr.lang, sr.type_line, sr.mana_value, sr.color_identity_json,
+            sr.lang, sr.type_line, sr.mana_value, sr.color_identity_json, sr.colors_key,
             p.collector_number, e.code AS set_code
             FROM source_records sr JOIN printings p USING(printing_id)
             JOIN editions e USING(set_id) {search_join}
@@ -180,8 +181,9 @@ def import_text(path, catalog_db, value, filename=""):
                     issues.append({**issue, "reason": "Section invalide."})
                 else:
                     section = _new_section(label.strip(), zone)
-                    sections.append(section)
-                    custom_order = True
+                    if zone != "display_commander":
+                        sections.append(section)
+                        custom_order = True
                 continue
             if line.startswith(_COLORS_COMMENT.rstrip()):
                 metadata = line[len(_COLORS_COMMENT.rstrip()):].strip()
@@ -212,6 +214,10 @@ def import_text(path, catalog_db, value, filename=""):
                 count, card_name, set_code, collector, has_quantity, card_zone = _parse_card(line)
             except ValueError as exc:
                 issues.append({**issue, "reason": str(exc)})
+                continue
+            zone = ("sideboard" if sideboard else card_zone
+                    or (card_section.get("source_section") if card_section is not None else active_zone))
+            if zone == "display_commander":
                 continue
             identity = (card_name, set_code, collector)
             if identity not in cache:

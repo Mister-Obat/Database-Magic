@@ -1628,7 +1628,7 @@ def _card_usage(catalog_db: Path, provider_id: str) -> dict:
                     deck = json.loads(document)
                     if deck.get("deleted_at"):
                         continue
-                    cards = [c for section in deck.get("sections", []) for c in section.get("cards", [])]
+                    cards = [c for section in personal_decks.composition_sections(deck) for c in section.get("cards", [])]
                     resolved = {c.get("printing_id") or id_to_printing.get(c.get("provider_card_id")) for c in cards}
                     item = {"id": deck["id"], "name": deck["name"], "colors": deck.get("colors")}
                     if (proxy[0]["printing_id"] if proxy else printing) in resolved:

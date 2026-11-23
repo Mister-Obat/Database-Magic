@@ -1,10 +1,11 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const state = { view: "info", searchPage: 0, editionPage: 0, deckPage: 0, archivePage: 0, searchTotal: 0, searchItems: [], editionCardsTotal: 0, deckTotal: 0, deckExecuted: false, deckAppliedFilters: null, archiveTotal: 0, editions: [], activeSet: "", selectedDeck: null, openDeckId: null, deckDetailRequest: 0, deckListKey: null, deckListScroll: 0, deckListOpener: null, deckTaskId: null, deckPollTimer: null, deckFacetsLoaded: false, deckColorAttempted: false, deckColorPollTimer: null, deckSuggestionRequest: 0, deckRequest: 0, deckController: null, searchRequest: 0, searchController: null, editionRequest: 0, cardRequest: 0, cardController: null, cardGallery: null, maintenancePollTimer: null };
+const state = { view: "info", searchPage: 0, editionPage: 0, deckPage: 0, archivePage: 0, searchTotal: 0, searchItems: [], editionCardsTotal: 0, deckTotal: 0, deckExecuted: false, deckAppliedFilters: null, archiveTotal: 0, editions: [], activeSet: "", selectedDeck: null, openDeckId: null, deckDetailRequest: 0, deckListKey: null, deckListScroll: 0, deckListOpener: null, deckTaskId: null, deckPollTimer: null, deckFacetsLoaded: false, deckColorAttempted: false, deckColorPollTimer: null, deckRequest: 0, deckController: null, searchRequest: 0, searchController: null, editionRequest: 0, cardRequest: 0, cardController: null, cardGallery: null, maintenancePollTimer: null };
 const viewScrollPositions = new Map();
 const SEARCH_DRAFT_KEY = "database-magic-search-draft-v1";
 const RECENT_SEARCHES_KEY = "database-magic-recent-searches-v1";
+const RECENT_DECK_SEARCHES_KEY = "database-magic-recent-deck-searches-v1";
 let initialRouteRestored = false;
 let searchDraftTouched = false;
 const PAGE_SIZE = 50;
@@ -1299,46 +1300,6 @@ function attachEditionSuggestions(inputId, listId, selectId, onSelect) {
   });
   document.addEventListener("pointerdown", event => { if (!event.target.closest(`#${inputId}`) && !event.target.closest(`#${listId}`)) hide(); });
 }
-let deckSuggestionIds = [];
-let activeDeckSuggestion = -1;
-let deckSuggestionTimer = null;
-function hideDeckSuggestions() {
-  $("deck-suggestions").hidden = true;
-  $("deck-query").setAttribute("aria-expanded", "false");
-  $("deck-query").removeAttribute("aria-activedescendant");
-  activeDeckSuggestion = -1;
-}
-function highlightDeckSuggestion(index) {
-  const options = $("deck-suggestions").querySelectorAll('[role="option"]');
-  if (!options.length) return;
-  activeDeckSuggestion = (index + options.length) % options.length;
-  options.forEach((option, i) => option.setAttribute("aria-selected", i === activeDeckSuggestion ? "true" : "false"));
-  $("deck-query").setAttribute("aria-activedescendant", options[activeDeckSuggestion].id);
-  options[activeDeckSuggestion].scrollIntoView({ block: "nearest" });
-}
-async function renderDeckSuggestions() {
-  const term = $("deck-query").value.trim(), list = $("deck-suggestions");
-  const request = ++state.deckSuggestionRequest;
-  list.replaceChildren(); deckSuggestionIds = []; hideDeckSuggestions();
-  if (!term) return;
-  try {
-    const data = await getJSON("/api/v2/decks", { q: term, limit: 8, offset: 0, sort: "name", order: "asc" });
-    if (request !== state.deckSuggestionRequest || term !== $("deck-query").value.trim()) return;
-    const key = editionSearchKey(term);
-    const matches = (data.items || []).filter(deck => editionSearchKey(`${deck.name_fr || ""} ${deck.name || ""}`).includes(key)).slice(0, 8);
-    for (const deck of matches) {
-      const option = node("div", "edition-suggestion", deckNameLabel(deck));
-      option.id = `deck-suggestion-${deckSuggestionIds.length}`;
-      option.setAttribute("role", "option"); option.setAttribute("aria-selected", "false");
-      option.addEventListener("click", () => { hideDeckSuggestions(); void openDeck(deck.id); });
-      list.append(option); deckSuggestionIds.push(deck.id);
-    }
-    if (!matches.length) list.append(node("p", "edition-suggestion-empty", "Aucun deck trouvé."));
-    list.hidden = false; $("deck-query").setAttribute("aria-expanded", "true");
-  } catch (error) {
-    if (request === state.deckSuggestionRequest) { list.append(node("p", "edition-suggestion-empty", `Suggestions indisponibles : ${error.message}`)); list.hidden = false; }
-  }
-}
 const REFINE_IDS = { image_filter: "refine-images", result_sort: "refine-sort", result_order: "refine-order", mana_min: "refine-mana-min", mana_max: "refine-mana-max", power_min: "refine-power-min", power_max: "refine-power-max", toughness_min: "refine-toughness-min", toughness_max: "refine-toughness-max" };
 function mainSearchFilters() { return { q: $("query").value.trim(), set: multiValue("filter-set"), rarity: multiValue("filter-rarity").toLowerCase(), color: selectedManaColors($("filter-color")), color_mode: $("filter-color-mode").value, card_type: multiValue("filter-type"), oracle_id: state.searchIdentity?.oracle_id || "", printing_id: state.searchIdentity?.printing_id || "", unique: $("search-unique").checked ? "1" : "" }; }
 function refineSearchFilters() { return Object.fromEntries(Object.entries(REFINE_IDS).map(([key, id]) => [key, $(id).value])); }
@@ -1367,36 +1328,29 @@ function applySearchDraft(draft) {
 function persistSearchDraft() {
   try { localStorage.setItem(SEARCH_DRAFT_KEY, JSON.stringify(captureSearchDraft())); } catch {}
 }
-function recentSearchTerms() {
+function recentSearchTerms(storageKey) {
   try {
-    const items = JSON.parse(localStorage.getItem(RECENT_SEARCHES_KEY) || "[]");
+    const items = JSON.parse(localStorage.getItem(storageKey) || "[]");
     return Array.isArray(items) ? items.filter(value => typeof value === "string" && value.trim()).slice(0, 10) : [];
   } catch { return []; }
 }
-function rememberSearchTerm(value) {
+function rememberSearchTerm(value, storageKey = RECENT_SEARCHES_KEY) {
   const term = String(value || "").trim();
   if (!term) return;
-  const items = recentSearchTerms().filter(item => item.toLocaleLowerCase("fr") !== term.toLocaleLowerCase("fr"));
+  const items = recentSearchTerms(storageKey).filter(item => item.toLocaleLowerCase("fr") !== term.toLocaleLowerCase("fr"));
   items.unshift(term);
-  try { localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(items.slice(0, 10))); } catch {}
+  try { localStorage.setItem(storageKey, JSON.stringify(items.slice(0, 10))); } catch {}
 }
-function forgetSearchTerm(term) {
-  const items = recentSearchTerms().filter(item => item.toLocaleLowerCase("fr") !== term.toLocaleLowerCase("fr"));
-  try { localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(items)); } catch {}
+function forgetSearchTerm(term, storageKey) {
+  const items = recentSearchTerms(storageKey).filter(item => item.toLocaleLowerCase("fr") !== term.toLocaleLowerCase("fr"));
+  try { localStorage.setItem(storageKey, JSON.stringify(items)); } catch {}
 }
-function hideRecentSearches() {
-  $("search-suggestions").hidden = true;
-  $("query").setAttribute("aria-expanded", "false");
-}
-function renderRecentSearches() {
-  const input = $("query"), list = $("search-suggestions"), key = input.value.trim().toLocaleLowerCase("fr");
-  if (!document.hasFocus() || (document.activeElement !== input && !list.contains(document.activeElement))) {
-    hideRecentSearches();
-    return;
-  }
-  const terms = recentSearchTerms().filter(term => term.toLocaleLowerCase("fr") !== key && (!key || term.toLocaleLowerCase("fr").includes(key))).slice(0, 8);
-  list.replaceChildren();
-  if (!terms.length) { hideRecentSearches(); return; }
+function renderRecentSearchRows(input, list, storageKey, select, refresh) {
+  const key = input.value.trim().toLocaleLowerCase("fr");
+  const terms = recentSearchTerms(storageKey).filter(term => {
+    const name = term.toLocaleLowerCase("fr");
+    return name !== key && (!key || name.includes(key));
+  }).slice(0, 8);
   for (const term of terms) {
     const row = node("div", "recent-search-row");
     const option = node("button", "edition-suggestion", term);
@@ -1406,28 +1360,82 @@ function renderRecentSearches() {
     option.addEventListener("pointerdown", event => event.preventDefault());
     option.addEventListener("click", () => {
       input.value = term;
-      state.searchIdentity = null;
-      searchDraftTouched = true;
-      persistSearchDraft();
       input.focus();
-      hideRecentSearches();
-      setText($("search-status"), "Terme repris. Cliquez sur Rechercher.");
+      select();
     });
     const remove = node("button", "recent-search-remove", "×");
     remove.type = "button";
     remove.setAttribute("aria-label", `Supprimer « ${term} » des recherches récentes`);
     remove.addEventListener("pointerdown", event => event.preventDefault());
     remove.addEventListener("click", () => {
-      forgetSearchTerm(term);
+      forgetSearchTerm(term, storageKey);
       input.focus();
-      renderRecentSearches();
+      refresh();
     });
     row.append(option, remove);
     list.append(row);
   }
-  list.hidden = false;
-  input.setAttribute("aria-expanded", "true");
 }
+function bindRecentSearches(inputId, listId, storageKey, onSelect = () => {}) {
+  const input = $(inputId), list = $(listId), field = input.closest(".search-main");
+  const hide = () => {
+    list.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+  };
+  const render = () => {
+    if (!document.hasFocus() || (document.activeElement !== input && !list.contains(document.activeElement))) {
+      hide();
+      return;
+    }
+    list.replaceChildren();
+    renderRecentSearchRows(input, list, storageKey, () => {
+      hide();
+      onSelect();
+    }, render);
+    list.hidden = !list.childElementCount;
+    input.setAttribute("aria-expanded", String(!list.hidden));
+  };
+  input.addEventListener("input", render);
+  input.addEventListener("focus", render);
+  input.addEventListener("click", render);
+  input.addEventListener("blur", event => {
+    if (!list.contains(event.relatedTarget)) hide();
+  });
+  list.addEventListener("focusout", event => {
+    if (event.relatedTarget !== input && !list.contains(event.relatedTarget)) hide();
+  });
+  window.addEventListener("blur", hide);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) hide(); });
+  document.addEventListener("pointerdown", event => { if (!field.contains(event.target)) hide(); });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Escape") hide();
+    if (event.key === "ArrowDown" && !list.hidden) {
+      const first = list.querySelector('[role="option"]');
+      if (first) { event.preventDefault(); first.focus(); }
+    }
+  });
+  list.addEventListener("keydown", event => {
+    if (!["ArrowDown", "ArrowUp", "Escape"].includes(event.key)) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      input.focus();
+      hide();
+      return;
+    }
+    const options = [...list.querySelectorAll('[role="option"]')];
+    const index = options.indexOf(document.activeElement);
+    const next = event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1) : Math.max(0, index - 1);
+    if (options[next]) { event.preventDefault(); options[next].focus(); }
+  });
+  return hide;
+}
+const hideRecentSearches = bindRecentSearches("query", "search-suggestions", RECENT_SEARCHES_KEY, () => {
+  state.searchIdentity = null;
+  searchDraftTouched = true;
+  persistSearchDraft();
+  setText($("search-status"), "Terme repris. Cliquez sur Rechercher.");
+});
+const hideDeckSuggestions = bindRecentSearches("deck-query", "deck-suggestions", RECENT_DECK_SEARCHES_KEY);
 function searchFilters() {
   const refined = state.refineFilters || refineSearchFilters();
   const direction = refined.result_order || "desc";
@@ -2984,7 +2992,7 @@ async function openDeck(deckId, urlMode = "push") {
     if (state.view === "decks") syncRoute();
     const header = $("deck-open-heading");
     const eyebrow = [editionLabel(deck), productTypeLabel(deck.type)].filter(Boolean).join(" · ");
-    header.replaceChildren(...deckTitleContent(eyebrow, deckNameLabel(deck), deck.colors));
+    header.replaceChildren(...deckTitleContent(eyebrow, deckNameLabel(deck), deck.composition_colors ?? deck.colors));
     header.hidden = false;
     target.replaceChildren();
     const sections = Object.entries(deck.sections || {});
@@ -3005,7 +3013,9 @@ async function openDeck(deckId, urlMode = "push") {
     for (const [key, cards] of orderedSections) {
       if (!cards.length) continue;
       const section = node("section", "deck-section");
-      section.append(deckSectionTitle(labels[key] || key, cards));
+      const heading = node("div", "deck-section-heading");
+      heading.append(deckSectionTitle(labels[key] || key, cards));
+      section.append(heading);
       const list = node("div", `deck-cards${key === "tokens" ? " deck-token-cards" : ""}`);
       for (const card of cards) {
         const tile = node(card.provider_card_id ? "button" : "article", `deck-card-tile${card.provider_card_id ? " deck-card-open" : ""}`);
@@ -3421,9 +3431,6 @@ $("search-form").addEventListener("input", event => {
   searchDraftTouched = true;
   persistSearchDraft();
   setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche.");
-  if (event.target === $("query")) {
-    renderRecentSearches();
-  }
 });
 $("search-form").addEventListener("change", () => { searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); });
 window.addEventListener("pagehide", persistSearchDraft);
@@ -3479,32 +3486,6 @@ $("refresh-view").addEventListener("click", async event => {
 });
 $("clear-search").addEventListener("click", () => { state.searchController?.abort(); state.searchController = null; ++state.searchRequest; $("search-form").reset(); state.searchIdentity = null; for (const id of ["filter-set", "filter-rarity", "filter-type"]) setMultiValue(id, ""); $("filter-color").querySelectorAll(".mana-toggle").forEach(button => setManaPressed(button, false)); searchDraftTouched = true; persistSearchDraft(); hideRecentSearches(); setText($("search-status"), "Critères effacés. Cliquez sur Rechercher."); });
 $("filter-color").querySelectorAll(".mana-toggle").forEach(button => button.addEventListener("click", () => { toggleMana(button, $("filter-color")); searchDraftTouched = true; persistSearchDraft(); setText($("search-status"), "Critères modifiés. Cliquez sur Rechercher pour lancer la recherche."); }));
-$("query").addEventListener("focus", renderRecentSearches);
-$("query").addEventListener("click", renderRecentSearches);
-$("query").addEventListener("blur", event => {
-  if (!$("search-suggestions").contains(event.relatedTarget)) hideRecentSearches();
-});
-$("search-suggestions").addEventListener("focusout", event => {
-  if (event.relatedTarget !== $("query") && !$("search-suggestions").contains(event.relatedTarget)) hideRecentSearches();
-});
-window.addEventListener("blur", hideRecentSearches);
-document.addEventListener("visibilitychange", () => { if (document.hidden) hideRecentSearches(); });
-$("query").addEventListener("keydown", event => {
-  if (event.key === "Escape") { hideRecentSearches(); return; }
-  if (event.key === "ArrowDown" && !$("search-suggestions").hidden) {
-    const first = $("search-suggestions").querySelector('[role="option"]');
-    if (first) { event.preventDefault(); first.focus(); }
-  }
-});
-$("search-suggestions").addEventListener("keydown", event => {
-  if (!["ArrowDown", "ArrowUp", "Escape"].includes(event.key)) return;
-  if (event.key === "Escape") { event.preventDefault(); hideRecentSearches(); $("query").focus(); return; }
-  const options = [...$("search-suggestions").querySelectorAll('[role="option"]')];
-  const index = options.indexOf(document.activeElement);
-  const next = event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1) : Math.max(0, index - 1);
-  if (options[next]) { event.preventDefault(); options[next].focus(); }
-});
-document.addEventListener("pointerdown", event => { if (!event.target.closest(".search-main")) hideRecentSearches(); });
 registerPager("search-pager", "previous-page", "page-status", "next-page", "results", jumpToCataloguePage(page => {
   if (!state.searchSnapshot) return;
   state.searchPage = page;
@@ -3529,9 +3510,8 @@ registerPager("edition-pager", "edition-prev", "edition-page-status", "edition-n
 }));
 attachEditionSuggestions("search-edition-query", "search-edition-suggestions", "filter-set", () => { setText($("search-status"), "Édition choisie. Cliquez sur Rechercher."); });
 attachEditionSuggestions("deck-edition-query", "deck-edition-suggestions", "deck-edition", () => {});
-$("deck-query").addEventListener("input", () => { clearTimeout(deckSuggestionTimer); deckSuggestionTimer = setTimeout(() => { if (!state.openDeckId) renderDeckSuggestions(); }, 180); });
 $("deck-submit").addEventListener("click", () => {
-  clearTimeout(deckSuggestionTimer); ++state.deckSuggestionRequest;
+  rememberSearchTerm($("deck-query").value, RECENT_DECK_SEARCHES_KEY);
   hideDeckSuggestions();
   invalidatePageCache("/api/v2/decks");
   state.deckAppliedFilters = deckResultFilters();
@@ -3539,18 +3519,15 @@ $("deck-submit").addEventListener("click", () => {
   state.deckPage = 0;
   void renderDeckPage();
 });
-for (const id of ["deck-query", "deck-edition-query"]) {
-  $(id).addEventListener("keydown", event => {
-    if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); $("deck-submit").click(); }
-  });
-}
+$("deck-edition-query").addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); $("deck-submit").click(); }
+});
 $("clear-deck-filters").addEventListener("click", () => {
   for (const id of ["deck-query", "deck-edition-query", "deck-format", "deck-type", "deck-edition", "deck-color-mode", "deck-image-filter", "deck-sort", "deck-order"]) {
     const field = $(id); field.value = field.options ? field.options[0].value : "";
   }
   for (const id of ["deck-edition", "deck-format", "deck-type"]) setMultiValue(id, "");
   document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button => setManaPressed(button, false));
-  clearTimeout(deckSuggestionTimer); ++state.deckSuggestionRequest;
   hideDeckSuggestions();
   state.deckExecuted = false; state.deckAppliedFilters = null; state.deckPage = 0; state.deckTotal = 0;
   state.deckListKey = null; state.deckController?.abort(); state.deckController = null; ++state.deckRequest;
@@ -3560,19 +3537,8 @@ $("clear-deck-filters").addEventListener("click", () => {
   if (state.view === "decks") syncRoute();
 });
 $("deck-query").addEventListener("keydown", event => {
-  if (event.key === "Escape") { hideDeckSuggestions(); return; }
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    const options = $("deck-suggestions").querySelectorAll('[role="option"]');
-    if (!options.length || $("deck-suggestions").hidden) return;
-    event.preventDefault(); highlightDeckSuggestion(activeDeckSuggestion + (event.key === "ArrowDown" ? 1 : -1));
-  } else if (event.key === "Enter") {
-    event.preventDefault();
-    const id = activeDeckSuggestion >= 0 ? deckSuggestionIds[activeDeckSuggestion] : null;
-    if (id) { hideDeckSuggestions(); void openDeck(id); }
-    else $("deck-submit").click();
-  }
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); $("deck-submit").click(); }
 });
-document.addEventListener("pointerdown", event => { if (!event.target.closest(".deck-search")) hideDeckSuggestions(); });
 document.querySelectorAll(".deck-color-filter .mana-toggle").forEach(button=>button.addEventListener("click",()=>{toggleMana(button, document.querySelector(".deck-color-filter"));}));
 registerPager("deck-pager", "deck-prev", "deck-page-status", "deck-next", "deck-list", jumpToCataloguePage(page => {
   state.deckPage = page;
@@ -4249,13 +4215,11 @@ function renderPersonalList() {
         if (!file) { importing = false; return; }
         void mutate(async () => {
             importReport.replaceChildren();
-            personalStatus("Import du deck…");
             const result = await postJSON("/api/v2/personal-decks/import-text", {
                 filename: file.name, text: await readPersonalTextFile(file),
             });
             await load(true);
             const unresolved = result.unresolved || [];
-            personalStatus(`Deck « ${result.deck.name} » importé · ${formatNumber(result.imported)} carte(s).`);
             if (unresolved.length) {
                 const report = node("details");
                 const lines = node("ul");
@@ -4313,7 +4277,7 @@ function renderPersonalList() {
         const query = normalize(name.value);
         const items = decks.filter(deck => {
             if (!normalize(deck.name).includes(query)) return false;
-            const current = deck.colors || [];
+            const current = deck.composition_colors ?? deck.colors ?? [];
             if (colors.includes("C")) return !current.length;
             return colors.every(color => current.includes(color))
                 && (!colors.length || mode.value !== "exact" || colors.length === current.length);
@@ -4345,15 +4309,7 @@ function renderPersonalList() {
             tile.classList.add("personal-deck-landed");
             landedDeckId = null;
         }
-        const remove = personalRemoveButton(`Supprimer le deck ${deck.name}`, () => {
-            if (!window.confirm(`Supprimer le deck « ${deck.name} » ?`)) return;
-            void mutate(async () => {
-                await postJSON("/api/v2/personal-decks/delete", { deck_id: deck.id, revision: deck.revision });
-                decks = decks.filter(item => item.id !== deck.id);
-                personalStatus(`Deck « ${deck.name} » supprimé.`);
-            }, remove);
-        });
-        entry.append(tile, remove);
+        entry.append(tile);
         if (groups.length) {
             tile.draggable = true;
             tile.addEventListener("dragstart", event => {
@@ -4385,7 +4341,7 @@ function renderPersonalList() {
     }
     function renderGroup(group, items) {
         const section = node("section", "deck-section personal-list-group");
-        const heading = node("div", "personal-section-heading");
+        const heading = node("div", "deck-section-heading personal-section-heading");
         const title = node("h3", "", `${group?.name || "Sans section"} (${formatNumber(items.length)})`);
         heading.append(title);
         section.append(heading);
@@ -4574,6 +4530,16 @@ async function openPersonalDeck(id) {
         const draft = personalRead(`personal-draft-${id}`);
         adoptPersonalDeck(result.deck);
         if (draft) {
+            const cardsById = new Map(result.deck.sections.flatMap(section =>
+                section.cards.map(card => [card.id, card])));
+            for (const section of draft.sections) {
+                for (const card of section.cards) {
+                    const current = cardsById.get(card.id);
+                    if (!current) continue;
+                    card.mana_value = current.mana_value ?? card.mana_value;
+                    card.colors_key = current.colors_key ?? card.colors_key;
+                }
+            }
             personalState.deck = draft;
             personalState.change = 1;
             renderPersonalEditor();
@@ -4673,11 +4639,73 @@ function personalMove(sourceId, cardId, targetId, beforeId = null) {
     personalChanged();
     renderPersonalEditor();
 }
+function sortPersonalCards(deck, sectionGrids) {
+    const animate = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const colorOrder = "WUBRG";
+    const sortKey = card => ({
+        mana: card.mana_value ?? Infinity,
+        colors: card.colors_key == null ? "6" : [...colorOrder]
+            .map((color, index) => card.colors_key.includes(color) ? index + 1 : "")
+            .join(""),
+    });
+    let changed = false;
+    for (const section of deck.sections) {
+        const sorted = section.cards.map(card => ({ card, ...sortKey(card) }))
+            .sort((a, b) => (a.mana - b.mana) || a.colors.localeCompare(b.colors))
+            .map(item => item.card);
+        if (sorted.every((card, index) => card === section.cards[index])) continue;
+
+        const grid = sectionGrids.get(section.id);
+        const tiles = new Map([...grid.children].map(tile => [tile.dataset.personalCard, tile]));
+        const positions = animate ? new Map([...tiles.values()].map(tile => [tile, tile.getBoundingClientRect()])) : null;
+        const orderedTiles = sorted.map(card => tiles.get(card.id));
+        grid.append(...orderedTiles);
+        section.cards = sorted;
+        changed = true;
+        if (!positions) continue;
+
+        const destinations = orderedTiles.map(tile => tile.getBoundingClientRect());
+        orderedTiles.forEach((tile, index) => {
+            const start = positions.get(tile), end = destinations[index];
+            const x = start.left - end.left, y = start.top - end.top;
+            if (!x && !y) return;
+            const layer = y < 0 || (!y && x < 0) ? 2 : 1;
+            tile.animate([
+                { transform: `translate(${x}px, ${y}px)`, zIndex: layer },
+                { transform: `translate(${x * .8}px, ${y * .8 - 6}px) scale(1.035)`, zIndex: layer, offset: .25 },
+                { transform: "none", zIndex: layer },
+            ], { id: "personal-card-sort", duration: 460, easing: "ease-in-out" });
+        });
+    }
+    if (changed) personalChanged();
+}
+function confirmPersonalCardSort(deck, sectionGrids, button) {
+    const dialog = node("dialog", "personal-picker");
+    const heading = node("h2", "", "Voulez-vous trier les cartes par coût de mana ?");
+    const form = node("form", "personal-picker-footer");
+    form.method = "dialog";
+    const validate = node("button", "primary-button", "Valider");
+    validate.value = "sort";
+    const cancel = node("button", "secondary-button", "Annuler");
+    cancel.autofocus = true;
+    form.append(validate, cancel);
+    dialog.append(heading, form);
+    dialog.setAttribute("aria-label", heading.textContent);
+    dialog.addEventListener("close", () => {
+        dialog.remove();
+        if (dialog.returnValue === "sort" && button.isConnected
+            && personalState.deck === deck && state.view === "perso") {
+            sortPersonalCards(deck, sectionGrids);
+        }
+    }, { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+}
 function updatePersonalHeading(deck = null, editButton = null) {
     const [eyebrow, heading] = deckTitleContent(
         deck ? "Deck personnel" : "Votre collection de compositions",
         deck?.name || "Deck perso",
-        deck ? deck.colors || [] : null,
+        deck ? deck.composition_colors ?? deck.colors ?? [] : null,
         "personal-title",
     );
     if (editButton) heading.append(editButton);
@@ -4693,6 +4721,41 @@ async function returnToPersonalList() {
     if (state.view === "perso") syncRoute();
     renderPersonalList();
     return true;
+}
+function confirmPersonalDeckDeletion(deck) {
+    const dialog = node("dialog", "shutdown-dialog");
+    const heading = node("h2", "", "Supprimer le deck ?");
+    heading.id = "personal-delete-deck-title";
+    const message = node("p", "", "Voulez-vous vraiment supprimer le deck « " + deck.name + " » ?");
+    message.id = "personal-delete-deck-message";
+    dialog.setAttribute("aria-labelledby", heading.id);
+    dialog.setAttribute("aria-describedby", message.id);
+    const actions = node("div", "shutdown-actions");
+    const cancel = personalButton("Annuler", () => dialog.close());
+    cancel.autofocus = true;
+    const confirm = personalButton("Confirmer", async () => {
+        if (confirm.disabled) return;
+        confirm.disabled = true;
+        cancel.disabled = true;
+        try {
+            if (!await flushPersonal() || personalState.deck !== deck) return;
+            await postJSON("/api/v2/personal-decks/delete", { deck_id: deck.id, revision: deck.revision });
+            personalStore("personal-draft-" + deck.id, null);
+            if (personalState.deck === deck) await returnToPersonalList();
+        } catch (error) {
+            if (personalState.deck === deck) personalStatus("Suppression impossible : " + error.message, true);
+        } finally {
+            dialog.close();
+        }
+    }, true);
+    dialog.addEventListener("cancel", event => {
+        if (confirm.disabled) event.preventDefault();
+    });
+    dialog.addEventListener("close", () => dialog.remove(), { once: true });
+    actions.append(cancel, confirm);
+    dialog.append(heading, message, actions);
+    document.body.append(dialog);
+    dialog.showModal();
 }
 function renderPersonalEditor() {
     const deck = personalState.deck, root = $("personal-content"), editing = personalState.editing;
@@ -4751,7 +4814,10 @@ function renderPersonalEditor() {
         for (const button of [...actions.querySelectorAll("button"), duplicate]) button.disabled = true;
         organize.classList.replace("secondary-button", "primary-button");
     }
-    editActions.append(duplicate, organize);
+    const sectionGrids = new Map();
+    const sort = personalButton("Trier les cartes", () => confirmPersonalCardSort(deck, sectionGrids, sort));
+    sort.disabled = !deck.sections.some(section => section.cards.length > 1);
+    editActions.append(duplicate, organize, sort);
     actions.append(editActions);
     root.append(actions);
     if (sectionOrganization) {
@@ -4793,7 +4859,8 @@ function renderPersonalEditor() {
             personalState.editing = false;
             renderPersonalEditor();
         };
-        buttons.append(validate, personalButton("Annuler", finish));
+        buttons.append(validate, personalButton("Supprimer le deck", () => confirmPersonalDeckDeletion(deck)),
+            personalButton("Annuler", finish));
         fields.append(label, personalColorField(editing.colors, colors => { editing.colors = colors; }), buttons);
         fields.addEventListener("submit", event => {
             event.preventDefault();
@@ -4811,7 +4878,7 @@ function renderPersonalEditor() {
     }
     for (const section of deck.sections) {
         const container = node("section", "deck-section personal-section");
-        const heading = node("div", "personal-section-heading");
+        const heading = node("div", "deck-section-heading personal-section-heading");
         const title = deckSectionTitle(section.name, section.cards);
         const updateSectionCount = () => {
             title.textContent = `${section.name} (${deckSectionCount(section.cards)})`;
@@ -4861,6 +4928,7 @@ function renderPersonalEditor() {
         container.append(heading);
         if (sectionOrganization) container.append(form);
         const cards = node("div", "deck-cards personal-cards-edit");
+        sectionGrids.set(section.id, cards);
         container.addEventListener("dragover", e => {
             if (personalState.drag) {
                 e.preventDefault();
@@ -4900,6 +4968,9 @@ function renderPersonalEditor() {
                     return;
                 }
                 const tiles = [...cards.children];
+                tiles.forEach(item => item.getAnimations().forEach(animation => {
+                    if (animation.id === "personal-card-sort") animation.cancel();
+                }));
                 const index = tiles.indexOf(tile);
                 const drag = { sectionId: section.id, cardId: card.id, grid: cards, tile, tiles,
                     index, originalIndex: index, animations: [] };

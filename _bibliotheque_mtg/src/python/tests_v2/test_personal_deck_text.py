@@ -15,7 +15,7 @@ def catalog(tmp_path):
             CREATE TABLE printings(printing_id TEXT, set_id TEXT, collector_number TEXT);
             CREATE TABLE source_records(provider_card_id TEXT, printing_id TEXT,
                 name TEXT, printed_name TEXT, lang TEXT, type_line TEXT, mana_value REAL,
-                color_identity_json TEXT);
+                color_identity_json TEXT, colors_key TEXT);
             CREATE VIRTUAL TABLE source_search USING fts5(
                 provider_card_id UNINDEXED, name, printed_name);
             INSERT INTO editions VALUES('old','old','eligible','2001-01-01'),
@@ -23,11 +23,11 @@ def catalog(tmp_path):
             INSERT INTO printings VALUES('p1','old','1'), ('p2','new','99'),
                 ('p3','new','22a'), ('p4','new','561'), ('p5','new','17');
             INSERT INTO source_records VALUES
-                ('old1','p1','Lightning Bolt','Foudre','fr','Instant',1,'["R"]'),
-                ('new1','p2','Lightning Bolt',NULL,'en','Instant',1,'["R"]'),
-                ('new2','p3','Fire // Ice',NULL,'en','Instant',2,'["U","R"]'),
-                ('new3','p4','Xande, Dark Mage',NULL,'en','Creature',4,'["U","B"]'),
-                ('new4','p5','X',NULL,'en','Creature',2,'["U","B"]');
+                ('old1','p1','Lightning Bolt','Foudre','fr','Instant',1,'["R"]','R'),
+                ('new1','p2','Lightning Bolt',NULL,'en','Instant',1,'["R"]','R'),
+                ('new2','p3','Fire // Ice',NULL,'en','Instant',2,'["U","R"]','UR'),
+                ('new3','p4','Xande, Dark Mage',NULL,'en','Creature',4,'["U","B"]','UB'),
+                ('new4','p5','X',NULL,'en','Creature',2,'["U","B"]','UB');
             INSERT INTO source_search SELECT provider_card_id,name,printed_name FROM source_records;
         """)
     return db
@@ -66,6 +66,25 @@ nonsense here
     assert [(card["name"], card.get("collector_number")) for card in sideboard["cards"]] == [
         ("Lightning Bolt", "777"), ("Uncatalogued Card", None)
     ]
+
+
+def test_ignores_display_commander_as_heading_metadata_and_card_tag(catalog, tmp_path):
+    result = import_text(tmp_path / "decks.sqlite", catalog, """Name Deck
+Commander
+1 Lightning Bolt (OLD) 1
+Deck
+2 Lightning Bolt (NEW) 99
+1 X [Display Commander]
+Commandant de présentation
+1 Not a playable card
+// Section: ["Vitrine", "display_commander"]
+1 Fire // Ice (NEW) 22a
+""")
+    assert result["imported"] == 3
+    assert not result["unresolved"]
+    deck = result["deck"]
+    assert deck["colors"] == ["R"]
+    assert [section["source_section"] for section in deck["sections"]] == ["commander", "mainboard"]
 
 
 def test_dec_filename_comment_and_sb_prefix(catalog, tmp_path):

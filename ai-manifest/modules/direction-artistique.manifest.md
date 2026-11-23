@@ -68,9 +68,8 @@ de même taille et de même trait, intégrées sans dépendance React.
 - Garder la barre sur une ligne. En dessous de **1 080 px** ou en portrait, les onglets passent aux pictogrammes avec leurs noms accessibles. Les boutons de droite gardent leur taille.
 - Réserver l’emprise des compteurs dès l’ouverture d’Accueil. Les états et résultats vides ne doivent pas créer de grandes zones de blanc sous les commandes.
 - L’Accueil affiche les decks perso récemment modifiés dans la largeur du
-  panneau. Les vignettes de Deck perso occupent sept colonnes égales en
-  fenêtre large, quatre en fenêtre intermédiaire et deux en fenêtre étroite.
-  Le réglage de zoom des vignettes ne modifie pas cette grille.
+  panneau, sur sept colonnes en fenêtre large, quatre en fenêtre intermédiaire
+  et deux en fenêtre étroite. Le zoom n’affecte pas cette grille d’accueil.
 
 ## Boîtes de deck
 
@@ -82,12 +81,12 @@ les ressources d’exécution depuis ce dossier. L’interface dessine le volume
 dans Canvas avec un tampon de profondeur. Les vignettes partagent l’image
 calculée au repos et redessinent la géométrie pendant les mouvements. Un WebP
 frontal du même modèle sert de repli. La texture PNG reprend le grain du
-polymère Blender, atténué pour une finition noire satinée. Le couvercle et
-le corps partagent le même graphite et le même éclairage selon leurs normales. Le côté droit est plus sombre que la façade sur toute
+polymère Blender, atténué pour une finition noire satinée. Le couvercle et le corps partagent le même graphite et le même éclairage
+selon leurs normales. Le côté droit est plus sombre que la façade sur toute
 la hauteur et un reflet doux souligne le biseau avant droit. La paroi se
 raccorde au couvercle sur toute sa profondeur. Le joint modélisé combine
-un creux sombre et une lèvre éclairée, avec une remontée vers l’arrière.
-L’ombre suit la projection de la base.
+un creux sombre et une lèvre éclairée, avec une remontée vers l’arrière. L’ombre suit la projection
+de la base.
 Le nom complet du deck apparaît sur le couvercle avec les symboles de mana.
 Les textes et logos suivent la taille de la boîte. Les préconstruits
 affichent aussi leur édition.

@@ -152,10 +152,32 @@ def test_exact_identity_quantities_moves_and_nonempty_section_removal(cards, tmp
     assert personal.with_media(saved, cards)["cover_image_path"]
 
 
-def test_import_keeps_all_sections_unresolved_counts_and_png_export(cards, tmp_path):
+def test_legacy_display_commander_filtered_without_rewriting_history(tmp_path):
+    db = tmp_path / "personal.sqlite"
+    deck = personal.create_deck(db, "Legacy", [], commander=True)
+    commander = {"id": str(uuid.uuid4()), "count": 1, "name": "Commander"}
+    deck["sections"][0]["cards"].append(commander)
+    deck["sections"].append({
+        "id": str(uuid.uuid4()), "name": "Renamed display", "source_section": "display_commander",
+        "cards": [{**commander, "id": str(uuid.uuid4())}],
+    })
+    document = json.dumps(deck)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE personal_decks SET document=? WHERE id=?", (document, deck["id"]))
+        conn.execute("UPDATE personal_deck_revisions SET document=? WHERE deck_id=?", (document, deck["id"]))
+    visible = personal.get_deck(db, deck["id"])
+    assert visible["sections"] == deck["sections"][:-1]
+    assert personal.list_decks(db) == [visible]
+    assert personal.save_deck(db, visible)["sections"] == visible["sections"]
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT document FROM personal_deck_revisions WHERE revision=1").fetchone() == (document,)
+
+
+def test_import_keeps_sections_except_display_commander_and_png_export(cards, tmp_path):
     db = tmp_path / "personal.sqlite"
     source = {"id": "precon", "name": "Deck", "colors": "UR", "sections": {
         "commander": [{"name": "Commander", "provider_card_id": "id1", "count": 1}],
+        "display_commander": [{"name": "Commander", "provider_card_id": None, "count": 1}],
         "mainboard": [{"name": "Fire", "provider_card_id": "id1", "count": 2}],
         "sideboard": [{"name": "Unknown", "provider_card_id": None, "count": 3}],
         "planar_deck": [{"name": "Plane", "provider_card_id": None, "count": 1}],
@@ -200,6 +222,7 @@ def test_snapshot_survives_catalogue_card_disappearing(cards, tmp_path):
     card = personal.with_media(personal.get_deck(db, deck["id"]), cards)["sections"][0]["cards"][0]
     assert card["name"] == "Fire // Ice"
     assert card["mana_value"] == 2
+    assert card["colors_key"] == "UR"
     assert card["image_status"] == "unresolved"
 
 

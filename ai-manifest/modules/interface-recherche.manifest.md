@@ -583,8 +583,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   formulaire. Chaque page de
   résultats contient au plus 200 decks, avec pagination sur la recherche validée.
 - Dans l'interface, le texte de recherche des decks porte uniquement sur le nom
-  français ou anglais. Les suggestions ouvrent directement le deck choisi. Le
-  sélecteur d'édition des vues Recherche et Decks dispose du même champ de
+  français ou anglais. Son champ de recherches récentes reprend le composant
+  de Recherche avec un historique indépendant. Un terme peut être repris dans
+  le champ ou supprimé, et la recherche se lance à la validation.
+  Le sélecteur d'édition des vues Recherche et Decks dispose du même champ de
   suggestions que la vue Éditions, sans réduire la liste complète. Le sélecteur
   des Decks ne contient que les éditions représentées dans les decks et suit le
   même ordre chronologique décroissant ; l'API des facettes expose `released_at`
@@ -819,7 +821,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - La première carte de la première section non vide représente la couverture. Les sections
   initiales sont Commandant (si pertinent), Créatures, Rituels, Éphémères,
   Artefacts, Enchantements, Planeswalkers, Terrains, Jetons ; conserver aussi les
-  autres sections d'un préconstruit (réserve, etc.) et toutes ses quantités.
+  autres sections d'un préconstruit (réserve, etc.) et toutes leurs quantités,
+  hors section « Commandant de présentation » réservée à la carte de vitrine.
+  Cette section est ignorée lors des imports et à la lecture des decks
+  personnels existants. Les révisions antérieures sont conservées.
 - L'import préconstruit crée une copie indépendante, conserve nom/couleurs et
   identités disponibles, sans téléchargement d'image implicite. Les cartes non
   résolues restent visibles et ne sont jamais supprimées silencieusement.
@@ -847,8 +852,14 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - Ouvrir les decks personnels en consultation graphique : titres et images,
   sans champs ni commandes de classement permanentes. « Modifier » active les
   champs/quantités/retraits/sections ; « Terminer » attend la sauvegarde confirmée.
-- Déplacer les cartes exclusivement par glisser-déposer en édition, dans une
-  section ou entre sections. Retirer les flèches haut/bas et sélecteurs de déplacement.
+- Le glisser-déposer permet un déplacement manuel dans une section ou entre
+  sections. Dans une composition, **Trier les cartes** suit **Organiser les
+  sections** et demande confirmation. Le tri réordonne chaque section par valeur
+  de mana croissante, puis par combinaison de couleurs suivant W/U/B/R/G.
+  Les incolores précèdent les couleurs à valeur égale et les cartes sans valeur
+  connue restent en fin de section. Les vignettes glissent vers leurs nouvelles
+  positions, sauf si la préférence de mouvement réduit est active.
+  Le tri emprunte la sauvegarde habituelle.
 - La couverture suit l’ordre des sections puis celui des cartes ; les sections
   vides sont sautées. La zone de commandement suit la même règle.
 - La création manuelle prévoit une zone de commandement sans case à cocher.
@@ -864,14 +875,16 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   les compositions en consultation ou en édition. Dans les mosaïques, le
   réglage mémorise le nombre de colonnes souhaité, de trois à neuf. Les colonnes se partagent
   toute la largeur et leur nombre baisse si la fenêtre est trop étroite.
-  Les textes et symboles s’adaptent à la largeur réelle de la vignette.
-  La visionneuse conserve ses dimensions liées à la fenêtre.
+  Dans Deck perso et Deck préconstruit, la boîte et sa carte de couverture
+  grandissent en hauteur avec la largeur de la colonne. La carte conserve
+  ses proportions. Les textes et symboles s’adaptent à la largeur réelle de
+  la vignette. La visionneuse conserve ses dimensions liées à la fenêtre.
 
 ### Ajustement — présentation et actions des decks personnels
 
 - Les compositions personnelles reprennent l’en-tête des préconstruits avec le
   nom et les couleurs, ainsi que leurs séparateurs et titres de section avec le
-  nombre de cartes entre parenthèses. Aucun total général n’est affiché.
+  nombre de cartes entre parenthèses. Les deux compositions partagent le même espacement autour des titres de section. Aucun total général n’est affiché.
   **Organiser les sections** affiche le formulaire d’ajout sous la barre
   d’actions et donne accès au renommage et à la suppression des sections.
   En consultation, ces commandes sont masquées. Dans la liste des decks,
@@ -880,14 +893,21 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Dans une composition, Retour à la liste, les deux exports et Dupliquer sont
   désactivés. Les boutons concernés sont désaturés, y compris au survol.
   Les vignettes de decks déplaçables affichent un curseur de prise.
+  Chaque section de la liste, y compris la première, reprend le séparateur
+  et l’espacement des sections d’une composition ouverte.
 - Réutiliser la présentation des filtres Recherche, avec Incolore exclusif,
   correspondance normale ou exacte et tri. La création est hors des filtres.
 - En édition, le glisser-déposer fait défiler la page près des bords.
   Dans la section source, les cartes voisines se décalent pour prévisualiser
   le point de dépôt. Seul le dépôt valide le nouvel ordre.
 - Retirer une carte du deck demande une confirmation avant de modifier la liste.
-- La suppression explicite retire le deck de la liste et conserve ses révisions.
-  Elle vérifie la révision courante et utilise la même protection POST locale.
+- **Supprimer le deck** est disponible entre **Valider** et **Annuler** dans
+  le formulaire **Modifier** du titre. La boîte de confirmation reprend le
+  style de « Fermer l’application ». La confirmation retire le deck de la
+  liste et conserve ses révisions. Elle vérifie la révision courante et
+  utilise la même protection POST locale. La liste ne montre pas de
+  confirmation textuelle après une suppression ou un import réussi.
+  Les erreurs et les lignes d’import à vérifier restent signalées.
 - Après un ajout réussi, conserver le sélecteur ouvert pour permettre les
   ajouts successifs. Afficher la confirmation et les erreurs dans le sélecteur,
   avec Valider en bas.
