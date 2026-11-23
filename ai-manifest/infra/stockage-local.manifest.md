@@ -45,8 +45,9 @@ sur l'ancien dossier `work/ai-card-candidates/` tant qu'il existe.
 - Un miroir organisé des slots prêts est maintenu sous `Images/`, en conservant
   les chemins internes par hash de la base pour les API et les mises à jour.
   Les nouveaux téléchargements et imports synchronisent ce miroir après publication.
-  Au démarrage, un fichier interne absent peut être recréé depuis son image
-  organisée après contrôle de son hash ; `Images/` garde donc le fonds durable.
+  Le serveur réindexe au démarrage les images de sauvegarde identifiables
+  et restaure les fichiers internes manquants après contrôle de leur hash.
+  Voir [la reprise d’Images](../modules/images.manifest.md#reprise-dun-dossier-images).
 
 ## Opérations et invariants
 

@@ -52,7 +52,8 @@ cartes V2 et de son cycle de publication.
   noms français d'édition quand ils sont fournis ; `set_code` filtre une édition
   par son code stable. Chaque item conserve `name`/`set_name` en anglais et ajoute
   `name_fr`/`set_name_fr` (null si indisponible).
-- La recherche peut filtrer les decks dont l'image du commandant est prête ou
+- L'option **Tous les decks** inclut les decks avec et sans couverture.
+- La recherche peut filtrer les decks dont l'image de couverture est prête ou
   absente. Ce filtre s'applique avant pagination ; les decks sans composition
   chargée sont considérés sans image. Le résultat de cette résolution locale est
   mis en cache par version catalogue et empreintes de bases, puis invalidé après
@@ -177,10 +178,17 @@ cartes V2 et de son cycle de publication.
   jetons. Un deck entièrement prêt propose l'export local sur le Bureau à la
   place du bouton de téléchargement. L'export contrôle à nouveau la complétude
   avant de créer un dossier nouveau sans remplacer un export antérieur.
-- La vignette d'un deck provient du premier commandant explicitement listé et
-  résolu, seulement si son image est prête. Une identité inconnue reste un
-  emplacement vide ; aucun choix par nom du deck ou par image d'une autre
-  édition n'est permis.
+- La vignette d'un deck reprend la première carte de la première section non
+  vide affichée dans sa fiche. L’API place Commandants en tête, puis
+  Commandants de présentation et Jetons à la fin, dans cet ordre. Les autres
+  sections et les cartes de chaque section conservent leur ordre.
+  Une composition réduite à la section Jetons, comme Enemy Deck (TMT), utilise
+  sa première carte. La première carte garde cet emplacement
+  même quand son image manque. Une identité inconnue reste un emplacement vide ;
+  aucun choix par nom du deck ou par image d'une autre édition n'est permis.
+- Au retour de la composition, si la couverture renvoyée par la fiche diffère
+  de celle de la liste en mémoire, les résultats sont relus avec les filtres
+  actifs. Cela inclut une composition chargée depuis l'ouverture de la fiche.
 - Le rafraîchissement ciblé de la recherche active réévalue tous les résultats
   correspondant aux filtres, pas seulement la page affichée. Cette lecture ne
   modifie pas l'index ni les compositions en cache ; les identités et images sont

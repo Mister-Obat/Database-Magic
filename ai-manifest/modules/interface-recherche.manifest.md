@@ -1,5 +1,18 @@
 # Module — interface et recherche locales
 
+## Prix indicatifs
+
+Sur l’Accueil, l’interrupteur **Prix Cardmarket** est inactif par défaut et
+mémorise la préférence d’affichage dans le navigateur local. Lorsqu’il est
+actif, l’interface lit les estimations via `GET /api/v2/prices`.
+Dans Recherche et Éditions, le nom de la carte est centré et le prix en
+euros figure sur sa propre ligne centrée. Le deck personnel affiche le prix indicatif unitaire
+à côté de la quantité et le nombre total d’exemplaires dans son en-tête.
+L’estimation multiplie le prix unitaire par la quantité et affiche un
+« + » quand seul un sous-total est disponible. Désactiver la préférence
+masque immédiatement les prix et conserve le nombre de cartes.
+Voir [maintenance](maintenance-publication.manifest.md) pour l’import.
+
 ## Cartes proxy
 
 L’onglet **Proxy** ouvre une vue paginée indépendante, entre **Deck perso** et
@@ -598,7 +611,9 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Les changements de filtres préparent la demande sans modifier les résultats
   affichés ; Effacer les filtres revient à l'état initial sans message sous le
   formulaire. Chaque page de
-  résultats contient au plus 200 decks, avec pagination sur la recherche validée.
+  résultats contient au plus 100 decks, avec pagination sur la recherche validée.
+  Le compteur de l’Accueil et la recherche sans filtre comptent les mêmes
+  types de decks, y compris les listes communautaires.
 - Dans l'interface, le texte de recherche des decks porte uniquement sur le nom
   français ou anglais. Son champ de recherches récentes reprend le composant
   de Recherche avec un historique indépendant. Un terme peut être repris dans

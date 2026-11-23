@@ -55,6 +55,7 @@ SUPPORTED_DECK_TYPES = (
     "Pro Tour Deck", "Sample Deck", "Shandalar Enemy Deck", "Spellslinger Starter Kit",
     "Starter Deck", "Starter Kit", "Theme Deck", "Welcome Deck", "World Championship Deck",
 )
+DECK_LIST_ELIGIBILITY = "(source='community' OR type IN (" + ",".join("?" for _ in SUPPORTED_DECK_TYPES) + "))"
 _WHO_DECK_NAMES_FR = {
     "BlastFromThePast_WHO": "Voyage dans le passé",
     "TimeyWimey_WHO": "Méli-mélo spatio-temporel",
@@ -719,7 +720,7 @@ def deck_facets(db_path: str | Path = DEFAULT_DB) -> dict[str, Any]:
         return {"types": [], "formats": [], "editions": [], "color_indexed": 0, "total": 0}
     with _connect(db_path) as conn:
         _schema(conn)
-        eligible = "source='community' OR type IN (" + ",".join("?" for _ in SUPPORTED_DECK_TYPES) + ")"
+        eligible = DECK_LIST_ELIGIBILITY
         types = [row[0] for row in conn.execute(f"SELECT DISTINCT type FROM decks WHERE type IS NOT NULL AND ({eligible}) ORDER BY type COLLATE NOCASE", SUPPORTED_DECK_TYPES)]
         formats = [row[0] for row in conn.execute(f"SELECT DISTINCT {_format_sql()} AS deck_format FROM decks WHERE {eligible} ORDER BY deck_format", SUPPORTED_DECK_TYPES)]
         total, color_indexed = conn.execute(f"SELECT COUNT(*),COUNT(colors) FROM decks WHERE {eligible}", SUPPORTED_DECK_TYPES).fetchone()
@@ -740,8 +741,7 @@ def list_decks(db_path: str | Path = DEFAULT_DB, *, query: str | None = None, na
         return {"contract_version": CONTRACT_VERSION, "total": 0, "limit": 0, "offset": 0, "items": []}
     limit = max(1, min(MAX_PAGE_SIZE, int(limit)))
     offset = max(0, int(offset))
-    eligible = "(source='community' OR type IN (" + ",".join("?" for _ in SUPPORTED_DECK_TYPES) + "))"
-    clauses, args = [eligible], list(SUPPORTED_DECK_TYPES)
+    clauses, args = [DECK_LIST_ELIGIBILITY], list(SUPPORTED_DECK_TYPES)
     if any(value == "-" for value in (deck_type, deck_format, set_code)):
         clauses.append("0")
     if query and str(query).strip():

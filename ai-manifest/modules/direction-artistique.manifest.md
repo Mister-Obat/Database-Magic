@@ -99,8 +99,10 @@ La fenêtre montre le rectangle intérieur de l’illustration d’une carte
 standard de 531 × 738 pixels, avec une marge de sécurité à l’intérieur du
 cadre. La boîte est légèrement inclinée au repos. Le survol la redresse,
 l’agrandit discrètement puis adapte ses angles au déplacement du pointeur.
-À la sortie du pointeur, la dernière pose complète s’efface en fondu pour
-retrouver l’image de repos. Pendant le glisser-déposer
+À la sortie du pointeur, la boîte revient à sa pose de repos en environ 150 ms
+avec le même rendu 3D et le même panneau. L’image haute résolution prend le
+relais à la pose de repos. Si une autre boîte devient active pendant ce
+retour, la première retrouve sa pose fixe immédiatement. Pendant le glisser-déposer
 dans Deck perso, la boîte saisie suit le pointeur à pleine opacité, avec son
 rendu 3D et une inclinaison de prise. Un emplacement lilas marque l’insertion
 dans la grille et les autres boîtes glissent vers leurs nouvelles positions.
@@ -120,9 +122,11 @@ relief dans les deux cas.
 Chaque texture est chargée à la demande. Si elle est indisponible,
 la boîte utilise le rendu Standard.
 
-Dans les grilles de l’Accueil, des decks personnels et des préconstruits,
-un indicateur circulaire tourne dans l’emprise réservée à chaque boîte pendant
-le chargement.
+Sur l’Accueil, un indicateur circulaire tourne dans l’emprise de chaque boîte.
+Dans les préconstruits et dans Deck perso sans section visible, un indicateur
+centré sous la recherche signale le chargement. Dans Deck perso, chaque
+section visible affiche un seul indicateur en tête de sa grille lorsque des
+boîtes proches de la zone visible se chargent.
 Le volume, le titre, le mana, l’illustration et, le cas échéant, l’édition
 apparaissent ensemble une fois le rendu et les images disponibles prêts.
 En cas d’échec, le rendu de repli ou la fenêtre noire prennent la place de

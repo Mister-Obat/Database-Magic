@@ -9,6 +9,28 @@ from bibliotheque_mtg.v2.catalogue import migrate
 from .test_catalogue_v2 import source_database
 
 
+def test_home_deck_counts_use_preconstructed_search_eligibility(tmp_path, monkeypatch):
+    deck_db = tmp_path / "decks.sqlite"
+    with sqlite3.connect(deck_db) as conn:
+        conn.execute("CREATE TABLE decks(id TEXT, source TEXT, type TEXT, loaded INTEGER, tokens_loaded INTEGER)")
+        conn.executemany("INSERT INTO decks VALUES(?,?,?,?,?)", [
+            ("precon", "mtgjson", "Welcome Deck", 1, 1),
+            ("community", "community", None, 0, 0),
+            ("secret", "mtgjson", "Secret Lair Drop", 1, 1),
+        ])
+    monkeypatch.setattr(local_app, "DECK_DB", deck_db)
+    monkeypatch.setattr(local_app, "_cached_catalogue_stats", lambda _: {})
+
+    def complete(_db, _decks, ids, *, background):
+        assert ids == ["precon"]
+        return 1
+
+    monkeypatch.setattr(local_app, "_cached_complete_decks", complete)
+    assert local_app._stats(tmp_path / "catalogue.sqlite") == {
+        "complete_decks": 1, "loaded_decks": 1, "decks_total": 2,
+    }
+
+
 def test_batch_filter_accepts_current_search_fields_and_other_modes():
     search = {"q": "", "oracle_id": "oracle-1", "printing_id": "", "unique": "1",
               "image_filter": "without", "result_sort": "date"}
@@ -44,7 +66,7 @@ def test_card_usage_exposes_edition_icon_and_deck_colors(monkeypatch, tmp_path):
     assert usage["exact"]["personal_decks"][0]["colors"] == ["B"]
 
 
-def test_deck_cover_follows_display_order_and_colors_ignore_tokens(monkeypatch):
+def test_deck_cover_follows_composition_order_and_colors_ignore_tokens(monkeypatch):
     main = {"name": "First", "image_path": "first.webp", "colors_key": "R"}
     second = {"name": "Second", "image_path": "second.webp", "colors_key": "U"}
     artifact = {"name": "Artifact", "colors_key": ""}
@@ -57,12 +79,24 @@ def test_deck_cover_follows_display_order_and_colors_ignore_tokens(monkeypatch):
 
     assert project()["cover_image_path"] == "first.webp"
     assert project()["composition_colors"] == ["U", "R"]
-    section_data["commander"] = [{"name": "Commander", "colors_key": "R"}]
+    commander = {"name": "Commander", "colors_key": "R", "image_path": "commander.webp"}
+    section_data["commander"] = [commander, {"name": "Partner", "image_path": "partner.webp"}]
+    section_data["display_commander"] = [{"name": "Display commander", "image_path": "display.webp"}]
+    section_data["sideboard"] = [{"name": "Reserve", "image_path": "reserve.webp"}]
+    assert list(project()["sections"]) == ["commander", "mainboard", "sideboard", "display_commander", "tokens"]
+    assert project()["cover_image_path"] == "commander.webp"
+    section_data.pop("display_commander")
+    section_data.pop("sideboard")
+    commander["image_path"] = None
     assert project()["cover_image_path"] is None
     section_data["mainboard"] = [artifact]
     assert project()["composition_colors"] == ["R"]
     section_data["commander"] = []
     assert project()["composition_colors"] == []
+    section_data["mainboard"] = []
+    token["image_path"] = "token.webp"
+    assert project()["cover_image_path"] == "token.webp"
+    assert project()["composition_colors"] is None
 
 
 def test_manual_image_import_is_allowed_during_batch_download(monkeypatch):

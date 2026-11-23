@@ -27,15 +27,18 @@ from pathlib import Path, PurePosixPath
 from PIL import Image, ImageOps
 
 from .v2 import api
+from .organized_images import restore_organized_images
 from .paths import card_candidate_root, catalogue_root
 from .v2.publish import resolve_current
 from .v2.query import connect
 from .maintenance import MaintenanceCancelled, refresh_v2
+from .card_prices import read_card_prices, refresh_card_prices
 from .version_history import VersionHistoryError, activate_version, list_version_candidates
 from .image_download import (download_printing, ensure_catalogue_wal,
                              refresh_printing_deep, preview_printing_candidate,
                              publish_preview_candidate, import_local_image, is_temporary_image_error)
-from .decks import (_SET_NAMES_FR, _resolve_provider_ids, deck_facets, ensure_deck_index, get_deck,
+from .decks import (DECK_LIST_ELIGIBILITY, SUPPORTED_DECK_TYPES, _SET_NAMES_FR, _resolve_provider_ids,
+                    deck_facets, ensure_deck_index, get_deck,
                     index_deck_colors, list_decks, refresh_deck_index,
                     run_deck_composition_index)
 from .deck_media import NON_PLAYABLE_SECTIONS, composition_colors, enrich_deck_media, export_deck_to_desktop
@@ -72,7 +75,7 @@ PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                          "group-delete", "group-move")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 44
+APP_API_REVISION = 49
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -92,6 +95,7 @@ _COLOR_INDEX_LOCK = threading.Lock()
 _MAINTENANCE_TASK: dict | None = None
 _MAINTENANCE_LOCK = threading.RLock()
 _MAINTENANCE_CANCEL = threading.Event()
+_STARTUP_IMAGE_RESTORE = threading.Event()
 _MAINTENANCE_STEPS = (
     ("sources", "Vérification des éditions et cartes"),
     ("catalogue", "Construction du catalogue"),
@@ -100,6 +104,7 @@ _MAINTENANCE_STEPS = (
     ("exports", "Réutilisation des exports"),
     ("publish", "Publication de la nouvelle version"),
     ("decks", "Index des decks préconstruits"),
+    ("prices", "Prix Cardmarket"),
 )
 _IMAGE_CANDIDATES: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _IMAGE_CANDIDATES_LOCK = threading.Lock()
@@ -764,6 +769,8 @@ def _set_maintenance_task(task_id: str, **changes) -> None:
 
 def _maintenance_snapshot() -> dict:
     with _MAINTENANCE_LOCK:
+        if _STARTUP_IMAGE_RESTORE.is_set():
+            return {"status": "restoring_images", "message": "Indexation des images locales…"}
         return dict(_MAINTENANCE_TASK) if _MAINTENANCE_TASK else {"status": "idle"}
 
 
@@ -841,6 +848,8 @@ def _decks_update_message(result: dict) -> str:
 
 
 def _maintenance_busy_reason() -> str | None:
+    if _STARTUP_IMAGE_RESTORE.is_set():
+        return "L’indexation des images locales est en cours."
     with _BATCH_LOCK:
         if _BATCH_TASK and _BATCH_TASK.get("status") in {"queued", "running"}:
             return "Un téléchargement groupé est en cours. Attendez sa fin avant la mise à jour."
@@ -862,7 +871,8 @@ def _batch_is_active() -> bool:
 
 
 def _maintenance_is_active() -> bool:
-    return bool(_MAINTENANCE_TASK and _MAINTENANCE_TASK.get("status") in {"queued", "running", "cancelling"})
+    return _STARTUP_IMAGE_RESTORE.is_set() or bool(
+        _MAINTENANCE_TASK and _MAINTENANCE_TASK.get("status") in {"queued", "running", "cancelling"})
 
 
 def _run_maintenance_task(task_id: str) -> None:
@@ -885,6 +895,7 @@ def _run_maintenance_task(task_id: str) -> None:
             _mark_maintenance_steps(task_id, {_maintenance_stage(task_id)}, "failed", detail=str(exc))
         else:
             result = steps["catalogue"]
+            restored_images = _synchronize_library_images()
             _mark_maintenance_steps(task_id, {"sources"}, "complete", detail="Sources vérifiées")
             if result.get("status") == "no_change":
                 _mark_maintenance_steps(
@@ -894,6 +905,9 @@ def _run_maintenance_task(task_id: str) -> None:
                 _mark_maintenance_steps(
                     task_id, {"catalogue", "images", "manifests", "exports", "publish"},
                     "complete", detail="Terminé")
+            if restored_images:
+                _mark_maintenance_steps(task_id, {"images"}, "complete",
+                                        detail=f"{restored_images} images récupérées depuis le dossier Images.")
         if _MAINTENANCE_CANCEL.is_set():
             raise MaintenanceCancelled("Mise à jour annulée")
         _mark_maintenance_steps(task_id, {"decks"}, "running", progress=0,
@@ -915,6 +929,22 @@ def _run_maintenance_task(task_id: str) -> None:
             messages.append(_catalogue_update_message(steps["catalogue"]))
         if "decks" in steps:
             messages.append(_decks_update_message(steps["decks"]))
+        _maintenance_progress(task_id, "prices", 0, "Vérification du guide Cardmarket…")
+        try:
+            steps["prices"] = refresh_card_prices(
+                OPS_ROOT, resolve_current(CATALOGUE_ROOT), cancel_event=_MAINTENANCE_CANCEL,
+                progress=lambda fraction, detail: _maintenance_progress(
+                    task_id, "prices", fraction, detail))
+        except MaintenanceCancelled:
+            raise
+        except Exception as exc:
+            errors.append({"step": "prices", "error": str(exc) or type(exc).__name__})
+            _mark_maintenance_steps(task_id, {"prices"}, "failed", detail=str(exc))
+        else:
+            count = steps["prices"]["cards"]
+            detail = f"Prix Cardmarket disponibles pour {count} noms de carte."
+            messages.append(detail)
+            _mark_maintenance_steps(task_id, {"prices"}, "complete", detail=detail)
         summary = ("Mise à jour incomplète. " if errors else "") + " ".join(messages)
         _set_maintenance_task(
             task_id, status="failed" if errors else "complete", stage="done",
@@ -983,9 +1013,11 @@ def _deck_with_media(payload: dict, catalog_db: Path) -> dict:
         ready = sum(bool(card.get("image_ready")) for card in entries)
         deck["media_summary"] = {"total": len(entries), "ready": ready,
                                  "missing": len(entries) - ready}
-        sections = deck.get("sections") or {}
-        ordered = ("commander", *(key for key in sections if key not in {"commander", "tokens"}), "tokens")
-        cover = next((sections[key][0] for key in ordered if sections.get(key)), None)
+        section_order = {"commander": 0, "display_commander": 2, "tokens": 3}
+        sections = dict(sorted((deck.get("sections") or {}).items(),
+                               key=lambda section: section_order.get(section[0], 1)))
+        deck["sections"] = sections
+        cover = next((cards[0] for cards in sections.values() if cards), None)
         deck["cover_image_path"] = cover.get("image_path") if cover else None
         deck["composition_colors"] = composition_colors(
             card for key, cards in sections.items() if key not in NON_PLAYABLE_SECTIONS for card in cards)
@@ -1657,9 +1689,11 @@ def _stats(db: Path, *, background_decks: bool = False) -> dict:
     deck_ids = []
     if deck_db.is_file():
         with closing(sqlite3.connect(deck_db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-            decks_total = conn.execute("SELECT COUNT(*) FROM decks").fetchone()[0]
+            decks_total = conn.execute(
+                f"SELECT COUNT(*) FROM decks WHERE {DECK_LIST_ELIGIBILITY}", SUPPORTED_DECK_TYPES).fetchone()[0]
             deck_ids = [row[0] for row in conn.execute(
-                "SELECT id FROM decks WHERE loaded=1 AND tokens_loaded=1")]
+                f"SELECT id FROM decks WHERE {DECK_LIST_ELIGIBILITY} AND loaded=1 AND tokens_loaded=1",
+                SUPPORTED_DECK_TYPES)]
     complete_decks = _cached_complete_decks(db, deck_db, deck_ids, background=background_decks)
     return {**catalogue, "complete_decks": complete_decks,
             "loaded_decks": len(deck_ids), "decks_total": decks_total}
@@ -2080,6 +2114,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 self._json(_stats(self.db, background_decks=params.get("background_decks") == "1"))
             elif route == "/api/v2/maintenance/update":
                 self._json(_maintenance_snapshot())
+            elif route == "/api/v2/prices":
+                self._json({"prices": read_card_prices(OPS_ROOT)})
             elif route == "/api/v2/maintenance/versions":
                 self._json({"versions": list_version_candidates(CATALOGUE_ROOT)})
             elif route == "/api/v2/list-import":
@@ -2935,13 +2971,16 @@ class LibraryHandler(BaseHTTPRequestHandler):
                         return
                     try:
                         result = activate_version(CATALOGUE_ROOT, payload["version_id"])
+                        _synchronize_library_images()
                     except VersionHistoryError as exc:
                         self._json({"error": "invalid_version", "detail": str(exc)}, 400)
                         return
                 self._json(result)
                 return
             if route == "/api/v2/maintenance/update":
-                if payload:
+                # Accept the previous UI's field while an old tab is still open.
+                include_prices = payload.get("include_prices", False)
+                if payload.keys() - {"include_prices"} or not isinstance(include_prices, bool):
                     self._json({"error": "unexpected_request_field"}, 400)
                     return
                 with _MAINTENANCE_LOCK:
@@ -3083,6 +3122,21 @@ class LocalServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
 
+def _synchronize_library_images() -> int:
+    try:
+        return restore_organized_images(CATALOGUE_ROOT)
+    except (OSError, ValueError, sqlite3.Error):
+        logging.warning("La synchronisation des images locales a échoué.", exc_info=True)
+        return 0
+
+
+def _restore_startup_images() -> None:
+    try:
+        _synchronize_library_images()
+    finally:
+        _STARTUP_IMAGE_RESTORE.clear()
+
+
 def open_existing_or_start(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, open_browser: bool = True):
     url = f"http://{host}:{port}/"
     try:
@@ -3098,6 +3152,10 @@ def open_existing_or_start(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *
         pass
     ensure_catalogue_wal(resolve_current(CATALOGUE_ROOT)["database"])
     server = LocalServer((host, port), LibraryHandler)
+    _STARTUP_IMAGE_RESTORE.set()
+    server.image_restore_thread = threading.Thread(
+        target=_restore_startup_images, name="organized-image-restore", daemon=True)
+    server.image_restore_thread.start()
     server.app_url = url
     if open_browser:
         threading.Timer(0.5, webbrowser.open, args=(url,)).start()

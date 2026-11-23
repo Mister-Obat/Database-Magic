@@ -75,6 +75,10 @@ version précédente reçoivent la date de construction.
 6. Le nom fournisseur de l'illustrateur (`artist`) est indexé dans la recherche
    des nouvelles publications. Le catalogue actif hérité dispose d'un index
    FTS `artist_search` local construit depuis `raw_json`, sans téléchargement.
+   Lors d’une fusion depuis une version à neuf colonnes, l’index FTS de sa
+   copie de travail adopte le schéma du delta. Les éditions inchangées
+   conservent leurs champs indexés et retrouvent les illustrateurs depuis
+   `raw_json`. L’index séparé devient alors redondant.
 
 ## Invariants
 

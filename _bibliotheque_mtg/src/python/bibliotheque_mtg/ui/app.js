@@ -9,7 +9,7 @@ const RECENT_DECK_SEARCHES_KEY = "database-magic-recent-deck-searches-v1";
 let initialRouteRestored = false;
 let searchDraftTouched = false;
 const PAGE_SIZE = 50;
-const DECK_PAGE_SIZE = 200;
+const DECK_PAGE_SIZE = 100;
 const imageTaskHandlers = new Map();
 const notificationButton = document.getElementById("notification-button");
 const aiBatchMode = $("ai-batch-mode");
@@ -1054,7 +1054,8 @@ function showError(container, message) { container.replaceChildren(node("p", "em
 function imageNode(slot, className = "card-preview") {
   if (!slot || slot.status !== "ready" || !slot.relative_path) return node("div", "missing-image", slot?.status === "pending_review" ? "À vérifier" : "Image absente");
   const img = node("img", className);
-  img.alt = `Image ${slot.selected_language === "fr" ? "française" : "anglaise"} de la carte`;
+  const language = { fr: " française", en: " anglaise", ja: " japonaise", ph: " phyrexiane" }[slot.selected_language] || "";
+  img.alt = `Image${language} de la carte`;
   img.loading = "lazy";
   img.src = `/assets?${params({ path: slot.relative_path })}`;
   img.onerror = () => { const missing = node("div", "missing-image", "Image indisponible"); img.replaceWith(missing); };
@@ -1101,7 +1102,7 @@ function renderItems(container, items, emptyText = "Aucun résultat.") {
   if (!items.length) { container.append(node("p", "empty-state", emptyText)); return; }
   for (const item of items) container.append(cardTile(item));
 }
-function editionTile(item) {
+function editionTile(item, withPrice = false) {
     const tile = node("button", "deck-card-tile deck-card-open edition-card-tile");
     tile.type = "button";
     tile.dataset.providerId = item.provider_card_id;
@@ -1118,17 +1119,99 @@ function editionTile(item) {
       art.loading = "lazy";
       art.onerror = () => art.replaceWith(node("div", "deck-card-image deck-card-image-empty", "Image indisponible"));
     }
-    tile.append(art, node("span", "deck-card-name", item.printed_name || item.name));
+    const name = node("span", "deck-card-name", item.printed_name || item.name);
+    tile.append(art);
+    if (withPrice) {
+      const details = node("span", "catalogue-card-caption");
+      details.append(name, cardPriceLabel(item.name));
+      tile.append(details);
+    } else tile.append(name);
     registerAIBatchTarget(tile, art, item);
     return tile;
 }
 function renderEditionItems(container, items, emptyText = "Aucune carte dans cette édition.") {
   container.replaceChildren();
   if (!items.length) { container.append(node("p", "empty-state", emptyText)); return; }
-  for (const item of items) container.append(editionTile(item));
+  for (const item of items) container.append(editionTile(item, true));
 }
 
-const HOME_STATS_KEY = "database-magic-home-stats-v1";
+const CARD_PRICES_KEY = "database-magic-card-prices-v1";
+const eurFormat = new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" });
+const pricesToggle = $("card-prices-toggle");
+let cardPrices = {};
+let priceRequest = 0;
+
+function cardPrice(name) {
+  return Object.hasOwn(cardPrices, name) ? cardPrices[name] : null;
+}
+function formatPrice(cents) {
+  return cents === null ? "—" : eurFormat.format(cents / 100);
+}
+function showCardPrice(label) {
+  label.hidden = !pricesToggle.checked;
+  label.textContent = pricesToggle.checked ? formatPrice(cardPrice(label.dataset.cardPrice)) : "";
+}
+function cardPriceLabel(name) {
+  const label = node("span", "card-price");
+  label.dataset.cardPrice = name || "";
+  label.title = "Prix indicatif par exemplaire";
+  showCardPrice(label);
+  return label;
+}
+function renderPersonalTotals(summary = $("personal-deck-totals"), deck = personalState.deck) {
+  if (!summary || !deck) return;
+  const cards = deck.sections.flatMap(section => section.cards);
+  const count = deckSectionCount(cards);
+  summary.textContent = `${formatNumber(count)} ${count === 1 ? "carte" : "cartes"}`;
+  if (pricesToggle.checked) {
+    let total = 0;
+    let unpriced = 0;
+    for (const card of cards) {
+      const cents = cardPrice(card.name);
+      if (cents === null) unpriced += Number(card.count);
+      else total += cents * Number(card.count);
+    }
+    const estimate = count && unpriced === count ? "—" : formatPrice(total) + (unpriced ? "+" : "");
+    summary.append(` / ${estimate}`);
+    summary.title = unpriced ? `Estimation partielle · ${formatNumber(unpriced)} sans prix` : "Estimation du deck";
+  } else {
+    summary.removeAttribute("title");
+  }
+}
+async function refreshCardPrices() {
+  const request = ++priceRequest;
+  const status = $("card-prices-status");
+  const redraw = () => {
+    document.querySelectorAll("[data-card-price]").forEach(showCardPrice);
+    renderPersonalTotals();
+  };
+  status.hidden = !pricesToggle.checked;
+  if (!pricesToggle.checked) {
+    cardPrices = {};
+    status.textContent = "";
+    redraw();
+    return;
+  }
+  redraw();
+  status.textContent = "Chargement des prix…";
+  try {
+    const result = await getJSON("/api/v2/prices");
+    if (request !== priceRequest) return;
+    cardPrices = result.prices;
+    redraw();
+    status.textContent = Object.keys(cardPrices).length ? "" : "Les prix seront importés à la prochaine mise à jour.";
+    status.hidden = !status.textContent;
+  } catch (error) {
+    if (request === priceRequest) status.textContent = `Prix indisponibles · ${error.message}`;
+  }
+}
+pricesToggle.addEventListener("change", () => {
+  try { localStorage.setItem(CARD_PRICES_KEY, String(pricesToggle.checked)); }
+  catch { /* Storage may be unavailable. */ }
+  void refreshCardPrices();
+});
+
+const HOME_STATS_KEY = "database-magic-home-stats-v2";
 const HOME_COUNTER_IDS = ["stat-cards", "stat-editions", "stat-decks"];
 let homeStatsRequest, homeActivityRequest, homeActivitySnapshot, homeDeckCounter;
 function renderHomeCounters(counters) {
@@ -1240,6 +1323,12 @@ function renderMaintenanceSteps(steps) {
 function renderMaintenanceTask(task) {
   const button = $("update-library"), status = $("update-status");
   renderMaintenanceSteps(task.steps);
+  if (task.status === "restoring_images") {
+    button.disabled = true;
+    status.className = "muted maintenance-status";
+    setText(status, task.message);
+    return;
+  }
   const running = ["queued", "running", "cancelling"].includes(task.status);
   button.disabled = task.status === "cancelling";
   $("update-library-label").textContent = task.status === "cancelling" ? "Annulation en cours…" : running ? "Annuler la mise à jour"
@@ -1258,7 +1347,7 @@ function renderMaintenanceTask(task) {
   const details = [];
   if (task.message) details.push(task.message);
   for (const error of task.errors || []) {
-    const label = error.step === "catalogue" ? "catalogue" : error.step === "decks" ? "decks" : "mise à jour";
+    const label = error.step === "catalogue" ? "catalogue" : error.step === "decks" ? "decks" : error.step === "prices" ? "Cardmarket" : "mise à jour";
     details.push(`Échec ${label} : ${error.error}`);
   }
   if (Number(task.seconds) > 0) details.push(`Durée : ${formatNumber(Math.round(task.seconds))} s.`);
@@ -1269,7 +1358,7 @@ async function loadMaintenanceStatus() {
   try {
     const task = await getJSON("/api/v2/maintenance/update");
     renderMaintenanceTask(task);
-    if (["queued", "running", "cancelling"].includes(task.status)) pollMaintenanceTask();
+    if (["queued", "running", "cancelling", "restoring_images"].includes(task.status)) pollMaintenanceTask();
   } catch (error) {
     $("update-status").className = "maintenance-status error-state";
     setText($("update-status"), `État de la mise à jour indisponible : ${error.message}`);
@@ -1322,7 +1411,7 @@ function pollMaintenanceTask() {
     try {
       const task = await getJSON("/api/v2/maintenance/update");
       renderMaintenanceTask(task);
-      if (["queued", "running", "cancelling"].includes(task.status)) { pollMaintenanceTask(); return; }
+      if (["queued", "running", "cancelling", "restoring_images"].includes(task.status)) { pollMaintenanceTask(); return; }
       await refreshAfterMaintenanceUpdate();
     } catch (error) {
       setText($("update-status"), `Suivi indisponible : ${error.message}. Nouvelle tentative…`);
@@ -1334,7 +1423,7 @@ async function refreshAfterMaintenanceUpdate() {
   invalidatePageCache();
   state.deckFacetsLoaded = false;
   editionsPromise = null;
-  await Promise.all([loadHome(), ensureEditions()]);
+  await Promise.all([loadHome(), ensureEditions(), refreshCardPrices()]);
   if (state.view === "editions") await renderEditionPage();
   if (state.view === "decks") { await loadDeckFacets(true); await renderDeckPage(); }
   if (state.view === "recherche" && state.searchItems.length) await refreshSearchImages();
@@ -3133,7 +3222,8 @@ async function renderDeckPage(background = false) {
   const container = $("deck-list");
   if (!background) {
     pageControls.get("deck-pager")(0, 1);
-    showDeckGridSkeleton(container, 9, true);
+    container.setAttribute("aria-busy", "true");
+    container.replaceChildren(pageLoading("Chargement des decks…"));
   }
   try {
     const data = await fetchCataloguePage("/api/v2/decks", query, { signal: controller.signal });
@@ -3142,6 +3232,7 @@ async function renderDeckPage(background = false) {
     updateBatchButtons();
     container.replaceChildren();
     if (!data.items.length) container.append(node("p", "empty-state", "Aucun deck préconstruit trouvé."));
+    else container.append(deckGridLoading());
     for (const deck of data.items) {
       const name = deckNameLabel(deck);
       const edition = node("span", "deck-tile-edition");
@@ -3155,8 +3246,11 @@ async function renderDeckPage(background = false) {
         edition.append(icon);
       }
       edition.append(deck.set_name_fr || deck.set_name || deck.set_code || "Édition inconnue");
-      container.append(deckCoverTile(name, deck.composition_colors ?? deck.colors, { image_path: deck.cover_image_path },
-        () => void openDeck(deck.id), edition));
+      const tile = deckCoverTile(name, deck.composition_colors ?? deck.colors, { image_path: deck.cover_image_path },
+        () => void openDeck(deck.id), edition);
+      tile.dataset.preconstructedDeckId = deck.id;
+      container.append(tile);
+      deckLoadingObserver.observe(tile);
     }
     const pages = Math.max(1, Math.ceil(data.total / DECK_PAGE_SIZE));
     pageControls.get("deck-pager")(state.deckPage, pages, `${formatNumber(data.total)} decks`);
@@ -3250,6 +3344,12 @@ function scrollToDeckList() {
 }
 function closeDeck(urlMode = "push") {
   const wasOpen = Boolean(state.openDeckId);
+  const deck = state.selectedDeck;
+  const query = state.deckExecuted && deck ? deckPageQuery() : null;
+  const cached = query && cataloguePageCaches.get("/api/v2/decks")?.pages.get(query.offset);
+  const previous = cached?.items.find(item => item.id === deck.id);
+  const refresh = query && (!previous ||
+    (previous.cover_image_path || null) !== (deck.cover_image_path || null));
   ++state.deckDetailRequest;
   state.openDeckId = null;
   state.selectedDeck = null;
@@ -3263,7 +3363,19 @@ function closeDeck(urlMode = "push") {
     if (wasOpen) {
       state.deckListOpener?.focus({ preventScroll: true });
       scrollToDeckList();
-      cataloguePageCaches.get("/api/v2/decks")?.resume?.();
+      if (!refresh) cataloguePageCaches.get("/api/v2/decks")?.resume?.();
+    }
+  }
+  if (refresh) {
+    if (state.view === "decks" && state.deckListKey === params(query)) {
+      const opener = state.deckListOpener;
+      void renderDeckPage(true).then(() => {
+        if (!opener || document.activeElement !== document.body || state.openDeckId || state.view !== "decks") return;
+        $("deck-list").querySelector(`[data-preconstructed-deck-id="${CSS.escape(deck.id)}"]`)?.focus({ preventScroll: true });
+      });
+    } else {
+      invalidatePageCache("/api/v2/decks");
+      state.deckListKey = null;
     }
   }
 }
@@ -3315,8 +3427,7 @@ async function openDeck(deckId, urlMode = "push") {
     actions.replaceChildren($("back-to-deck-list"), start, copyPersonal);
     const progress = node("div", "deck-progress"); progress.id = "deck-progress"; target.append(progress);
     const labels = {commander:"Commandants", mainboard:"Deck principal", sideboard:"Réserve", display_commander:"Commandants de présentation", planar_deck:"Planechase", scheme_deck:"Machinations", tokens:"Jetons"};
-    const orderedSections = sections.slice().sort(([a], [b]) => a === "commander" ? -1 : b === "commander" ? 1 : a === "tokens" ? 1 : b === "tokens" ? -1 : 0);
-    for (const [key, cards] of orderedSections) {
+    for (const [key, cards] of sections) {
       if (!cards.length) continue;
       const section = node("section", "deck-section");
       const heading = node("div", "deck-section-heading");
@@ -4302,6 +4413,7 @@ function personalDraft() {
         personalStore(`personal-draft-${personalState.deck.id}`, personalState.deck);
 }
 function personalChanged() {
+    renderPersonalTotals();
     personalState.change++;
     personalState.error = null;
     personalDraft();
@@ -4455,13 +4567,26 @@ function personalColorField(values, onChange) {
         colors => onChange(colors.filter(color => color !== "C"))));
     return field;
 }
-function showDeckGridSkeleton(grid, count, withEdition = false) {
+const deckLoadingObserver = new IntersectionObserver(entries => {
+    for (const { target, isIntersecting } of entries) {
+        if (!target.isConnected || !target.classList.contains("deck-tile-loading")) {
+            deckLoadingObserver.unobserve(target);
+            continue;
+        }
+        target.classList.toggle("deck-tile-near", isIntersecting);
+    }
+}, { rootMargin: "160px" });
+function deckGridLoading() {
+    const waiting = pageLoading("Chargement des illustrations…");
+    waiting.classList.add("deck-grid-loading");
+    return waiting;
+}
+function showDeckGridSkeleton(grid, count) {
     grid.setAttribute("aria-busy", "true");
     grid.replaceChildren(...Array.from({ length: count }, () => {
         const tile = node("span", "personal-deck-tile deck-tile-loading");
         tile.setAttribute("aria-hidden", "true");
         tile.append(node("span", "deck-box"));
-        if (withEdition) tile.append(node("span", "deck-tile-edition", "\u00a0"));
         return tile;
     }));
 }
@@ -4508,7 +4633,8 @@ function deckCoverTile(name, colors, cover, open, edition = null, design = "stan
     void Promise.all([mountDeckBox(tile, box, panel, frame, title, mana, design, options), ...imagesReady]).then(() => {
         tile.title = tile.getAttribute("aria-label");
         tile.removeAttribute("aria-busy");
-        tile.classList.remove("deck-tile-loading");
+        tile.classList.remove("deck-tile-loading", "deck-tile-near");
+        deckLoadingObserver.unobserve(tile);
     });
     return tile;
 }
@@ -4728,7 +4854,9 @@ function renderPersonalList() {
     function renderGrid(groupId, items) {
         const grid = node("div", "personal-deck-grid");
         grid.dataset.groupId = groupId || "";
+        if (items.length) grid.append(deckGridLoading());
         grid.append(...items.map(renderDeck));
+        for (const tile of grid.querySelectorAll(".deck-tile-loading")) deckLoadingObserver.observe(tile);
         return grid;
     }
     function renderDeck(deck) {
@@ -4994,11 +5122,7 @@ function renderPersonalList() {
     }
     async function load(quiet = false, forceRender = false) {
         const request = ++latestLoad;
-        if (!quiet) {
-            const grid = node("div", "personal-deck-grid");
-            showDeckGridSkeleton(grid, 9);
-            list.replaceChildren(grid);
-        }
+        if (!quiet && !decks) list.replaceChildren(pageLoading("Chargement des decks…"));
         try {
             const response = await getJSON("/api/v2/personal-decks", { summary: 1 });
             if (request !== latestLoad || !list.isConnected) return;
@@ -5357,6 +5481,12 @@ function updatePersonalHeading(deck = null, editButton = null) {
         deck ? deck.composition_colors ?? deck.colors ?? [] : null,
         "personal-title",
     );
+    if (deck) {
+        const summary = node("span", "personal-deck-totals");
+        summary.id = "personal-deck-totals";
+        renderPersonalTotals(summary, deck);
+        heading.append(summary);
+    }
     if (editButton) heading.append(editButton);
     $("personal-heading-content").replaceChildren(eyebrow, heading);
 }
@@ -5663,7 +5793,9 @@ function renderPersonalEditor() {
                 }
             });
             countLabel.append(count);
-            tile.append(countLabel);
+            const details = node("div", "card-price-line");
+            details.append(countLabel, cardPriceLabel(card.name));
+            tile.append(details);
             const removeCard = personalButton("", () => {
                 if (!window.confirm(`Retirer « ${cardName} » de « ${section.name} » ? Tous les exemplaires de cette ligne seront retirés.`)) return;
                 section.cards.splice(section.cards.findIndex(c => c.id === card.id), 1);
@@ -5893,5 +6025,8 @@ window.addEventListener("beforeunload", event => {
         event.returnValue = "";
     }
 });
+try { pricesToggle.checked = localStorage.getItem(CARD_PRICES_KEY) === "true"; }
+catch { /* Storage may be unavailable. */ }
+void refreshCardPrices();
 void ensureEditions();
 void restoreRoute();

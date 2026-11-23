@@ -106,7 +106,7 @@ body > .custom-select-menu {
   box-shadow: inset 0 1px #e0ceff2b, 0 9px 28px #06050e55;
 }
 .catalogue-view :is(.search-form, .maintenance-panel) :is(input, select, textarea, .custom-select-button),
-.catalogue-view :is(.deck-card-open, .search-header-button) {
+.catalogue-view :is(.deck-card-open, .list-import-unmatched, .search-header-button) {
   background-color: #14121e;
   border-color: var(--line);
 }
@@ -619,13 +619,11 @@ select[hidden]{display:none!important}
 .list-import-input{display:grid;gap:.5rem;max-width:60rem;}
 .list-import-input textarea{width:100%;min-height:9rem;padding:.75rem;border:1px solid var(--line);border-radius:8px;background:#101611;color:var(--ink);font:inherit;resize:vertical;}
 .list-import-input textarea:focus { outline: 2px solid var(--green); outline-offset: -2px; }
-.list-import-panel button{justify-self:start;}
 .list-import-actions{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;}
 #list-import-results{align-items:start;}
 #list-import-results .edition-card-tile{height:100%;}
 .list-import-result-label{font-size:.72rem;color:var(--muted);line-height:1.3;}
 .list-import-unmatched{cursor:default;}
-.list-import-unmatched .deck-card-image-empty{background:#fff;color:#555;}
 .maintenance-panel .muted{margin:.35rem 0 0;line-height:1.5}
 .maintenance-status{grid-column:1/-1;margin:0}
 #update-status:empty{display:none}
@@ -638,6 +636,23 @@ select[hidden]{display:none!important}
 .maintenance-step .muted{font-size:.85rem;margin:.35rem 0 0}
 .maintenance-step-failed .maintenance-step-heading{color:var(--red)}
 .version-history{grid-column:1/-1;display:flex;align-items:center;flex-wrap:wrap;gap:.75rem}
+.card-price-option{display:inline-flex;align-items:center;min-height:2.75rem;gap:.5rem;cursor:pointer}
+.card-price-option input{position:absolute;width:1px;height:1px;margin:0;padding:0;opacity:0}
+.card-price-switch{display:flex;align-items:center;width:2.25rem;height:1.25rem;padding:.15rem;border:1px solid var(--line);border-radius:1rem;background:#14121e}
+.card-price-switch::before{content:"";width:.85rem;height:.85rem;border-radius:50%;background:var(--muted)}
+.card-price-option input:checked + .card-price-switch{background:#533785;border-color:#a287c4}
+.card-price-option input:checked + .card-price-switch::before{transform:translateX(.95rem);background:#fffaff}
+.card-price-option input:focus-visible + .card-price-switch{outline:2px solid var(--green);outline-offset:2px}
+@media(prefers-reduced-motion:no-preference){.card-price-switch::before{transition:transform 130ms ease}}
+.card-price-switch-state{min-width:3.2rem}
+.card-price-switch-state::after{content:"Inactif"}
+.card-price-option input:checked ~ .card-price-switch-state::after{content:"Actif"}
+.catalogue-card-caption{display:grid;gap:.2rem;justify-items:center;width:100%;text-align:center}
+.catalogue-card-caption .card-price{margin-inline-start:0}
+.card-price-line{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:.15rem .45rem;width:100%}
+.card-price{margin-inline-start:auto;white-space:nowrap;font-size:.85rem;color:var(--green2);font-variant-numeric:tabular-nums}
+.personal-deck-totals{margin-inline-start:.35rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.personal-quantity{flex:1}
 .version-history-list{width:100%;display:grid;gap:.6rem}
 .version-history-list[hidden]{display:none}
 .version-history-row{width:100%;display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.7rem;border:1px solid var(--line);border-radius:8px}
@@ -664,7 +679,7 @@ select[hidden]{display:none!important}
 .shutdown-actions .primary-button:hover{background-color:#65479a;border-color:#a287c4}
 .shutdown-actions button:focus-visible{outline:2px solid #bfabff;outline-offset:2px}
 @media (prefers-reduced-motion:no-preference){.shutdown-actions button{transition:color 150ms ease,border-color 150ms ease,background-color 150ms ease}}
-@media(max-width:760px){.maintenance-panel{grid-template-columns:minmax(0,1fr)}.maintenance-panel button{justify-self:start}}
+@media(max-width:760px){.maintenance-panel{grid-template-columns:minmax(0,1fr)}.maintenance-panel > button{justify-self:start}}
 
 /* Responsive image-generation wizard: keep reference choices visible beside the preview. */
 .image-choice-dialog #image-choice-content{height:100%;min-height:0;overflow:auto;padding:1.7rem .2rem .2rem}
@@ -1437,15 +1452,6 @@ img.edition-symbol{object-fit:contain;filter:invert(.85)}
   width:100%;
   height:100%;
 }
-.deck-box-return {
-  position:absolute;
-  inset:0;
-}
-@media (prefers-reduced-motion:reduce) {
-  .deck-box-return {
-    display:none;
-  }
-}
 .deck-box-fallback {
   width:83.177%;
   height:88.105%;
@@ -1637,6 +1643,10 @@ body.personal-deck-drag-active * {
 #view-editions:not(:has(#edition-cards > *)) .catalogue-page-footer,
 #deck-browser:not(:has(#deck-list > *)) .catalogue-page-footer{display:none}
 .page-loading-state{grid-column:1/-1;justify-content:center;min-height:8rem}
+:is(#deck-list, .personal-list-groups) .personal-deck-tile.deck-tile-loading::before{display:none}
+.deck-grid-loading{display:none;min-height:2rem;margin:0}
+.personal-deck-grid:has(.deck-tile-loading.deck-tile-near) > .deck-grid-loading{display:flex}
+.personal-list-group > .personal-deck-grid > .deck-grid-loading{justify-content:flex-start}
 #proxy-folder-status:empty{display:none}
 .personal-drop-target {
   outline:2px dashed #b9a2ff;

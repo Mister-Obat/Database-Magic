@@ -46,6 +46,21 @@ Les anciens algorithmes de `images.py` servent au
 [parcours historique](historique.manifest.md) ; le bouton de l’application V2
 appelle `image_download.py`.
 
+## Reprise d’un dossier Images
+
+Le serveur indexe au démarrage, en arrière-plan, les WebP sauvegardés sous
+`_bibliotheque_mtg/Images/`. Il relance ce contrôle lors d’une mise à jour
+réussie ou d’une activation de version. Les opérations d’écriture d’images
+attendent la fin de la reprise. Le code d’édition, le numéro de collection,
+la face et le suffixe de l’identité de l’impression doivent correspondre de
+manière unique. Les libellés d’édition et de carte peuvent avoir changé.
+Une image reconnue doit être un WebP fixe et décodable de 531 × 738. Le
+fichier reste dans le dossier sauvegardé. La reprise indexe les slots
+manquants avec une provenance `organized_backup` et une langue indéterminée
+(`und`). Pour un slot déjà prêt, un fichier d’asset manquant peut être
+récupéré uniquement si son empreinte concorde avec celle déjà inscrite.
+Les autres slots et les fichiers de la sauvegarde restent inchangés.
+
 ## Interface et sélection
 
 1. `download_printing(provider_id, catalogue_root, ledger_path, face_indexes, repair, ...)`

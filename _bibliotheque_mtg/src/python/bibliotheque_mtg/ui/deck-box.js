@@ -37,7 +37,7 @@ const deckBoxFinishes = new Map();
 let deckBoxMesh;
 let deckBoxModel;
 let deckBoxTitleMeasure;
-let releaseActiveDeckBox;
+let resetActiveDeckBox;
 let deckBoxMotion;
 
 function fitDeckBoxTitle(name) {
@@ -449,14 +449,14 @@ async function mountDeckBox(tile, box, panel, artwork, title, mana, design = "st
         if (!deckBoxMotion) {
             deckBoxMotion = matchMedia("(any-hover: hover) and (prefers-reduced-motion: no-preference)");
             deckBoxMotion.addEventListener("change", () => {
-                if (!deckBoxMotion.matches) releaseActiveDeckBox?.();
+                if (!deckBoxMotion.matches) resetActiveDeckBox?.();
             });
         }
         let target = deckBoxRest;
         let frame = null;
         let canvas = null;
         let context = null;
-        let leaving = null;
+        let returning = null;
 
         function paint() {
             positionPanel();
@@ -472,40 +472,49 @@ async function mountDeckBox(tile, box, panel, artwork, title, mana, design = "st
             }
             if (context) renderer.draw(context, pose);
         }
-        function release() {
-            if (releaseActiveDeckBox === release) releaseActiveDeckBox = null;
+        function reset() {
+            if (resetActiveDeckBox === reset) resetActiveDeckBox = null;
             if (frame !== null) cancelAnimationFrame(frame);
             frame = null;
-            if (!canvas) return;
-            if (deckBoxMotion.matches && tile.isConnected) {
-                // Keep the body and its printed panel aligned while fading to the cached rest pose.
-                const layer = document.createElement("span");
-                layer.className = "deck-box-return";
-                layer.setAttribute("aria-hidden", "true");
-                layer.append(canvas, panel.cloneNode(true));
-                box.append(layer);
-                leaving = layer;
-                layer.animate([{ opacity: 1 }, { opacity: 0 }], {
-                    duration: 150,
-                    easing: "ease-out",
-                    fill: "forwards",
-                }).onfinish = () => {
-                    layer.remove();
-                    if (leaving === layer) leaving = null;
-                };
-            } else {
-                canvas.remove();
-            }
+            returning = null;
+            canvas?.remove();
             canvas = null;
             context = null;
-            still.hidden = false;
             pose = deckBoxRest;
             positionPanel();
+            still.hidden = false;
         }
-        function tick() {
+        function returnToRest() {
+            if (resetActiveDeckBox !== reset || returning) return;
+            if (!canvas || !tile.isConnected || !deckBoxMotion.matches) {
+                reset();
+                return;
+            }
+            returning = { from: pose, start: performance.now() };
+            if (frame === null) frame = requestAnimationFrame(tick);
+        }
+        function tick(now) {
             frame = null;
             if (!tile.isConnected) {
-                release();
+                reset();
+                return;
+            }
+            if (returning) {
+                if (pose === deckBoxRest) {
+                    reset();
+                    return;
+                }
+                const elapsed = Math.max(0, now - returning.start);
+                const { from } = returning;
+                const distance = Math.max(0, 1 - elapsed / 150) ** 3;
+                // Paint the exact resting geometry before replacing the live canvas next frame.
+                pose = distance === 0 ? deckBoxRest : {
+                    pitch: deckBoxRest.pitch + (from.pitch - deckBoxRest.pitch) * distance,
+                    yaw: deckBoxRest.yaw + (from.yaw - deckBoxRest.yaw) * distance,
+                    scale: deckBoxRest.scale + (from.scale - deckBoxRest.scale) * distance,
+                };
+                paint();
+                frame = requestAnimationFrame(tick);
                 return;
             }
             const close = Math.abs(target.pitch - pose.pitch) < .08
@@ -520,12 +529,11 @@ async function mountDeckBox(tile, box, panel, artwork, title, mana, design = "st
             if (!close) frame = requestAnimationFrame(tick);
         }
         function aim(next) {
-            if (releaseActiveDeckBox !== release) {
-                releaseActiveDeckBox?.();
-                releaseActiveDeckBox = release;
+            if (resetActiveDeckBox !== reset) {
+                resetActiveDeckBox?.();
+                resetActiveDeckBox = reset;
             }
-            leaving?.remove();
-            leaving = null;
+            returning = null;
             target = next;
             if (frame === null) frame = requestAnimationFrame(tick);
         }
@@ -541,13 +549,13 @@ async function mountDeckBox(tile, box, panel, artwork, title, mana, design = "st
         for (const event of ["pointerenter", "pointermove"]) tile.addEventListener(event, hover, { passive: true });
         for (const event of ["pointerleave", "pointercancel"]) {
             tile.addEventListener(event, () => {
-                if (!tile.classList.contains("personal-deck-dragging")) release();
+                if (!tile.classList.contains("personal-deck-dragging")) returnToRest();
             });
         }
         tile.addEventListener("deckboxlift", () => {
             if (deckBoxMotion.matches) aim({ pitch: -9, yaw: -17, scale: 1.045 });
         });
-        tile.addEventListener("deckboxrelease", release);
+        tile.addEventListener("deckboxrelease", returnToRest);
     } catch (error) {
         console.warn("Modèle de deckbox indisponible.", error);
         return prepareDeckBoxFallback(box);

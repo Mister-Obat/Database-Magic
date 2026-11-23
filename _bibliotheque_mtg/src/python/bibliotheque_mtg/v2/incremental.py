@@ -11,7 +11,7 @@ from datetime import date
 from pathlib import Path
 
 from ..sources import _load_config, build_catalogue_db
-from .build_catalogue import build_catalogue
+from .build_catalogue import _search_field, build_catalogue
 
 
 def _link_or_copy(source: str, target: str) -> str:
@@ -35,6 +35,32 @@ def _copy_active_database(source: Path, target: Path, progress=None) -> None:
             old.backup(new, pages=2048, progress=copied, sleep=0.05)
 
 
+def _upgrade_source_search(conn: sqlite3.Connection, progress=None) -> None:
+    old_columns = [row[1] for row in conn.execute("PRAGMA main.table_info(source_search)")]
+    if "artist" in old_columns:
+        return
+    if progress:
+        progress(0.55, "Mise à niveau de l’index de recherche…")
+
+    # The delta was just built with the current schema. Reuse its FTS definition
+    # and preserve the indexed text of editions outside this update.
+    definition = conn.execute(
+        "SELECT sql FROM delta.sqlite_schema WHERE name='source_search'").fetchone()[0]
+    conn.execute("ALTER TABLE main.source_search RENAME TO previous_source_search")
+    conn.execute(definition)
+    conn.create_function("search_artist", 1, lambda raw: _search_field(json.loads(raw), "artist"))
+    conn.execute(
+        """INSERT INTO main.source_search(
+               provider_card_id,set_code,lang,name,printed_name,type_line,
+               printed_type_line,oracle_text,printed_text,artist)
+           SELECT f.provider_card_id,f.set_code,f.lang,f.name,f.printed_name,f.type_line,
+                  f.printed_type_line,f.oracle_text,f.printed_text,search_artist(s.raw_json)
+           FROM main.previous_source_search f
+           JOIN main.source_records s USING(provider_card_id)""")
+    conn.execute("DROP TABLE main.previous_source_search")
+    conn.execute("DROP TABLE IF EXISTS main.artist_search")
+
+
 def _merge_edition_rows(target: Path, delta: Path, set_ids: list[str], source_sha: str,
                         source_as_of: str, progress=None) -> None:
     conn = sqlite3.connect(target)
@@ -48,6 +74,7 @@ def _merge_edition_rows(target: Path, delta: Path, set_ids: list[str], source_sh
         conn.executemany("INSERT INTO changed_sets VALUES(?)", [(item,) for item in set_ids])
         conn.execute("CREATE TEMP TABLE old_ready AS SELECT s.* FROM image_slots s JOIN printings p USING(printing_id) "
                      "WHERE p.set_id IN (SELECT set_id FROM changed_sets) AND s.status='ready'")
+        conn.execute("CREATE UNIQUE INDEX temp.old_ready_slot ON old_ready(printing_id,face_index)")
         conn.execute("CREATE TEMP TABLE touched_oracles(oracle_id TEXT PRIMARY KEY)")
         conn.execute("INSERT OR IGNORE INTO touched_oracles SELECT oracle_id FROM printings "
                      "WHERE set_id IN (SELECT set_id FROM changed_sets) AND oracle_id IS NOT NULL")
@@ -66,7 +93,14 @@ def _merge_edition_rows(target: Path, delta: Path, set_ids: list[str], source_sh
                       "card_faces", "image_slots", "identity_exceptions"):
             clause = "OR IGNORE " if table == "oracle_cards" else ""
             conn.execute(f"INSERT {clause}INTO {table} SELECT * FROM delta.{table}")
-        conn.execute("INSERT INTO source_search SELECT * FROM delta.source_search")
+        _upgrade_source_search(conn, progress)
+        conn.execute(
+            """INSERT INTO main.source_search(
+                   provider_card_id,set_code,lang,name,printed_name,type_line,
+                   printed_type_line,oracle_text,printed_text,artist)
+               SELECT provider_card_id,set_code,lang,name,printed_name,type_line,
+                      printed_type_line,oracle_text,printed_text,artist
+               FROM delta.source_search""")
         conn.execute("INSERT OR IGNORE INTO printing_added SELECT printing_id,added_at FROM delta.printing_added")
         conn.execute("DELETE FROM printing_added WHERE printing_id NOT IN (SELECT printing_id FROM printings)")
         conn.execute("UPDATE image_slots SET selected_language=(SELECT selected_language FROM old_ready r "

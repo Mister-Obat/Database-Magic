@@ -80,6 +80,13 @@
         <div class="version-history">
           <button id="update-library" class="primary-button" type="button"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg><span id="update-library-label">Lancer la mise à jour</span></button>
           <button id="version-history-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="version-history-list"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-history"></use></svg>Historique des versions</button>
+          <label class="secondary-button card-price-option">
+            <span>Prix Cardmarket</span>
+            <input id="card-prices-toggle" type="checkbox" role="switch" aria-describedby="card-prices-status">
+            <span class="card-price-switch" aria-hidden="true"></span>
+            <span class="card-price-switch-state" aria-hidden="true"></span>
+          </label>
+          <span id="card-prices-status" class="muted" role="status" hidden></span>
           <div id="version-history-list" class="version-history-list" hidden></div>
         </div>
         <p id="update-status" class="muted maintenance-status" aria-live="polite"></p>
@@ -147,7 +154,7 @@
         </div>
         <section class="catalogue-refine" aria-label="Tri et filtres complémentaires">
           <div class="catalogue-refine-fields">
-          <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-image"></use></svg>Images</span><select id="deck-image-filter"><option value="all">Toutes les images</option><option value="with">Decks avec image</option><option value="without">Decks sans image</option></select></label>
+          <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-image"></use></svg>Images</span><select id="deck-image-filter"><option value="all">Tous les decks</option><option value="with">Decks avec image</option><option value="without">Decks sans image</option></select></label>
           <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-sort"></use></svg>Trier par</span><select id="deck-sort"><option value="date">Date de sortie</option><option value="added">Ajout dans la bibliothèque</option><option value="name">Nom</option></select></label>
           <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-order"></use></svg>Ordre</span><select id="deck-order"><option value="desc">Décroissant</option><option value="asc">Croissant</option></select></label>
           </div>

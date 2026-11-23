@@ -3,12 +3,15 @@ import hashlib
 import json
 import sqlite3
 
+import pytest
+
 from bibliotheque_mtg.sources import build_catalogue_db
 from bibliotheque_mtg.v2.build_catalogue import build_catalogue
 from bibliotheque_mtg.v2.incremental import build_incremental_version
 
 
-def test_incremental_build_changes_only_target_edition(monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy_fts", [False, True])
+def test_incremental_build_changes_only_target_edition(monkeypatch, tmp_path, legacy_fts):
     import bibliotheque_mtg.v2.incremental as incremental
 
     config = {"scope": {"explicit_exclusions": [], "include_unreleased": False,
@@ -22,14 +25,15 @@ def test_incremental_build_changes_only_target_edition(monkeypatch, tmp_path):
     old_card = {"id": "card-old", "set_id": "set-1", "set": "one", "lang": "en",
                 "collector_number": "1", "oracle_id": "oracle-old", "illustration_id": "art-old",
                 "layout": "normal", "name": "Old Card", "type_line": "Creature", "cmc": 1,
-                "colors": [], "color_identity": [], "rarity": "common"}
+                "colors": [], "color_identity": [], "rarity": "common", "artist": "Old Painter"}
     new_card = {**old_card, "id": "card-new", "collector_number": "2",
-                "oracle_id": "oracle-new", "illustration_id": "art-new", "name": "New Card"}
+                "oracle_id": "oracle-new", "illustration_id": "art-new", "name": "New Card",
+                "artist": "New Painter"}
     untouched_set = {"id": "set-2", "code": "two", "name": "Untouched", "set_type": "expansion",
                      "released_at": "2019-01-01", "digital": False, "card_count": 1}
     untouched_card = {**old_card, "id": "card-untouched", "set_id": "set-2", "set": "two",
                       "oracle_id": "oracle-untouched", "illustration_id": "art-untouched",
-                      "name": "Untouched Card"}
+                      "name": "Untouched Card", "artist": "Untouched Painter"}
 
     def archive(path, cards):
         with gzip.open(path, "wt", encoding="utf-8") as stream:
@@ -48,6 +52,18 @@ def test_incremental_build_changes_only_target_edition(monkeypatch, tmp_path):
     build_catalogue(old_source, old_archive, old_version / "catalogue.sqlite",
                     archive_sha256=old_sha, archive_as_of="2026-01-01",
                     edition_root=old_version / "editions", total_records=2)
+    if legacy_fts:
+        with sqlite3.connect(old_version / "catalogue.sqlite") as conn:
+            definition = conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE name='source_search'").fetchone()[0]
+            conn.execute("ALTER TABLE source_search RENAME TO old_index")
+            conn.execute(definition.replace(",\n    artist\n", "\n"))
+            conn.execute("""INSERT INTO source_search
+                SELECT provider_card_id,set_code,lang,name,printed_name,type_line,
+                       printed_type_line,oracle_text,printed_text FROM old_index""")
+            conn.execute("DROP TABLE old_index")
+            conn.execute("CREATE VIRTUAL TABLE artist_search USING fts5(provider_card_id UNINDEXED, artist)")
+            conn.execute("INSERT INTO artist_search VALUES ('card-old','Stale Painter')")
     old_index = json.loads((old_version / "editions" / "index.json").read_text())
     untouched_folder = next(item["folder"] for item in old_index["editions"] if item["id"] == "set-2")
     delta_archive = tmp_path / "delta.jsonl.gz"
@@ -65,6 +81,11 @@ def test_incremental_build_changes_only_target_edition(monkeypatch, tmp_path):
         assert {row[0] for row in conn.execute("SELECT provider_card_id FROM source_records")} == {
             "card-old", "card-new", "card-untouched"}
         assert conn.execute("SELECT COUNT(*) FROM source_search").fetchone()[0] == 3
+        for artist, card in (("New Painter", "card-new"), ("Untouched Painter", "card-untouched")):
+            assert conn.execute("SELECT provider_card_id FROM source_search WHERE source_search MATCH ?",
+                                (f'artist : "{artist}"',)).fetchall() == [(card,)]
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='artist_search'").fetchone()
         assert conn.execute("SELECT COUNT(*) FROM editions").fetchone()[0] == 2
     assert result["new_card_records"] == 1
     assert json.loads((target / "editions" / "index.json").read_text())["edition_count"] == 2
