@@ -25,6 +25,7 @@
 **/*.webp
 !/_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/deck-box-*.webp
 !/_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/deck-box-grain.png
+!/_bibliotheque_mtg/src/python/bibliotheque_mtg/ui/assets/localized-banner-example.webp
 **/*.gif
 **/*.bmp
 **/*.tif

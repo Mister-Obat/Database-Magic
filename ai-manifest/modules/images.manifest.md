@@ -46,6 +46,21 @@ Les anciens algorithmes de `images.py` servent au
 [parcours historique](historique.manifest.md) ; le bouton de l’application V2
 appelle `image_download.py`.
 
+## Cartes d’art à signature dorée
+
+Pour les 162 variantes signées de Strixhaven et de Modern Horizons 2, le
+snapshot ne contient pas d’image Scryfall. En l’absence d’URL anglaise, le
+téléchargeur vérifie l’édition, le numéro de collection suffixé par `s`,
+l’ID source anglais, le layout `art_series` et la face 0 dans
+`image_sources_signed_art.json`. Ce registre associe les variantes à leur
+produit TCGplayer identifié dans les groupes 2806 et 2822 du
+[catalogue TCGCSV](https://tcgcsv.com/docs). Seule l’URL HTTPS du JPEG
+de ce produit est autorisée. Les scans de 200 px ou plus sur les deux côtés
+sont admis pour ce registre et gardent leurs dimensions source en provenance.
+Le filtre Recherche « Au moins une image manquante » inclut les impressions
+partiellement illustrées. Le lot cible uniquement les faces manquantes, y compris
+les versos dont le recto est déjà prêt.
+
 ## Reprise d’un dossier Images
 
 Le serveur indexe au démarrage, en arrière-plan, les WebP sauvegardés sous
@@ -197,3 +212,27 @@ Les autres slots et les fichiers de la sauvegarde restent inchangés.
   deux faces, un échec fournisseur et la réparation d’un asset déjà présent.
 - Après publication, comparer le hash du fichier, la langue et le chemin du slot
   dans SQLite et `images.json`.
+
+## Analyse du bandeau Scryfall
+
+Depuis l’accueil, « Détecter » analyse les fichiers des slots prêts de la version
+active, sans réseau. La signature visuelle du texte « Localized Image Not
+Available » est contrôlée indépendamment de la langue déclarée et du statut
+Scryfall. Le bilan indique les images détectées, les fichiers illisibles et le
+nombre de faces ayant une source anglaise exploitable dans le catalogue. La
+liste paginée identifie la carte, l’édition, le numéro et la face de chaque image
+signalée, avec un lien vers le fichier local.
+
+« Remplacer par l’image anglaise » traite les faces détectées par cette analyse.
+Les URL Scryfall proviennent exclusivement de la ligne EN du même
+`printing_id` et de la même face. Le lot réutilise le limiteur Scryfall des
+téléchargements groupés. Avant publication, le contrôle du bandeau, de l’image
+anglaise et de la version active protège les autres images et les slots
+modifiés depuis l’analyse. Un échec conserve l’image en place. Les compteurs
+sont actualisés pendant les deux opérations. Le rapport paginé des remplacements
+réussis utilise les deux fichiers locaux et reste disponible après une relance
+du même lot, jusqu’à la prochaine analyse ou au changement de version active.
+
+Les résultats du dernier scan terminé de chaque version du catalogue et les
+paires avant/après sont conservés dans la base locale `state/localized-banners.sqlite`.
+Chaque succès est enregistré séparément pour rester visible après un redémarrage.

@@ -167,6 +167,11 @@ def test_download_prefers_hd_french_then_publishes_one_face_only(tmp_path, image
     assert conn.execute("SELECT status,selected_language FROM image_slots WHERE face_index=0").fetchone() == ("ready", "en")
     assert conn.execute("SELECT COUNT(*) FROM image_assets").fetchone()[0] == 1
     conn.close()
+    from bibliotheque_mtg.local_app import _batch_printings
+
+    selected, unavailable = _batch_printings("search", {"image_filter": "without"}, db, threading.Event())
+    assert unavailable == 0
+    assert len(selected) == 1 and selected[0][2] == [1]
     # Simulate a valid WebP from the previous V2 behavior (original dimensions).
     legacy = patterned_image((600, 800)); legacy_bytes = io.BytesIO(); legacy.save(legacy_bytes, "WEBP")
     legacy_payload = legacy_bytes.getvalue(); legacy_hash = hashlib.sha256(legacy_payload).hexdigest()
@@ -541,6 +546,38 @@ def test_encoder_normalizes_small_source_without_distortion_or_crop():
     assert (width, height) == (531, 738)
     with Image.open(io.BytesIO(encoded)) as result:
         assert result.format == "WEBP" and result.size == (531, 738)
+
+
+def test_missing_signed_art_uses_exact_tcgplayer_product(tmp_path, image_server, monkeypatch):
+    ops, _, db, _ = make_catalogue(tmp_path, image_server)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE editions SET code='astx'")
+        conn.execute("UPDATE printings SET collector_number='13s', layout='art_series'")
+        conn.execute("UPDATE source_records SET raw_json=json_remove(raw_json, '$.image_uris')")
+        conn.execute("DELETE FROM printing_languages WHERE lang='fr'")
+        conn.execute("DELETE FROM source_records WHERE lang='fr'")
+    ledger = tmp_path / "ledger.json"
+    source = io.BytesIO()
+    patterned_image((265, 370)).save(source, "JPEG")
+    requests_seen = []
+
+    def fetch(url, session, test_hosts, *, allowed_hosts, **kwargs):
+        requests_seen.append(url)
+        assert _allowed_url(url, allowed_hosts=allowed_hosts)
+        return source.getvalue(), None, None
+
+    monkeypatch.setattr(image_download, "_fetch", fetch)
+    report = download_printing("provider-en", catalogue_root=ops, ledger_path=ledger)
+    assert report["results"][0]["reason"] == "aucune_url_image"
+    assert not requests_seen
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE source_records SET raw_json=json_set(raw_json, '$.id', ?)",
+                     ("cb1d57b9-84ea-4a68-a3b9-30f11c042a53",))
+    report = download_printing("provider-en", catalogue_root=ops, ledger_path=ledger, parallel_fetch=True)
+    assert requests_seen == ["https://product-images.tcgplayer.com/236856.jpg"]
+    assert report["results"][0]["status"] == "ready"
+    assert report["results"][0]["source_width"] == 265
 
 
 def test_429_persists_retry_budget_and_html_corruption_never_publish(tmp_path, image_server):
@@ -920,3 +957,41 @@ def test_ai_batch_waits_for_a_full_wave_before_starting_the_next(tmp_path, monke
     assert not premature_start.is_set()
     assert [item["name"] for item in result["items"]] == [str(index) for index in range(20)]
     assert all(item["status"] == "error" for item in result["items"])
+
+def test_banner_results_survive_requests_and_cancelled_rescan(tmp_path, monkeypatch):
+    from bibliotheque_mtg import local_app as app
+
+    monkeypatch.setattr(app, "OPS_ROOT", tmp_path)
+    monkeypatch.setattr(app, "resolve_current", lambda _: {"version_id": "v1"})
+    monkeypatch.setattr(app, "_maintenance_is_active", lambda: False)
+    monkeypatch.setattr(app, "_batch_is_active", lambda: False)
+    stop = threading.Event()
+    def run_task(kind, label, work, **kwargs):
+        return work(stop, lambda **_: None)
+    monkeypatch.setattr(app, "_start_image_task", run_task)
+    card = {"name": "Example", "edition": "tst", "collector_number": "5",
+            "face_index": 0, "printing_id": "printing", "english": ["source"],
+            "relative_path": "before.webp"}
+    monkeypatch.setattr(app, "analyze_localized_banners", lambda *args: (
+        {"scanned": 1, "detected": 1, "replaceable": 1}, [card]))
+
+    def replace(*args, on_replaced):
+        on_replaced({**card, "provider_card_id": "en", "old_path": "before.webp",
+                     "new_path": "after.webp"})
+        return {"total": 1, "replaced": 1, "skipped": 0, "failed": 0}
+    monkeypatch.setattr(app, "replace_localized_banners", replace)
+
+    assert app._banner_session_state("v1") == {"analysis": None, "replacement": None}
+    analysis = app._start_banner_task(app._BANNER_ANALYZE, {})
+    ident = {"analysis_id": analysis["analysis_id"]}
+    replacement = app._start_banner_task(app._BANNER_REPLACE, ident)
+    assert app._banner_session_state("v1") == {"analysis": analysis, "replacement": replacement}
+    assert app._banner_session_state("v2")["analysis"] is None
+    assert app._banner_result_page(ident)["items"][0]["image_url"] == "/assets?path=before.webp"
+    pair = app._banner_result_page({"replacement_id": analysis["analysis_id"]})["items"][0]
+    assert pair["old_image_url"] == "/assets?path=before.webp"
+    assert pair["new_image_url"] == "/assets?path=after.webp"
+
+    stop.set()
+    app._start_banner_task(app._BANNER_ANALYZE, {})
+    assert app._banner_session_state("v1") == {"analysis": analysis, "replacement": replacement}

@@ -33,13 +33,14 @@ from .v2.publish import resolve_current
 from .v2.query import connect
 from .maintenance import MaintenanceCancelled, refresh_v2
 from .card_prices import read_card_prices, refresh_card_prices
+from .localized_banners import analyze_localized_banners, replace_localized_banners
 from .version_history import VersionHistoryError, activate_version, list_version_candidates
 from .image_download import (download_printing, ensure_catalogue_wal,
                              refresh_printing_deep, preview_printing_candidate,
                              publish_preview_candidate, import_local_image, is_temporary_image_error)
 from .decks import (DECK_LIST_ELIGIBILITY, SUPPORTED_DECK_TYPES, _SET_NAMES_FR, _resolve_provider_ids,
                     deck_facets, ensure_deck_index, get_deck,
-                    index_deck_colors, list_decks, refresh_deck_index,
+                    index_deck_colors, list_decks, prepare_deck_composition, read_deck_card_sections, refresh_deck_index,
                     run_deck_composition_index)
 from .deck_media import NON_PLAYABLE_SECTIONS, composition_colors, enrich_deck_media, export_deck_to_desktop
 from .list_import import resolve_list, parse_list
@@ -69,13 +70,14 @@ PROXY_ASSOCIATE = "/api/v2/proxies/associate"
 PROXY_OPEN_FOLDER = "/api/v2/proxies/open-folder"
 PROXY_IMPORT = "/api/v2/proxies/import"
 PROXY_DELETE = "/api/v2/proxies/delete"
+DECK_PREPARE_ROUTE = "/api/v2/decks/prepare"
 PERSONAL_POST_ROUTES = {f"/api/v2/personal-decks/{action}" for action in
                         ("create", "save", "add", "import", "export", "delete", "duplicate",
                          "import-text", "export-text", "group-create", "group-rename",
                          "group-delete", "group-move")}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
-APP_API_REVISION = 49
+APP_API_REVISION = 52
 _ACTIVE_DOWNLOADS: dict[str, threading.Event] = {}
 _ACTIVE_DOWNLOADS_LOCK = threading.Lock()
 _BATCH_TASK: dict | None = None
@@ -114,6 +116,11 @@ _IMAGE_TASKS: dict[str, dict] = {}
 _IMAGE_TASKS_LOCK = threading.RLock()
 _AI_BATCH_REVIEW_LOCK = threading.Lock()
 _AI_BATCH_ROUTE = "/api/v2/image/ai/batch"
+_BANNER_ANALYZE = "/api/v2/image/localized-banner/analyze"
+_BANNER_REPLACE = "/api/v2/image/localized-banner/replace"
+_BANNER_RESULTS = "/api/v2/image/localized-banner/results"
+_BANNER_PAGE_SIZE = 25
+_BANNER_STATE = "/api/v2/image/localized-banner/state"
 _AI_BATCH_WAVE_SIZE = 10
 _AI_BATCH_EXECUTOR = ThreadPoolExecutor(max_workers=_AI_BATCH_WAVE_SIZE, thread_name_prefix="magic-ai")
 _IMAGE_TASK_CANCELS: dict[str, threading.Event] = {}
@@ -121,6 +128,140 @@ _AI_CANDIDATES: dict[str, dict] = {}
 _AI_CANDIDATES_LOCK = threading.Lock()
 _LENS_TICKETS: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
 _LENS_TICKETS_LOCK = threading.Lock()
+
+
+def _banner_store() -> sqlite3.Connection:
+    path = OPS_ROOT / "state" / "localized-banners.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS analyses (
+                version_id TEXT PRIMARY KEY, analysis_id TEXT NOT NULL UNIQUE,
+                counts TEXT NOT NULL, matches TEXT NOT NULL, report TEXT
+            );
+            CREATE TABLE IF NOT EXISTS replacements (
+                id INTEGER PRIMARY KEY, analysis_id TEXT NOT NULL, pair TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS banner_replacements_by_analysis
+                ON replacements(analysis_id, id);
+        """)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def _banner_session_state(version_id: str) -> dict:
+    if not (OPS_ROOT / "state" / "localized-banners.sqlite").is_file():
+        return {"analysis": None, "replacement": None}
+    with closing(_banner_store()) as conn:
+        row = conn.execute("SELECT analysis_id, counts, report FROM analyses WHERE version_id=?",
+                           (version_id,)).fetchone()
+        if row is None:
+            return {"analysis": None, "replacement": None}
+        analysis_id, counts_json, report_json = row
+        replaced = conn.execute("SELECT COUNT(*) FROM replacements WHERE analysis_id=?",
+                                (analysis_id,)).fetchone()[0]
+    counts = json.loads(counts_json)
+    report = json.loads(report_json) if report_json else None
+    if report or replaced:
+        report = {**(report or {}), "replacement_id": analysis_id, "replaced_total": replaced}
+    return {"analysis": {"analysis_id": analysis_id, **counts}, "replacement": report}
+
+
+def _start_banner_task(route: str, payload: dict) -> dict:
+    with _MAINTENANCE_LOCK, _IMAGE_TASKS_LOCK:
+        if any(task["kind"] in {"banner_analysis", "banner_replacement"}
+               and task["status"] in {"queued", "running", "cancelling"}
+               for task in _IMAGE_TASKS.values()):
+            raise ValueError("Une analyse ou un remplacement de bandeaux est en cours.")
+        current = resolve_current(CATALOGUE_ROOT)
+        if route == _BANNER_ANALYZE:
+            if payload:
+                raise ValueError("Aucun paramètre attendu.")
+            analysis_id = uuid.uuid4().hex
+
+            def analyze(cancel_event, progress):
+                counts, matches = analyze_localized_banners(current, cancel_event, progress)
+                if not cancel_event.is_set():
+                    with closing(_banner_store()) as conn, conn:
+                        conn.execute("""DELETE FROM replacements WHERE analysis_id IN
+                            (SELECT analysis_id FROM analyses WHERE version_id=?)""", (current["version_id"],))
+                        conn.execute("INSERT OR REPLACE INTO analyses VALUES (?, ?, ?, ?, NULL)",
+                                     (current["version_id"], analysis_id, json.dumps(counts), json.dumps(matches)))
+                return {"analysis_id": analysis_id, **counts}
+
+            return _start_image_task("banner_analysis", "Analyse des bandeaux Scryfall",
+                                     analyze, report_progress=True)
+        if set(payload) != {"analysis_id"} or not isinstance(payload["analysis_id"], str):
+            raise ValueError("Référence d’analyse invalide.")
+        analysis_id = payload["analysis_id"]
+        with closing(_banner_store()) as conn:
+            row = conn.execute("SELECT matches FROM analyses WHERE analysis_id=? AND version_id=?",
+                               (analysis_id, current["version_id"])).fetchone()
+        if row is None:
+            raise ValueError("Cette analyse a expiré. Relancez la détection.")
+        if _maintenance_is_active() or _batch_is_active():
+            raise ValueError("Attendez la fin de la maintenance ou du téléchargement groupé.")
+        matches = [match for match in json.loads(row[0]) if match["english"]]
+
+        def replace(stop, progress):
+            with closing(_banner_store()) as conn:
+                def record_replacement(pair):
+                    with conn:
+                        conn.execute("INSERT INTO replacements(analysis_id,pair) VALUES (?, ?)",
+                                     (analysis_id, json.dumps(pair)))
+
+                report = replace_localized_banners(current, matches, CATALOGUE_ROOT, stop,
+                                                   progress, on_replaced=record_replacement)
+                with conn:
+                    conn.execute("UPDATE analyses SET report=? WHERE analysis_id=?",
+                                 (json.dumps(report), analysis_id))
+                replaced = conn.execute("SELECT COUNT(*) FROM replacements WHERE analysis_id=?",
+                                        (analysis_id,)).fetchone()[0]
+            return {**report, "replacement_id": analysis_id, "replaced_total": replaced}
+
+        return _start_image_task("banner_replacement", "Remplacement des bandeaux Scryfall",
+                                 replace, report_progress=True)
+
+
+def _banner_result_page(params: dict) -> dict:
+    page = int(params.get("page", "1"))
+    analysis_id, replacement_id = params.get("analysis_id"), params.get("replacement_id")
+    if page < 1 or bool(analysis_id) == bool(replacement_id):
+        raise ValueError("Référence ou numéro de page invalide.")
+    version_id = resolve_current(CATALOGUE_ROOT)["version_id"]
+    start = (page - 1) * _BANNER_PAGE_SIZE
+    with closing(_banner_store()) as conn:
+        row = conn.execute("SELECT matches FROM analyses WHERE analysis_id=? AND version_id=?",
+                           (analysis_id or replacement_id, version_id)).fetchone()
+        if row is None:
+            raise ValueError("Cette analyse a expiré. Relancez la détection.")
+        if replacement_id:
+            total = conn.execute("SELECT COUNT(*) FROM replacements WHERE analysis_id=?",
+                                 (replacement_id,)).fetchone()[0]
+            selected = [json.loads(pair) for pair, in conn.execute(
+                "SELECT pair FROM replacements WHERE analysis_id=? ORDER BY id LIMIT ? OFFSET ?",
+                (replacement_id, _BANNER_PAGE_SIZE, start))]
+        else:
+            matches = json.loads(row[0])
+            total = len(matches)
+            selected = matches[start:start + _BANNER_PAGE_SIZE]
+
+    def asset_url(path):
+        return "/assets?" + urllib.parse.urlencode({"path": path})
+
+    items = []
+    for match in selected:
+        item = {key: match[key] for key in ("name", "edition", "collector_number", "face_index")}
+        if replacement_id:
+            item.update(printing_id=match["printing_id"], provider_card_id=match["provider_card_id"],
+                        old_image_url=asset_url(match["old_path"]), new_image_url=asset_url(match["new_path"]))
+        else:
+            item.update(english_available=bool(match["english"]), image_url=asset_url(match["relative_path"]))
+        items.append(item)
+    return {"total": total, "page_size": _BANNER_PAGE_SIZE, "items": items}
 
 
 class FrenchTextUnavailable(ValueError):
@@ -862,6 +1003,10 @@ def _maintenance_busy_reason() -> str | None:
     with _DECK_TASKS_LOCK:
         if any(task.get("status") in {"queued", "running"} for task in _DECK_TASKS.values()):
             return "Un téléchargement de deck est en cours. Attendez sa fin avant de lancer la mise à jour."
+    with _IMAGE_TASKS_LOCK:
+        if any(task["kind"] == "banner_replacement" and task["status"] in {"queued", "running", "cancelling"}
+               for task in _IMAGE_TASKS.values()):
+            return "Un remplacement de bandeaux est en cours. Attendez sa fin avant la mise à jour."
     return None
 
 
@@ -1017,8 +1162,10 @@ def _deck_with_media(payload: dict, catalog_db: Path) -> dict:
         sections = dict(sorted((deck.get("sections") or {}).items(),
                                key=lambda section: section_order.get(section[0], 1)))
         deck["sections"] = sections
-        cover = next((cards[0] for cards in sections.values() if cards), None)
-        deck["cover_image_path"] = cover.get("image_path") if cover else None
+        deck["cover_image_path"] = next(
+            (card["image_path"] for cards in sections.values() for card in cards if card.get("image_path")),
+            None,
+        )
         deck["composition_colors"] = composition_colors(
             card for key, cards in sections.items() if key not in NON_PLAYABLE_SECTIONS for card in cards)
         payload["deck"] = deck
@@ -1041,7 +1188,7 @@ def _deck_media_context(catalog_db: Path) -> tuple:
 
 
 def _deck_cover_ready(deck_id: str, catalog_db: Path, context: tuple | None = None) -> bool:
-    """Resolve the first card cover without deriving or fetching deck tokens."""
+    """Resolve the cover without deriving or fetching deck tokens."""
     context = context or _deck_media_context(catalog_db)
     cache_key = (str(deck_id), context)
     with _DECK_MEDIA_CACHE_LOCK:
@@ -1270,7 +1417,7 @@ def _batch_filter_payload(mode: str, filters: dict) -> dict:
     return {key: value for key, value in filters.items() if value not in (None, "")}
 
 
-def _batch_printings(mode: str, filters: dict, catalog_db: Path, cancel: threading.Event) -> tuple[list[tuple[str, str]], int]:
+def _batch_printings(mode: str, filters: dict, catalog_db: Path, cancel: threading.Event) -> tuple[list[tuple[str, str, list[int]]], int]:
     cards: list[dict] = []
     unavailable = 0
     if mode in {"search", "edition"}:
@@ -1303,7 +1450,7 @@ def _batch_printings(mode: str, filters: dict, catalog_db: Path, cancel: threadi
             offset += len(page["items"])
             if cancel.is_set() or not page["items"] or offset >= page["total"]:
                 break
-    selected: list[tuple[str, str]] = []
+    selected: list[tuple[str, str, list[int]]] = []
     seen = set()
     conn = connect(catalog_db)
     try:
@@ -1322,10 +1469,12 @@ def _batch_printings(mode: str, filters: dict, catalog_db: Path, cancel: threadi
             if printing_id in seen:
                 continue
             seen.add(printing_id)
-            slots = conn.execute("SELECT status FROM image_slots WHERE printing_id=?", (printing_id,)).fetchall()
-            if slots and all(slot[0] == "ready" for slot in slots):
-                continue
-            selected.append((provider_id, str(card.get("printed_name") or card.get("name") or "Carte")))
+            missing_faces = [slot[0] for slot in conn.execute(
+                "SELECT face_index FROM image_slots WHERE printing_id=? AND status!='ready' ORDER BY face_index",
+                (printing_id,))]
+            if missing_faces:
+                name = str(card.get("printed_name") or card.get("name") or "Carte")
+                selected.append((provider_id, name, missing_faces))
     finally:
         conn.close()
     return selected, unavailable
@@ -1340,7 +1489,7 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
         with _BATCH_LOCK:
             _BATCH_TASK.update(total=len(selected), unavailable=unavailable,
                                processing_started_at=time.time())
-        def download_one(provider_id: str) -> tuple[bool, str, bool]:
+        def download_one(provider_id: str, missing_faces: list[int]) -> tuple[bool, str, bool]:
             if _BATCH_CANCEL.is_set():
                 return False, "annulé", False
             if resolve_current(CATALOGUE_ROOT)["database"] != catalog_db:
@@ -1348,7 +1497,7 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
             try:
                 report = download_printing(provider_id, catalogue_root=CATALOGUE_ROOT,
                     ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.json",
-                    cancel_event=_BATCH_CANCEL, parallel_fetch=True)
+                    face_indexes=missing_faces, cancel_event=_BATCH_CANCEL, parallel_fetch=True)
                 results = report.get("results", [])
                 success = bool(results) and all(item["status"] in {"ready", "already_ready"} for item in results)
                 reasons = [item.get("reason") or item["status"] for item in results]
@@ -1366,10 +1515,10 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
                 if _BATCH_CANCEL.is_set():
                     return
                 try:
-                    provider_id, name = next(remaining)
+                    provider_id, name, missing_faces = next(remaining)
                 except StopIteration:
                     return
-                pending[executor.submit(download_one, provider_id)] = name
+                pending[executor.submit(download_one, provider_id, missing_faces)] = name
 
             for _ in range(4):
                 enqueue()
@@ -1542,37 +1691,36 @@ def _count_complete_decks(db: Path, deck_db: Path, deck_ids: list[str]) -> int:
     resolved = {}
     readiness = {}
     complete = 0
-    for deck_id in deck_ids:
-        deck = get_deck(deck_db, deck_id, fetch_missing=False, include_tokens=True).get("deck")
-        if not deck:
-            continue
-        unresolved = {}
-        cards_and_keys = []
-        for section in deck["sections"].values():
-            for card in section:
-                raw = card.get("raw") or {}
-                scryfall_id = raw.get("scryfall_id") or raw.get("identifiers", {}).get("scryfallId")
-                key = (str(scryfall_id) if scryfall_id else None, card.get("set_code"), card.get("collector_number"))
-                cards_and_keys.append((card, key))
-                if key not in resolved:
-                    unresolved.setdefault(key, card)
-        if unresolved:
-            _resolve_provider_ids(list(unresolved.values()), db)
-            resolved.update((key, card["provider_card_id"]) for key, card in unresolved.items())
-        for card, key in cards_and_keys:
-            card["provider_card_id"] = resolved[key]
-        entries = _deck_entries(deck)
-        if not entries or any(not card["provider_card_id"] for card in entries):
-            continue
-        media_cards = {(card["provider_card_id"], card.get("set_code")): card for card in entries}
-        if any(readiness.get(key) is False for key in media_cards):
-            continue
-        unchecked = {key: card for key, card in media_cards.items() if key not in readiness}
-        if unchecked:
-            media = enrich_deck_media({"sections": {"stats": list(unchecked.values())}}, db)
-            readiness.update((key, item["image_ready"])
-                             for key, item in zip(unchecked, media["sections"]["stats"]))
-        complete += all(readiness[key] for key in media_cards)
+    with closing(connect(deck_db)) as conn:
+        for deck_id in deck_ids:
+            sections = read_deck_card_sections(conn, deck_id)
+            unresolved = {}
+            cards_and_keys = []
+            for section in sections.values():
+                for card in section:
+                    raw = card.get("raw") or {}
+                    scryfall_id = raw.get("scryfall_id") or raw.get("identifiers", {}).get("scryfallId")
+                    key = (str(scryfall_id) if scryfall_id else None, card.get("set_code"), card.get("collector_number"))
+                    cards_and_keys.append((card, key))
+                    if key not in resolved:
+                        unresolved.setdefault(key, card)
+            if unresolved:
+                _resolve_provider_ids(list(unresolved.values()), db)
+                resolved.update((key, card["provider_card_id"]) for key, card in unresolved.items())
+            for card, key in cards_and_keys:
+                card["provider_card_id"] = resolved[key]
+            entries = _deck_entries({"sections": sections})
+            if not entries or any(not card["provider_card_id"] for card in entries):
+                continue
+            media_cards = {(card["provider_card_id"], card.get("set_code")): card for card in entries}
+            if any(readiness.get(key) is False for key in media_cards):
+                continue
+            unchecked = {key: card for key, card in media_cards.items() if key not in readiness}
+            if unchecked:
+                media = enrich_deck_media({"sections": {"stats": list(unchecked.values())}}, db)
+                readiness.update((key, item["image_ready"])
+                                 for key, item in zip(unchecked, media["sections"]["stats"]))
+            complete += all(readiness[key] for key in media_cards)
     return complete
 
 
@@ -1624,7 +1772,7 @@ def _cached_complete_decks(db: Path, deck_db: Path, deck_ids: list[str], *, back
             cached = _DECK_STATS_CACHE
             stale = None
             if cached and cached[0] == key and cached[1].issubset(current_ids):
-                if time.monotonic() - cached[2] < 300:
+                if cached[1] == current_ids and time.monotonic() - cached[2] < 300:
                     return cached[3]
                 stale = cached[3]
             if not _DECK_STATS_BUSY:
@@ -2015,6 +2163,12 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     data = path.read_bytes()
                 self._send(200, data, mimetypes.guess_type(path.name)[0] or "application/octet-stream")
                 return
+            if route == _BANNER_STATE:
+                self._json(_banner_session_state(resolve_current(CATALOGUE_ROOT)["version_id"]))
+                return
+            if route == _BANNER_RESULTS:
+                self._json(_banner_result_page(params))
+                return
             if route == "/api/v2/image/task":
                 task_id = params.get("task_id", "")
                 with _IMAGE_TASKS_LOCK:
@@ -2080,6 +2234,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 self._send(200, (UI_ROOT / "assets/deck-box-mesh.json").read_bytes(), "application/json")
             elif route == "/deck-box-grain.png":
                 self._send(200, (UI_ROOT / "assets/deck-box-grain.png").read_bytes(), "image/png")
+            elif route == "/localized-banner-example.webp":
+                self._send(200, (UI_ROOT / "assets/localized-banner-example.webp").read_bytes(), "image/webp")
             elif route == "/deck-box-fallback.webp":
                 self._send(200, (UI_ROOT / "assets/deck-box-fallback.webp").read_bytes(), "image/webp")
             elif (route.startswith("/deck-box-preview-") and route.endswith(".webp")
@@ -2355,8 +2511,8 @@ class LibraryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _LIST_TASK, _BATCH_TASK
         route = urllib.parse.urlsplit(self.path).path
-        batch_routes = {_AI_BATCH_ROUTE, f"{_AI_BATCH_ROUTE}/choose"}
-        if route not in PERSONAL_POST_ROUTES and route not in batch_routes and route not in {PROXY_ASSOCIATE, PROXY_OPEN_FOLDER, PROXY_IMPORT, PROXY_DELETE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
+        batch_routes = {_AI_BATCH_ROUTE, f"{_AI_BATCH_ROUTE}/choose", _BANNER_ANALYZE, _BANNER_REPLACE}
+        if route not in PERSONAL_POST_ROUTES and route not in batch_routes and route not in {DECK_PREPARE_ROUTE, PROXY_ASSOCIATE, PROXY_OPEN_FOLDER, PROXY_IMPORT, PROXY_DELETE, "/api/v2/search/image-slots", "/api/v2/app/shutdown", "/api/v2/list-import", "/api/v2/list-import/export", "/api/v2/image/export", "/api/v2/download", "/api/v2/download/cancel", "/api/v2/image/refresh", "/api/v2/image/preview", "/api/v2/image/candidate/choose", "/api/v2/image/ai/generate", "/api/v2/image/ai/choose", "/api/v2/image/task/cancel", "/api/v2/image/import", "/api/v2/deck/download", "/api/v2/deck/export", "/api/v2/deck/cancel", "/api/v2/batch-download", "/api/v2/batch-download/cancel", "/api/v2/decks/refresh", "/api/v2/decks/recalculate", "/api/v2/decks/colors/index", "/api/v2/maintenance/update", "/api/v2/maintenance/update/cancel", "/api/v2/maintenance/activate", "/api/v2/archive/ocr", "/api/v2/archive/hash", "/api/v2/archive/lens", "/api/v2/archive/delete", "/api/v2/archive/auto-name", "/api/v2/archive/search", "/api/v2/archive/target", "/api/v2/archive/import"}:
             self._json({"error": "route_not_found"}, 404)
             return
         expected_origin = f"http://127.0.0.1:{self.server.server_port}"
@@ -2540,8 +2696,21 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     else:
                         self._json({"task_id": task_id, "status": task["status"], "cancel_requested": False})
                 return
+            if route == DECK_PREPARE_ROUTE:
+                deck_id = payload.get("deck_id")
+                if not isinstance(deck_id, str) or not deck_id or len(deck_id) > 200:
+                    raise ValueError("invalid deck id")
+                db = self.db
+                status, item = prepare_deck_composition(DECK_DB, deck_id, db)
+                if status == "ready":
+                    item.update(_deck_list_media(deck_id, db))
+                self._json({"status": status, "item": item}, 200 if item else 404)
+                return
             if route == "/api/v2/decks/recalculate":
                 self._json(_recalculate_deck_search(payload, self.db))
+                return
+            if route in {_BANNER_ANALYZE, _BANNER_REPLACE}:
+                self._json(_start_banner_task(route, payload), 202)
                 return
             if route == _AI_BATCH_ROUTE:
                 selection = _parse_ai_batch(payload)

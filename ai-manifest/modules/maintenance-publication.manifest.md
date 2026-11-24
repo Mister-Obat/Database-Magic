@@ -91,15 +91,14 @@ Toute actualisation lancée depuis l’Accueil comprend une étape Cardmarket
 indépendante de la préférence d’affichage. Elle
 consulte le guide officiel quotidien Magic et relie ses produits aux noms
 canoniques du catalogue via les identifiants Cardmarket des lignes Scryfall.
-Le prix de référence est la plus basse tendance positive des impressions
-non premium. La tendance premium sert de repli si aucune tendance non
-premium n’est disponible. La base globale `state/card-prices.sqlite` garde
+Le prix de référence est la plus basse tendance positive parmi les impressions
+et les variantes premium et non premium. La base globale `state/card-prices.sqlite` garde
 un prix en centimes d’euro par nom, réutilisable dans les éditions et les
 decks, y compris après activation d’une autre version du catalogue. La
 transaction remplace les prix ensemble après lecture et validation du guide.
 Un échec ou une annulation avant cette transaction préserve les prix existants.
-Un ETag permet de réutiliser les prix si le guide et la version catalogue
-sont identiques.
+Un ETag permet de réutiliser les prix si le guide, la version du catalogue
+et la méthode de calcul restent identiques.
 
 ## Sauvegarde et restauration
 

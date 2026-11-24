@@ -11,6 +11,43 @@ from bibliotheque_mtg.decks import get_deck, import_decks, list_decks, index_dec
 from bibliotheque_mtg.decks import deck_facets, _resolve_provider_ids
 
 
+def test_prepare_visible_deck_loads_only_that_composition_and_reuses_it(tmp_path, monkeypatch):
+    db, catalog = tmp_path / "decks.sqlite", tmp_path / "catalogue.sqlite"
+    catalog.touch()
+    product = {"code": "TST", "type": "Commander Deck"}
+    import_decks({"meta": {}, "data": [
+        dict(product, fileName="Visible", name="Visible"),
+        dict(product, fileName="Other", name="Other"),
+        dict(product, fileName="Bundle", name="Bundle", type="Bundle"),
+        dict(product, fileName="Cached", name="Cached", mainBoard=[{"name": "Existing card"}]),
+    ]}, db)
+    requested = []
+
+    class Response(io.BytesIO):
+        status = 200
+
+    def fetch(request, timeout):
+        requested.append(request.full_url.rsplit("/", 1)[-1])
+        payload = {"data": {"mainBoard": [{"name": "Card", "colorIdentity": ["U"]}]}}
+        return Response(lzma.compress(json.dumps(payload).encode()))
+
+    monkeypatch.setattr(decks.urllib.request, "urlopen", fetch)
+    expected = ("ready", {"id": "mtgjson:Visible", "loaded": True, "tokens_loaded": True, "colors": ["U"]})
+    assert decks.prepare_deck_composition(db, "mtgjson:Visible", catalog) == expected
+    assert decks.prepare_deck_composition(db, "mtgjson:Visible", catalog) == expected
+    assert decks.prepare_deck_composition(db, "mtgjson:Bundle", catalog) == ("deferred", None)
+    assert not get_deck(db, "mtgjson:Other", fetch_missing=False)["deck"]["loaded"]
+    cached = list_decks(db, query="Cached")["items"][0]
+    assert cached["loaded"] and not cached["tokens_loaded"]
+    expected_cached = ("ready", {"id": "mtgjson:Cached", "loaded": True, "tokens_loaded": True, "colors": []})
+    assert decks.prepare_deck_composition(db, "mtgjson:Cached", catalog) == expected_cached
+    assert decks.prepare_deck_composition(db, "mtgjson:Cached", catalog) == expected_cached
+    cached = get_deck(db, "mtgjson:Cached", fetch_missing=False)["deck"]
+    assert cached["sections"]["mainboard"][0]["name"] == "Existing card"
+    assert cached["sections"]["tokens"] == []
+    assert requested == ["Visible.json.xz", "Cached.json.xz"]
+
+
 def test_composition_worker_skips_loaded_and_retries_after_other_decks(tmp_path, monkeypatch):
     db = tmp_path / "decks.sqlite"
     catalog = tmp_path / "catalog.sqlite"

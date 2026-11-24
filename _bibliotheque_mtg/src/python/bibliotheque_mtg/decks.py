@@ -38,11 +38,13 @@ _BACKGROUND_RETRY_DELAY = 3600
 _BACKGROUND_PROVIDER_DELAY = 900
 _BACKGROUND_INDEX_DELAY = 7 * 24 * 3600
 _BACKGROUND_INDEX_RETRY_KEY = "background_deck_index_retry_after"
+_COMPOSITION_PROVIDER_RETRY_KEY = "composition_provider_retry_after"
 _BACKGROUND_COMPRESSED_LIMIT = 1024 * 1024
 _BACKGROUND_JSON_LIMIT = 8 * 1024 * 1024
 _DECK_LOAD_LOCKS = WeakValueDictionary()
 _DECK_LOAD_LOCKS_GUARD = threading.Lock()
 _DECK_INDEX_DOWNLOAD_LOCK = threading.Lock()
+_AUTOMATIC_COMPOSITION_LOCK = threading.Lock()
 _LOG = logging.getLogger(__name__)
 SUPPORTED_DECK_TYPES = (
     "Advanced Deck", "Archenemy Deck", "Arena Promotional Deck", "Arena Starter Deck", "Arena Starter Kit",
@@ -801,7 +803,7 @@ def list_decks(db_path: str | Path = DEFAULT_DB, *, query: str | None = None, na
     with _connect(db_path) as conn:
         _schema(conn)
         total = conn.execute(f"SELECT COUNT(*) FROM decks {where}", args).fetchone()[0]
-        rows = conn.execute(f"SELECT id,name,name_fr,type,{_format_sql()} AS deck_format,set_code,set_name,set_name_fr,release_date,added_at,colors,file_name,loaded FROM decks {where} ORDER BY {nulls_last}{sort_column} {order_value.upper()},name COLLATE NOCASE,id LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
+        rows = conn.execute(f"SELECT id,name,name_fr,type,{_format_sql()} AS deck_format,set_code,set_name,set_name_fr,release_date,added_at,colors,file_name,loaded,tokens_loaded FROM decks {where} ORDER BY {nulls_last}{sort_column} {order_value.upper()},name COLLATE NOCASE,id LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
     items = []
     for row in rows:
         item = dict(row)
@@ -821,6 +823,21 @@ def _read_background_xz(response: Any) -> bytes:
     return data
 
 
+def _fetch_deck_payload(file_name: str, timeout: int, *, compressed: bool) -> dict:
+    suffix = ".json.xz" if compressed else ".json"
+    request = urllib.request.Request(DECK_FILE_BASE_URL + urllib.parse.quote(file_name, safe="") + suffix,
+                                     headers={"User-Agent": "LocalMagicLibrary/1.0"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        if response.status != 200:
+            raise OSError(f"MTGJSON deck HTTP {response.status}")
+        data = _read_background_xz(response) if compressed else response.read()
+    doc = json.loads(data)
+    payload = doc.get("data", doc) if isinstance(doc, dict) else None
+    if not isinstance(payload, dict) or (compressed and not any(_section_values(payload).values())):
+        raise ValueError("Format de composition MTGJSON invalide")
+    return payload
+
+
 def _load_missing(db_path: str | Path, deck_row: sqlite3.Row, timeout: int,
                   catalog_db: str | Path | None = None, *, background: bool = False) -> None:
     deck_id = deck_row["id"]
@@ -833,21 +850,16 @@ def _load_missing(db_path: str | Path, deck_row: sqlite3.Row, timeout: int,
         return
     try:
         with closing(_connect(db_path)) as conn:
-            current = conn.execute("SELECT id,file_name,loaded FROM decks WHERE id=?", (deck_id,)).fetchone()
-        if not current or current["loaded"] or not current["file_name"]:
+            current = conn.execute("""SELECT id,file_name,set_code,loaded,tokens_loaded
+                FROM decks WHERE id=?""", (deck_id,)).fetchone()
+        if not current or not current["file_name"]:
+            return
+        if current["loaded"]:
+            if background and not current["tokens_loaded"]:
+                _load_tokens(db_path, current, timeout, catalog_db, compressed=True)
             return
         file_name = current["file_name"]
-        suffix = ".json.xz" if background else ".json"
-        request = urllib.request.Request(DECK_FILE_BASE_URL + urllib.parse.quote(file_name, safe="") + suffix,
-                                         headers={"User-Agent": "LocalMagicLibrary/1.0"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            if response.status != 200:
-                raise OSError(f"MTGJSON deck HTTP {response.status}")
-            data = _read_background_xz(response) if background else response.read()
-        doc = json.loads(data)
-        payload = doc.get("data", doc) if isinstance(doc, dict) else None
-        if not isinstance(payload, dict) or (background and not any(_section_values(payload).values())):
-            raise ValueError("Format de composition MTGJSON invalide")
+        payload = _fetch_deck_payload(file_name, timeout, compressed=background)
         with closing(_connect(db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             current = conn.execute("SELECT file_name,set_code,loaded FROM decks WHERE id=?", (deck_id,)).fetchone()
@@ -943,6 +955,23 @@ def _index_next_deck_composition(db_path: str | Path, catalog_db: str | Path) ->
             (*SUPPORTED_DECK_TYPES, time.time())).fetchone()
     if not deck:
         return _background_refresh_deck_index(db_path)
+    with _AUTOMATIC_COMPOSITION_LOCK:
+        with closing(_connect(db_path)) as conn:
+            pause = _composition_provider_pause(conn)
+        if pause:
+            return pause
+        _, delay = _fetch_automatic_composition(db_path, deck, catalog_db)
+    return delay
+
+
+def _composition_provider_pause(conn: sqlite3.Connection) -> float:
+    row = conn.execute("SELECT value FROM deck_meta WHERE key=?",
+                       (_COMPOSITION_PROVIDER_RETRY_KEY,)).fetchone()
+    return max(0, float(row[0]) - time.time()) if row else 0
+
+
+def _fetch_automatic_composition(db_path: str | Path, deck: sqlite3.Row,
+                                 catalog_db: str | Path) -> tuple[str, float]:
     try:
         _load_missing(db_path, deck, 15, catalog_db, background=True)
     except (OSError, http.client.HTTPException, lzma.LZMAError, ValueError, sqlite3.Error) as exc:
@@ -954,12 +983,47 @@ def _index_next_deck_composition(db_path: str | Path, catalog_db: str | Path) ->
         elif isinstance(exc, (OSError, http.client.HTTPException)):
             delay = _BACKGROUND_PROVIDER_DELAY
         with closing(_connect(db_path)) as conn, conn:
+            now = time.time()
             conn.execute("""INSERT OR REPLACE INTO deck_composition_retries(deck_id,retry_after)
-                SELECT id,? FROM decks WHERE id=? AND loaded=0""",
-                (time.time() + max(_BACKGROUND_RETRY_DELAY, delay), deck["id"]))
+                SELECT id,? FROM decks WHERE id=? AND (loaded=0 OR tokens_loaded=0)""",
+                (now + max(_BACKGROUND_RETRY_DELAY, delay), deck["id"]))
+            if delay >= _BACKGROUND_PROVIDER_DELAY:
+                conn.execute("INSERT OR REPLACE INTO deck_meta(key,value) VALUES(?,?)",
+                             (_COMPOSITION_PROVIDER_RETRY_KEY, str(now + delay)))
         _LOG.warning("Composition de %s reportée : %s", deck["id"], exc)
-        return delay
-    return _BACKGROUND_DECK_DELAY
+        return ("paused" if delay >= _BACKGROUND_PROVIDER_DELAY else "deferred"), delay
+    return "ready", _BACKGROUND_DECK_DELAY
+
+
+def prepare_deck_composition(db_path: str | Path, deck_id: str,
+                             catalog_db: str | Path) -> tuple[str, dict | None]:
+    """Prepare a displayed, eligible deck with the automatic download bounds."""
+    if not Path(db_path).is_file():
+        return "deferred", None
+    with _AUTOMATIC_COMPOSITION_LOCK, closing(_connect(db_path)) as conn:
+        select = f"""SELECT d.id,d.file_name,d.loaded,d.tokens_loaded,d.colors,r.retry_after FROM decks d
+            LEFT JOIN deck_composition_retries r ON r.deck_id=d.id
+            WHERE d.id=? AND {DECK_LIST_ELIGIBILITY}"""
+        args = (deck_id, *SUPPORTED_DECK_TYPES)
+        deck = conn.execute(select, args).fetchone()
+        if deck is None:
+            return "deferred", None
+        if deck["loaded"] and deck["tokens_loaded"]:
+            status = "ready"
+        elif _composition_provider_pause(conn):
+            status = "paused"
+        elif not deck["file_name"] or (deck["retry_after"] or 0) > time.time():
+            status = "deferred"
+        else:
+            status, _ = _fetch_automatic_composition(db_path, deck, catalog_db)
+            deck = conn.execute(select, args).fetchone()
+            if deck is None:
+                return "deferred", None
+            if not (deck["loaded"] and deck["tokens_loaded"]) and status == "ready":
+                status = "deferred"
+        return status, {"id": deck["id"], "loaded": bool(deck["loaded"]),
+                        "tokens_loaded": bool(deck["tokens_loaded"]),
+                        "colors": list(deck["colors"]) if deck["colors"] is not None else None}
 
 
 def run_deck_composition_index(stop_event: threading.Event, db_path: str | Path = DEFAULT_DB, *,
@@ -1047,30 +1111,25 @@ def _derive_tokens(deck_id: str, deck_set_code: str | None,
 
 
 def _load_tokens(db_path: str | Path, deck_row: sqlite3.Row, timeout: int,
-                 catalog_db: str | Path | None = None) -> None:
+                 catalog_db: str | Path | None = None, *, compressed: bool = False) -> None:
     """Load explicit tokens or derive them from catalog all_parts links."""
     file_name = deck_row["file_name"]
     if not file_name:
         return
-    request = urllib.request.Request(DECK_FILE_BASE_URL + urllib.parse.quote(file_name, safe="") + ".json", headers={"User-Agent": "LocalMagicLibrary/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        if response.status != 200:
-            raise OSError(f"MTGJSON deck HTTP {response.status}")
-        doc = json.loads(response.read().decode("utf-8"))
-    payload = doc.get("data", doc)
-    if not isinstance(payload, dict):
-        raise ValueError("Format de composition MTGJSON invalide")
+    payload = _fetch_deck_payload(file_name, timeout, compressed=compressed)
     tokens = payload.get("tokens") or []
     if not tokens and catalog_db and Path(catalog_db).is_file():
-        with _connect(db_path) as conn:
-            _schema(conn)
+        with closing(_connect(db_path)) as conn:
             deck_cards = conn.execute("""SELECT raw_json FROM deck_cards
                 WHERE deck_id=? AND section!='tokens' ORDER BY section,ordinal""", (deck_row["id"],)).fetchall()
         tokens = _derive_tokens(deck_row["id"], deck_row["set_code"], deck_cards, catalog_db)
-    with _connect(db_path) as conn:
-        _schema(conn)
-        with conn:
+    with closing(_connect(db_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute("SELECT file_name,loaded,tokens_loaded FROM decks WHERE id=?",
+                               (deck_row["id"],)).fetchone()
+        if current and current["file_name"] == file_name and current["loaded"] and not current["tokens_loaded"]:
             _insert_cards(conn, deck_row["id"], {"tokens": tokens}, only_sections={"tokens"})
+            conn.execute("DELETE FROM deck_composition_retries WHERE deck_id=?", (deck_row["id"],))
 
 
 def _apply_doctor_who_planechase_conn(conn: sqlite3.Connection, deck_id: str, file_name: str | None) -> None:
@@ -1186,16 +1245,8 @@ def get_deck(db_path: str | Path = DEFAULT_DB, deck_id: str = "", *, catalog_db:
             _load_tokens(db_path, deck, timeout, catalog_db)
         with _connect(db_path) as conn:
             deck = conn.execute("SELECT * FROM decks WHERE id=?", (str(deck_id),)).fetchone()
-    with _connect(db_path) as conn:
-        rows = conn.execute("SELECT section,ordinal,name,count,set_code,collector_number,mtgjson_uuid,foil,raw_json FROM deck_cards WHERE deck_id=? ORDER BY section,ordinal", (str(deck_id),)).fetchall()
-    sections = {s: [] for s in SECTIONS}
-    for r in rows:
-        item = dict(r)
-        item["raw"] = json.loads(item.pop("raw_json"))
-        item["foil"] = bool(item["foil"])
-        item.pop("ordinal", None)
-        section = item.pop("section")
-        sections[section].append(item)
+    with closing(_connect(db_path)) as conn:
+        sections = read_deck_card_sections(conn, str(deck_id))
     all_cards = [card for group in sections.values() for card in group]
     _resolve_provider_ids(all_cards, catalog_db)
     result = {k: deck[k] for k in ("id", "name", "name_fr", "type", "set_code", "set_name", "set_name_fr", "release_date", "loaded")}
@@ -1204,3 +1255,17 @@ def get_deck(db_path: str | Path = DEFAULT_DB, deck_id: str = "", *, catalog_db:
     result["colors"] = list(deck["colors"]) if deck["colors"] is not None else None
     result["sections"] = sections
     return {"contract_version": CONTRACT_VERSION, "found": True, "deck": result}
+
+
+def read_deck_card_sections(conn: sqlite3.Connection, deck_id: str) -> dict[str, list[dict]]:
+    """Read stored sections from an open deck database using SQLite Row objects."""
+    rows = conn.execute("""SELECT section,name,count,set_code,collector_number,mtgjson_uuid,foil,raw_json
+        FROM deck_cards WHERE deck_id=? ORDER BY section,ordinal""", (deck_id,))
+    sections = {s: [] for s in SECTIONS}
+    for r in rows:
+        item = dict(r)
+        item["raw"] = json.loads(item.pop("raw_json"))
+        item["foil"] = bool(item["foil"])
+        section = item.pop("section")
+        sections[section].append(item)
+    return sections

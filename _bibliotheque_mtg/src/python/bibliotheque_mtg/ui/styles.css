@@ -59,6 +59,7 @@ body { background: #0e0d15; }
   border-radius: var(--action-radius);
   box-shadow: var(--action-shadow);
 }
+.topbar a.nav-button { text-decoration: none; }
 .topbar .nav-button:not(:hover):not(.active) { box-shadow: none; }
 .topbar .nav-button:hover,
 .topbar .nav-button.active,
@@ -677,6 +678,20 @@ select[hidden]{display:none!important}
 .shutdown-actions .secondary-button:hover{background-color:#413653;border-color:#86739f;color:#faf5ff}
 .shutdown-actions .primary-button{background:linear-gradient(155deg,#ffffff12,transparent 75%),#533785;border-color:#775b9f;color:#fffaff}
 .shutdown-actions .primary-button:hover{background-color:#65479a;border-color:#a287c4}
+.banner-panel{align-items:start}
+.banner-actions{margin-top:.9rem}
+.banner-panel progress{margin-top:.65rem;width:min(100%,24rem);accent-color:#b9a2ff}
+.banner-example{margin:0;text-align:center;color:#bdb8cf;font-size:.875rem}
+.banner-example img{display:block;width:9rem;height:auto;margin:0 auto .35rem;border-radius:.45rem}
+#localized-banner-dialog{width:min(640px,calc(100% - 2rem));max-height:calc(100dvh - 2rem);overflow:auto}
+#localized-banner-dialog label{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:.5rem;margin-top:.75rem}
+#localized-banner-mode{width:auto}
+#localized-banner-items{list-style:none;margin:.75rem 0 0;padding:0;text-align:left;max-height:min(54vh,26rem);overflow:auto}
+#localized-banner-items li{padding:.7rem .35rem;border-bottom:1px solid var(--line)}
+.banner-result-images{display:grid;grid-template-columns:repeat(2,minmax(0,10rem));gap:.75rem;margin-top:.5rem}
+.banner-result-images figure{margin:0;color:#bdb8cf;font-size:.875rem}
+.banner-result-images img{display:block;width:100%;aspect-ratio:531 / 738;object-fit:contain;border-radius:.45rem;margin-bottom:.25rem}
+@media(max-width:760px){.banner-example{justify-self:start}}
 .shutdown-actions button:focus-visible{outline:2px solid #bfabff;outline-offset:2px}
 @media (prefers-reduced-motion:no-preference){.shutdown-actions button{transition:color 150ms ease,border-color 150ms ease,background-color 150ms ease}}
 @media(max-width:760px){.maintenance-panel{grid-template-columns:minmax(0,1fr)}.maintenance-panel > button{justify-self:start}}
@@ -1646,6 +1661,8 @@ body.personal-deck-drag-active * {
 :is(#deck-list, .personal-list-groups) .personal-deck-tile.deck-tile-loading::before{display:none}
 .deck-grid-loading{display:none;min-height:2rem;margin:0}
 .personal-deck-grid:has(.deck-tile-loading.deck-tile-near) > .deck-grid-loading{display:flex}
+#deck-list > .deck-grid-loading{display:flex;visibility:hidden}
+#deck-list:has(.deck-tile-loading.deck-tile-near) > .deck-grid-loading{visibility:visible}
 .personal-list-group > .personal-deck-grid > .deck-grid-loading{justify-content:flex-start}
 #proxy-folder-status:empty{display:none}
 .personal-drop-target {

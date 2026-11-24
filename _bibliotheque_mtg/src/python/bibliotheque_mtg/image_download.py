@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -501,6 +502,25 @@ def _allowed_url(url: str, test_hosts: set[str] | None = None,
     return scheme_ok and host in allowed and not p.username and not p.password
 
 
+@lru_cache(maxsize=1)
+def _signed_art_products() -> dict:
+    path = Path(__file__).with_name("image_sources_signed_art.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _signed_art_candidate(printing: dict, raw: dict, face_index: int) -> dict | None:
+    if face_index != 0 or printing["layout"] != "art_series" or raw.get("lang") != "en":
+        return None
+    reference = _signed_art_products().get(printing["code"], {}).get(printing["collector_number"])
+    if not reference or raw.get("id") != reference[0]:
+        return None
+    product_id = reference[1]
+    host = "product-images.tcgplayer.com"
+    return {"url": f"https://{host}/{product_id}.jpg", "allow_host": host,
+            "source": "tcgplayer_signed_art", "evidence": f"tcgplayer_product_id:{product_id}",
+            "minimum_side": 200}
+
+
 def _manual_candidates(set_code: str, collector_number: str, face_index: int) -> list[dict]:
     try:
         registry = json.loads(_MANUAL_IMAGE_SOURCES_PATH.read_text(encoding="utf-8"))
@@ -924,7 +944,14 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                 for candidate in _manual_candidates(printing["code"], printing["collector_number"], face_index):
                     manual_by_url[candidate["url"]] = candidate
                     pools.setdefault(candidate["language"], []).append(candidate["url"])
-            if test_hosts is None and face_index == 0 and (_preview_only or not pools.get("fr")):
+            if test_hosts is None and not pools.get("en"):
+                signed_art = _signed_art_candidate(printing, raws.get("en", {}), face_index)
+                if signed_art:
+                    url = signed_art["url"]
+                    manual_by_url[url] = signed_art
+                    pools.setdefault("en", []).append(url)
+            if (test_hosts is None and face_index == 0
+                    and (_preview_only or (not pools.get("fr") and printing["layout"] != "art_series"))):
                 english_name = (raws.get("en") or raws.get("fr") or {}).get("name") or ""
                 gallery_candidates = (_official_gallery_images(
                     printing["name"], french_name, s, english_name=english_name,
@@ -949,6 +976,9 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
             chosen = None; deferred = None
             deep_run_id = uuid.uuid4().hex if _deep_refresh else None
             for language in languages:
+                urls = pools.get(language, [])
+                if not urls:
+                    continue
                 key = (f"deep:{deep_run_id}:{printing['printing_id']}:{face_index}:{language}"
                        if _deep_refresh else f"{printing['printing_id']}:{face_index}:{language}")
                 ledger_entry = ledger["faces"].get(key, {})
@@ -961,7 +991,6 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                     ledger_entry["gets"] = max(0, int(ledger_entry.get("gets", 0)) - refunded)
                     ledger_entry["temporary_errors_refunded"] = True
                 used = int(ledger_entry.get("gets", 0))
-                urls = pools.get(language, [])
                 if _deep_refresh:
                     urls = list(dict.fromkeys(urls))
                 temporary_error = None
@@ -1011,17 +1040,18 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                         if error == "acces_refuse_403": deferred = error; break
                         continue
                     try:
-                        minimum = 1 if _preview_only or manual_source else _MIN_SOURCE_SIDE
+                        minimum = (int(manual_source.get("minimum_side", 1)) if manual_source else
+                                   1 if _preview_only else _MIN_SOURCE_SIDE)
                         width, height = _convertible(data, minimum_side=minimum)
                     except ValueError as exc:
                         entry.setdefault("errors", []).append("image_invalide")
                         attempts.append({"face": face_index, "language": language, "error": "image_invalide"}); continue
                     got[language].append((data, width, height, url))
-                    exact_official = bool(manual_source and manual_source.get("source") in
+                    exact_alternate = bool(manual_source and manual_source.get("source") in
                                           {"wizards_official_reviewed", "wizards_product_gallery",
-                                           "wizards_contentful"})
+                                           "wizards_contentful", "tcgplayer_signed_art"})
                     if not _deep_refresh and ((width >= _MIN_SOURCE_SIDE and height >= _MIN_SOURCE_SIDE)
-                                              or exact_official):
+                                              or exact_alternate):
                         chosen = (language, data, width, height, url); break
                 _save_ledger(ledger_path, ledger)
                 if _deep_refresh and got[language]:

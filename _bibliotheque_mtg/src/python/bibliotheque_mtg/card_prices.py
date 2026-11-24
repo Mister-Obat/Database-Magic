@@ -15,6 +15,7 @@ from .v2.query import connect
 
 _PRICE_GUIDE = "https://downloads.s3.cardmarket.com/productCatalog/priceGuide/price_guide_1.json"
 _MAX_GUIDE_BYTES = 64 * 1024 * 1024
+_PRICE_CACHE_VERSION = 1
 
 
 def _database(library_dir: Path) -> Path:
@@ -36,6 +37,8 @@ def _cached_guide(library_dir: Path, version_id: str) -> tuple[str, str, int] | 
     if not database.exists():
         return None
     with closing(connect(database)) as conn:
+        if conn.execute("PRAGMA user_version").fetchone()[0] != _PRICE_CACHE_VERSION:
+            return None
         exists = conn.execute(
             "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='price_guide'").fetchone()
         if not exists:
@@ -67,8 +70,7 @@ def _product_prices(rows: list, check_cancel) -> dict[int, tuple[int | None, int
 
 
 def _group_by_name(catalogue_db: Path, products: dict, check_cancel) -> dict[str, int]:
-    regular_prices: dict[str, int] = {}
-    foil_prices: dict[str, int] = {}
+    prices: dict[str, int] = {}
     with closing(connect(catalogue_db)) as conn:
         # A progress handler interrupts SQLite even while it is reading records with no product ID.
         cancelled = False
@@ -91,14 +93,14 @@ def _group_by_name(catalogue_db: Path, products: dict, check_cancel) -> dict[str
             for name, product_id in records:
                 match = products.get(product_id)
                 if match:
-                    for target, cents in zip((regular_prices, foil_prices), match):
+                    for cents in match:
                         if cents is not None:
-                            target[name] = min(cents, target.get(name, cents))
+                            prices[name] = min(cents, prices.get(name, cents))
         except sqlite3.OperationalError:
             if cancelled:
                 check_cancel()
             raise
-    return foil_prices | regular_prices
+    return prices
 
 
 def _save_prices(database: Path, prices: dict[str, int], *, etag: str, created_at: str,
@@ -116,6 +118,7 @@ def _save_prices(database: Path, prices: dict[str, int], *, etag: str, created_a
         conn.execute("DELETE FROM price_guide")
         conn.executemany("INSERT INTO card_prices VALUES (?, ?)", prices.items())
         conn.execute("INSERT INTO price_guide VALUES (?, ?, ?)", (etag, created_at, version_id))
+        conn.execute(f"PRAGMA user_version = {_PRICE_CACHE_VERSION}")
         check_cancel()
 
 

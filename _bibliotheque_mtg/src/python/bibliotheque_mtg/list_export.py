@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import io
 import shutil
+from contextlib import closing
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from .deck_media import _safe_name, _valid_asset
+from .deck_media import _safe_name, _valid_asset, double_faced_export_name, export_face_suffix
 from .images import OUTPUT_SIZE
 from .v2.query import connect
 
@@ -96,9 +97,9 @@ def export_list_to_desktop(items: list[dict], catalog_db: Path,
 
 def export_card_to_desktop(provider_card_id: str, face_index: int, catalog_db: Path,
                            desktop: Path | None = None) -> dict:
-    """Copy one ready face to the persistent desktop export folder."""
+    """Copy local PNGs for an exact printing to the desktop export folder."""
     version = Path(catalog_db).resolve().parent
-    with connect(catalog_db) as conn:
+    with closing(connect(catalog_db)) as conn:
         row = conn.execute("""SELECT sr.printing_id,sr.mana_value,sr.name,
             COALESCE(fr.printed_name,fr.name) AS french_name
             FROM source_records sr LEFT JOIN source_records fr
@@ -107,27 +108,59 @@ def export_card_to_desktop(provider_card_id: str, face_index: int, catalog_db: P
             (provider_card_id,)).fetchone()
         if row is None:
             raise ValueError("Carte introuvable dans le catalogue.")
-        slots = conn.execute("""SELECT s.face_index,s.status,a.relative_path
-            FROM image_slots s LEFT JOIN image_assets a USING(asset_id)
-            WHERE s.printing_id=? ORDER BY s.face_index""", (row["printing_id"],)).fetchall()
-    slot = next((item for item in slots if item["face_index"] == face_index), None)
-    if slot is None or slot["status"] != "ready" or not _valid_asset(version, slot["relative_path"]):
+        slots = {slot["face_index"]: slot for slot in conn.execute("""
+            SELECT f.face_index,s.status,a.relative_path FROM card_faces f
+            LEFT JOIN image_slots s USING(printing_id,face_index)
+            LEFT JOIN image_assets a USING(asset_id)
+            WHERE f.printing_id=? AND f.physical_image=1 ORDER BY f.face_index""", (row["printing_id"],))}
+        name = row["french_name"] or row["name"]
+        if len(slots) == 2:
+            name = double_faced_export_name(conn, provider_card_id, name)
+    if face_index not in slots:
         raise ValueError("Image locale indisponible pour cette face.")
-    suffix = f" (face {face_index + 1})" if len(slots) > 1 else ""
-    return export_local_card_image(version / slot["relative_path"],
-                                   (row["french_name"] or row["name"]) + suffix, row["mana_value"], desktop)
+    indexes = list(slots) if len(slots) == 2 else [face_index]
+    sources = []
+    for index in indexes:
+        slot = slots[index]
+        if slot["status"] != "ready" or not _valid_asset(version, slot["relative_path"]):
+            raise ValueError("Les deux images locales doivent être disponibles." if len(indexes) == 2
+                             else "Image locale indisponible pour cette face.")
+        sources.append((version / slot["relative_path"], name + export_face_suffix(index, len(slots))))
+    result = _export_card_images(sources, row["mana_value"], desktop)
+    paths = result["paths"]
+    return {"path": paths[indexes.index(face_index)], **result}
 
 
 def export_local_card_image(image_path: Path, name: str, mana_value, desktop: Path | None = None,
                             *, normalize=False) -> dict:
+    result = _export_card_images([(image_path, name)], mana_value, desktop, normalize=normalize)
+    return {"path": result["paths"][0], "folder": result["folder"]}
+
+
+def _export_card_images(sources: list[tuple[Path, str]], mana_value,
+                        desktop: Path | None, *, normalize=False) -> dict:
+    images = [(_safe_name(f"{_mana_label(mana_value)} - {name}"), _png(path, normalize=normalize))
+              for path, name in sources]
     desktop = Path(desktop) if desktop is not None else Path.home() / "Desktop"
     target = desktop.expanduser().resolve() / "Cartes exportées"
     target.mkdir(parents=True, exist_ok=True)
-    stem = _safe_name(f"{_mana_label(mana_value)} - {name}")
-    candidate = target / f"{stem}.png"
-    duplicate = 2
-    while candidate.exists():
-        candidate = target / f"{stem} ({duplicate}).png"
-        duplicate += 1
-    candidate.write_bytes(_png(image_path, normalize=normalize))
-    return {"path": str(candidate), "folder": str(target)}
+    written = []
+    try:
+        for stem, data in images:
+            candidate = target / f"{stem}.png"
+            duplicate = 2
+            while True:
+                try:
+                    output = candidate.open("xb")
+                    break
+                except FileExistsError:
+                    candidate = target / f"{stem} ({duplicate}).png"
+                    duplicate += 1
+            written.append(candidate)
+            with output:
+                output.write(data)
+    except Exception:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
+    return {"paths": [str(path) for path in written], "folder": str(target)}

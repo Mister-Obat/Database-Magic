@@ -40,6 +40,16 @@ def test_batch_filter_accepts_current_search_fields_and_other_modes():
     assert local_app._batch_filter_payload("decks", {"q": "test"}) == {"q": "test"}
 
 
+def test_added_composition_invalidates_fresh_complete_deck_count(tmp_path, monkeypatch):
+    catalogue, deck_db = tmp_path / "catalogue.sqlite", tmp_path / "decks.sqlite"
+    monkeypatch.setattr(local_app, "_DECK_STATS_BUSY", False)
+    monkeypatch.setattr(local_app, "_DECK_STATS_CACHE",
+                        ((catalogue, deck_db), frozenset({"old"}), time.monotonic(), 1))
+    monkeypatch.setattr(local_app, "_count_complete_decks", lambda _db, _decks, ids: len(ids))
+
+    assert local_app._cached_complete_decks(catalogue, deck_db, ["old", "new"], background=False) == 2
+
+
 def test_card_usage_exposes_edition_icon_and_deck_colors(monkeypatch, tmp_path):
     source = tmp_path / "source.sqlite"
     catalogue = tmp_path / "catalogue.sqlite"
@@ -88,8 +98,11 @@ def test_deck_cover_follows_composition_order_and_colors_ignore_tokens(monkeypat
     section_data.pop("display_commander")
     section_data.pop("sideboard")
     commander["image_path"] = None
-    assert project()["cover_image_path"] is None
+    assert project()["cover_image_path"] == "partner.webp"
+    section_data["commander"] = [commander]
+    assert project()["cover_image_path"] == "first.webp"
     section_data["mainboard"] = [artifact]
+    assert project()["cover_image_path"] is None
     assert project()["composition_colors"] == ["R"]
     section_data["commander"] = []
     assert project()["composition_colors"] == []
@@ -154,7 +167,9 @@ def test_deck_routes_and_import_use_exact_provider_ids(monkeypatch, tmp_path):
     monkeypatch.setattr(local_app, "resolve_current", lambda _: {"database": db, "version_id": "test"})
     monkeypatch.setattr(local_app, "ensure_deck_index", lambda *args, **kwargs: None)
     monkeypatch.setattr(local_app, "_deck_edition_names", lambda *args, **kwargs: {})
-    monkeypatch.setattr(local_app, "_deck_list_media", lambda *args, **kwargs: {"cover_image_path": None})
+    monkeypatch.setattr(local_app, "_deck_list_media", lambda *args, **kwargs: {"cover_image_path": "cover.webp"})
+    monkeypatch.setattr(local_app, "prepare_deck_composition", lambda _db, deck_id, _catalog:
+                        ("ready", {"id": deck_id, "loaded": True, "colors": ["U"]}))
     monkeypatch.setattr(local_app, "list_decks", lambda *args, **kwargs: {
         "total": 1, "limit": 50, "offset": 0,
         "items": [{"id": "timey", "name": "Timey-Wimey", "type": "Commander Deck", "set_code": "WHO"}],
@@ -195,6 +210,15 @@ def test_deck_routes_and_import_use_exact_provider_ids(monkeypatch, tmp_path):
     try:
         with urllib.request.urlopen(base + "/api/v2/decks", timeout=5) as response:
             assert json.load(response)["items"][0]["id"] == "timey"
+        request = urllib.request.Request(
+            base + "/api/v2/decks/prepare", method="POST", data=b'{"deck_id":"timey"}',
+            headers={"Content-Type": "application/json", "Origin": base},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert json.load(response) == {
+                "status": "ready", "item": {"id": "timey", "loaded": True, "colors": ["U"],
+                                            "cover_image_path": "cover.webp"},
+            }
         with urllib.request.urlopen(base + "/api/v2/decks/filters", timeout=5) as response:
             assert json.load(response)["types"] == ["Commander Deck"]
         request = urllib.request.Request(

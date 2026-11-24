@@ -161,6 +161,24 @@ def _deck_title(deck: dict[str, Any]) -> str:
     return str(deck.get("name_fr") or deck.get("name") or "Deck")
 
 
+def double_faced_export_name(conn: sqlite3.Connection, provider_id: str, fallback: str) -> str:
+    """Prefer the printed French front-face name of this exact printing."""
+    row = conn.execute("""SELECT json_extract(fr.raw_json, '$.card_faces[0].printed_name'),
+        fr.printed_name, sr.name
+        FROM source_records sr LEFT JOIN source_records fr
+        ON fr.printing_id=sr.printing_id AND fr.lang='fr'
+        WHERE sr.provider_card_id=?
+        ORDER BY fr.provider_card_id LIMIT 1""", (provider_id,)).fetchone()
+    name = (row[0] or row[1] or row[2]) if row else fallback
+    return (name or fallback).split(" // ", 1)[0]
+
+
+def export_face_suffix(face_index: int, count: int) -> str:
+    if count == 2:
+        return " (recto)" if face_index == 0 else " (verso)"
+    return f" (face {face_index + 1})" if count > 1 else ""
+
+
 def export_deck_to_desktop(deck: dict[str, Any], catalog_db: Path,
                            desktop: Path | None = None, *, proxy_lookup=None) -> dict[str, Any]:
     """Export all physical faces as PNG, refusing incomplete decks before writing."""
@@ -191,6 +209,8 @@ def export_deck_to_desktop(deck: dict[str, Any], catalog_db: Path,
                         raise ValueError(f"Images incomplètes pour {card.get('printed_name') or card.get('name')}: toutes les faces physiques doivent être prêtes")
                     sources = [(face["face_index"], (version / face["relative_path"]).resolve()) for face in faces]
                 name = str(card.get("printed_name") or card.get("name") or "Carte")
+                if len(sources) == 2:
+                    name = double_faced_export_name(conn, provider_id, name)
                 mana = 0 if token_section else card.get("mana_value")
                 mana_label = str(int(mana)) if isinstance(mana, (int, float)) and float(mana).is_integer() else str(mana if mana is not None else 0)
                 quantity = int(card.get("count", card.get("quantity", 1)) or 1)
@@ -198,7 +218,7 @@ def export_deck_to_desktop(deck: dict[str, Any], catalog_db: Path,
                     raise ValueError(f"Quantité invalide pour {name}")
                 for copy_index in range(1, quantity + 1):
                     for face_index, source in sources:
-                        suffix = f" (face {face_index + 1})" if len(sources) > 1 else ""
+                        suffix = export_face_suffix(face_index, len(sources))
                         if quantity > 1:
                             suffix += f" ({copy_index})"
                         stem = _safe_name(f"{mana_label} - {name}{suffix}")

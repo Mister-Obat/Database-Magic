@@ -53,6 +53,22 @@ cartes V2 et de son cycle de publication.
   par son code stable. Chaque item conserve `name`/`set_name` en anglais et ajoute
   `name_fr`/`set_name_fr` (null si indisponible).
 - L'option **Tous les decks** inclut les decks avec et sans couverture.
+- Après le rendu de la page consultée, `POST /api/v2/decks/prepare`
+  prépare un deck affiché dont la composition ou le relevé des jetons manque,
+  à partir de son identifiant `deck_id`. Un relevé confirmé vide est conservé.
+  Les pages préchargées attendent d’être affichées.
+  Le serveur réutilise les fichiers individuels compressés et les reports du
+  travailleur de fond. Une seule demande automatique de composition s’exécute
+  à la fois. La réponse indique `ready`, `deferred` ou `paused` et expose
+  les métadonnées de la vignette. L’interface actualise celle-ci sur place
+  sans relancer la recherche ou déplacer la page. La couverture est résolue
+  à partir des images locales et respecte l’ordre de la fiche.
+- Sur l’Accueil, le total est celui des decks admissibles de l’index courant.
+  Le compteur de decks complets recalcule son résultat lorsque l’ensemble des
+  compositions chargées avec leurs jetons change, même avant l’expiration du
+  cache. Une valeur du calcul précédent peut s’afficher pendant ce recalcul.
+  Le recalcul relit les cartes de l’index via une connexion SQLite en lecture
+  seule et applique les mêmes règles d’identité et d’images que le détail.
 - La recherche peut filtrer les decks dont l'image de couverture est prête ou
   absente. Ce filtre s'applique avant pagination ; les decks sans composition
   chargée sont considérés sans image. Le résultat de cette résolution locale est
@@ -178,14 +194,14 @@ cartes V2 et de son cycle de publication.
   jetons. Un deck entièrement prêt propose l'export local sur le Bureau à la
   place du bouton de téléchargement. L'export contrôle à nouveau la complétude
   avant de créer un dossier nouveau sans remplacer un export antérieur.
-- La vignette d'un deck reprend la première carte de la première section non
-  vide affichée dans sa fiche. L’API place Commandants en tête, puis
-  Commandants de présentation et Jetons à la fin, dans cet ordre. Les autres
-  sections et les cartes de chaque section conservent leur ordre.
-  Une composition réduite à la section Jetons, comme Enemy Deck (TMT), utilise
-  sa première carte. La première carte garde cet emplacement
-  même quand son image manque. Une identité inconnue reste un emplacement vide ;
-  aucun choix par nom du deck ou par image d'une autre édition n'est permis.
+  Pour chaque impression à deux faces physiques, les deux PNG reprennent la
+  valeur de mana et le nom du recto et portent les suffixes `(recto)` et
+  `(verso)`. Cette règle s’applique aussi à l’export d’un deck personnel.
+- La vignette reprend la première carte ayant une image locale de son
+  impression exacte, dans l’ordre de la composition affichée. L’API place
+  Commandants en tête, puis Commandants de présentation et Jetons à la fin,
+  dans cet ordre. La couverture reste vide si aucune image n’est disponible.
+  Une composition réduite à la section Jetons peut utiliser une image de jeton.
 - Au retour de la composition, si la couverture renvoyée par la fiche diffère
   de celle de la liste en mémoire, les résultats sont relus avec les filtres
   actifs. Cela inclut une composition chargée depuis l'ouverture de la fiche.

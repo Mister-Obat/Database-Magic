@@ -2,7 +2,9 @@
 
 ## Prix indicatifs
 
-Sur l’Accueil, l’interrupteur **Prix Cardmarket** est inactif par défaut et
+Sur l’Accueil, la section **Afficher le prix des cartes** présente le minimum
+Cardmarket par carte, toutes éditions et variantes confondues. Son interrupteur
+**Prix Cardmarket** est inactif par défaut et
 mémorise la préférence d’affichage dans le navigateur local. Lorsqu’il est
 actif, l’interface lit les estimations via `GET /api/v2/prices`.
 Dans Recherche et Éditions, le nom de la carte est centré et le prix en
@@ -12,6 +14,16 @@ L’estimation multiplie le prix unitaire par la quantité et affiche un
 « + » quand seul un sous-total est disponible. Désactiver la préférence
 masque immédiatement les prix et conserve le nombre de cartes.
 Voir [maintenance](maintenance-publication.manifest.md) pour l’import.
+
+## Analyse et remplacement des images avec bandeau
+
+Entre les prix et la maintenance, un panneau de l’Accueil montre une vraie
+carte avec le bandeau Scryfall et donne accès à deux opérations distinctes.
+L’analyse locale indique combien de bandeaux ont été détectés. Le remplacement
+indique le nombre de faces traitées et remplacées, puis rend le bilan du lot.
+La modale pagine les images détectées ou les paires avant/après remplacées
+depuis la dernière analyse. Les compteurs et les résultats sont restaurés
+au rechargement pour la version active du catalogue.
 
 ## Cartes proxy
 
@@ -144,7 +156,8 @@ Pour les changements visuels, suivre la [direction artistique de l’interface](
 - La pagination de Recherche, Éditions et Decks remonte à l’en-tête et
   affiche un chargement dans la grille. Recherche réutilise l’ordre des
   impressions lorsque le classement et les critères le permettent.
-  Le rafraîchissement conserve la position de lecture.
+  Le rafraîchissement conserve la position de lecture au moment du rendu,
+  même après un défilement pendant le chargement.
   Recherche, Éditions et Decks préconstruits placent aussi les commandes avant
   la grille. Entrée dans le numéro de page mène directement à la page saisie.
   Les listes conservent la page courante et les pages adjacentes par filtre.
@@ -351,11 +364,13 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - `POST /api/v2/image/import` reçoit un fichier image brut (20 MiB maximum) et
   l'identité exacte `provider_card_id`/`face_index` en paramètres d'URL. Il
   normalise et publie dans le slot partagé par toutes les vues.
-- `POST /api/v2/image/export` reçoit cette identité exacte en JSON et convertit
-  la face locale prête en PNG dans le dossier persistant `Cartes exportées` sur
-  le Bureau. Le nom reprend `<valeur de mana> - <nom français>` de l'export de
-  liste, avec suffixe de face et de doublon si nécessaire. La visionneuse
-  commune à Recherche, Éditions et Decks expose ce bouton entre import et verso.
+- `POST /api/v2/image/export` reçoit cette identité exacte en JSON et écrit
+  les PNG dans le dossier persistant `Cartes exportées` sur le Bureau. Une
+  impression à deux faces physiques exporte le recto et le verso ensemble
+  depuis l’une ou l’autre face. Les deux images locales doivent être prêtes.
+  Les deux noms reprennent la valeur de mana et le nom du recto, en français
+  si disponible, avec les suffixes `(recto)` et `(verso)`. Les doublons sont
+  numérotés. La visionneuse expose ce bouton entre import et verso.
 - `GET /api/v2/deferred` et `/archive` pour les séries différées et les fichiers
   anciens non attribués. `/archive` exclut les chemins d'archives enregistrés
   comme résolus dans l'état de reprise local, sans modifier l'index historique.
@@ -462,16 +477,16 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   principal ; les jetons sont séparés en fin de liste. Les préconstruits
   reprennent la mosaïque des decks personnels. Chaque tuile affiche la
   couverture, le nom, les couleurs et une ligne avec le nom de l’édition et son
-  icône lorsqu’elle est connue. La couverture des deux types de decks suit la
-  première carte de la première section non vide dans l’ordre affiché. Les
+  icône lorsqu’elle est connue. Un préconstruit utilise la première carte
+  dotée d’une image locale dans l’ordre affiché. Un deck personnel utilise
+  la première carte de la première section non vide. Les
   symboles affichent l’union W/U/B/R/G des couleurs des cartes jouables, réserve
   comprise. Les jetons, commandants de présentation, plans et machinations ne
   contribuent pas. Le symbole incolore s’affiche seul quand aucune carte connue
   de la composition n’a de couleur. L’API fournit l’URL Scryfall validée de l’icône.
   Les vignettes de cartes gardent leur taille au survol. Les boîtes de deck
   suivent le pointeur et s’agrandissent légèrement selon la direction artistique.
-  La première carte fournit l’illustration. Le titre du couvercle est le
-  nom du deck, affiché en entier.
+  Le titre du couvercle est le nom du deck, affiché en entier.
 - La page d'une édition liste chaque impression et son numéro de collection
   dans cette édition, avant pagination. Elle privilégie une ligne française de cette
   impression ; à défaut, une ligne anglaise, puis japonaise, phyrexiane ou une
@@ -561,6 +576,9 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
 - Une recherche d'image depuis la visionneuse télécharge aussi les autres faces
   manquantes de la même impression. Les imports de listes et de decks demandent
   déjà toutes les faces physiques avec `download_printing`.
+- Les liens Accueil, Recherche, Éditions et Deck préconstruit s’ouvrent aussi
+  dans un nouvel onglet du navigateur par clic molette. Un clic simple reste
+  dans l’application et reprend la vue mémorisée.
 - Chaque onglet possède un fragment d'URL distinct. Le fragment conserve aussi
   l'état pertinent de la vue (filtres, tri, sélection et page ; deck ouvert le cas
   échéant) afin qu'une actualisation ou l'historique restaure les mêmes critères.
@@ -643,7 +661,13 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Deck préconstruit revérifie les résultats de la recherche ou relit le deck
   ouvert. Deck perso actualise la liste ou relit la fiche après sauvegarde des
   changements. Sur Accueil, le bouton actualise les compteurs, les decks
-  récents et l’état de la maintenance.
+  récents et l’état de la maintenance. Quand le numérateur des decks complets
+  est encore en calcul, le total affiché vient de la réponse courante.
+- Chaque page consultée de préconstruits demande successivement les compositions
+  manquantes des decks de cette page. La couverture et les couleurs disponibles
+  sont appliquées à la boîte existante en conservant les résultats à l’écran.
+  Une composition ouverte enrichit aussi sa boîte en place. Le retour à la
+  liste conserve les boîtes et la position de défilement.
 - Recherche de cartes et de decks utilisent six sélecteurs visuels W/U/B/R/G/C.
   Les filtres d'édition, de rareté et de type de carte dans Recherche, et
   d'édition, de format et de type de produit dans Decks, acceptent plusieurs

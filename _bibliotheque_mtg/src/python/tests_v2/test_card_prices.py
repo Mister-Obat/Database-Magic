@@ -65,7 +65,7 @@ def test_imports_deduplicated_cardmarket_prices_and_revalidates(tmp_path, catalo
     report = card_prices.refresh_card_prices(
         tmp_path, catalogue, progress=lambda *_: None, cancel_event=Event())
     assert report == {"status": "updated", "cards": 2, "as_of": "2026-11-23T02:45:33+0100"}
-    assert card_prices.read_card_prices(tmp_path) == {"Nature's Lore": 47, "Wear // Tear": 123}
+    assert card_prices.read_card_prices(tmp_path) == {"Nature's Lore": 10, "Wear // Tear": 123}
 
     unchanged = card_prices.refresh_card_prices(
         tmp_path, catalogue, progress=lambda *_: None, cancel_event=Event())

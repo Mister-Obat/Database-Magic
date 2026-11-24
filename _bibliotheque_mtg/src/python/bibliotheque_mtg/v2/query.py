@@ -436,7 +436,9 @@ def search_cards(db, term="", *, set_code=None, language=None, rarity=None, colo
         if image_filter != "all":
             ready = """EXISTS (SELECT 1 FROM image_slots ims
                 WHERE ims.printing_id=chosen_search.printing_id AND ims.status='ready')"""
-            exclude = "NOT " + ready if image_filter == "with" else ready
+            missing = """EXISTS (SELECT 1 FROM image_slots ims
+                WHERE ims.printing_id=chosen_search.printing_id AND ims.status!='ready')"""
+            exclude = f"NOT {ready}" if image_filter == "with" else f"{ready} AND NOT {missing}"
             c.execute("DELETE FROM chosen_search WHERE " + exclude)
         if grouped:
             c.execute("""CREATE TEMP TABLE unique_search AS

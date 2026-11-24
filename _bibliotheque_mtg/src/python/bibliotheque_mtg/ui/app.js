@@ -897,6 +897,14 @@ function setView(view, urlMode = "push") {
 function restoreViewScroll(view) {
   window.scrollTo({ top: viewScrollPositions.get(view) ?? 0, behavior: "instant" });
 }
+function captureViewport(view, preserve = true) {
+  if (!preserve || state.view !== view) return;
+  // Capture at the render, after any scrolling while the request was pending.
+  const top = window.scrollY;
+  return () => {
+    if (window.scrollY !== top) window.scrollTo({ top, behavior: "instant" });
+  };
+}
 function scrollTopFooter(targetId) {
   const footer = node("div", "personal-deck-footer");
   const button = personalButton("", () => {
@@ -1211,6 +1219,193 @@ pricesToggle.addEventListener("change", () => {
   void refreshCardPrices();
 });
 
+const bannerDialog = $("localized-banner-dialog");
+const bannerOpen = $("localized-banner-open");
+const bannerDetect = $("localized-banner-detect");
+const bannerReplace = $("localized-banner-replace");
+const bannerCancel = $("localized-banner-cancel");
+const bannerStatus = $("localized-banner-status");
+const bannerProgress = $("localized-banner-progress");
+const bannerMode = $("localized-banner-mode");
+const bannerItems = $("localized-banner-items");
+const bannerPageLabel = $("localized-banner-page");
+const bannerPrev = $("localized-banner-prev");
+const bannerNext = $("localized-banner-next");
+let bannerPage = 1;
+let bannerTaskId = null;
+let bannerAnalysis = null;
+let bannerReplacement = null;
+let bannerRequest = 0;
+
+function showBannerCounts(detected = null, processed = null, replaced = null) {
+  const count = value => value == null ? "—" : formatNumber(value);
+  setText($("localized-banner-counts"),
+    `Images avec bandeau ${count(detected)} · Traitées ${count(processed)} · Remplacées ${count(replaced)}`);
+}
+
+function bannerImage(url, caption, name) {
+  const figure = node("figure");
+  const link = node("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  const image = node("img");
+  image.src = url;
+  image.alt = `${name} — ${caption}`;
+  image.loading = "lazy";
+  link.append(image);
+  figure.append(link, node("figcaption", "", caption));
+  return figure;
+}
+
+async function showBannerResults(page) {
+  const beforeAfter = bannerMode.value === "replaced";
+  const params = beforeAfter ? { replacement_id: bannerReplacement?.replacement_id }
+    : { analysis_id: bannerAnalysis?.analysis_id };
+  const request = ++bannerRequest;
+  bannerPrev.disabled = bannerNext.disabled = true;
+  bannerItems.replaceChildren();
+  setText(bannerPageLabel, "Chargement…");
+  try {
+    const { items, total, page_size } = await getJSON("/api/v2/image/localized-banner/results", { ...params, page });
+    if (request !== bannerRequest) return;
+    bannerPage = page;
+    bannerItems.replaceChildren(...items.map(item => {
+      const row = node("li");
+      row.append(node("strong", "", item.name), node("span", "muted",
+        ` · ${item.edition.toUpperCase()} n° ${item.collector_number} · Face ${item.face_index + 1}`));
+      const images = node("div", "banner-result-images");
+      if (beforeAfter) {
+        images.append(bannerImage(item.old_image_url, "Avant", item.name),
+          bannerImage(item.new_image_url, "Après", item.name));
+      } else {
+        images.append(bannerImage(item.image_url, "Image détectée", item.name));
+        if (!item.english_available) row.append(node("p", "muted", "Source anglaise indisponible"));
+      }
+      row.append(images);
+      return row;
+    }));
+    bannerItems.scrollTop = 0;
+    const last = Math.ceil(total / page_size);
+    setText(bannerPageLabel, last ? `Page ${page} sur ${last}` : "Aucune image");
+    bannerPrev.disabled = page <= 1;
+    bannerNext.disabled = page >= last;
+  } catch (error) {
+    if (request === bannerRequest) setText(bannerPageLabel, error.message);
+  }
+}
+
+function openBannerDialog() {
+  if (!bannerAnalysis?.detected || bannerDialog.open) return;
+  const hasPairs = Boolean(bannerReplacement?.replaced_total);
+  bannerMode.options[1].disabled = !hasPairs;
+  bannerMode.value = hasPairs ? "replaced" : "detected";
+  bannerDialog.showModal();
+  void showBannerResults(1);
+}
+
+async function runBannerTask(action) {
+  const detecting = action === "analyze";
+  if (detecting) {
+    bannerAnalysis = bannerReplacement = null;
+    showBannerCounts();
+  }
+  const previousReplaced = bannerReplacement?.replaced_total || 0;
+  bannerDetect.disabled = bannerReplace.disabled = bannerOpen.disabled = true;
+  bannerProgress.removeAttribute("value");
+  bannerProgress.hidden = false;
+  setText(bannerStatus, detecting ? "Analyse des images locales…" : "Recherche des images anglaises…");
+  try {
+    const payload = detecting ? {} : { analysis_id: bannerAnalysis.analysis_id };
+    const started = await postJSON(`/api/v2/image/localized-banner/${action}`, payload);
+    bannerTaskId = started.task_id;
+    imageTaskHandlers.set(bannerTaskId, { open: openBannerDialog });
+    bannerCancel.hidden = false;
+    void refreshNotifications();
+    let task;
+    do {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      task = await getJSON("/api/v2/image/task", { task_id: bannerTaskId });
+      if (task.total > 0) {
+        bannerProgress.max = task.total;
+        bannerProgress.value = task.processed || 0;
+        const progress = `${formatNumber(bannerProgress.value)} / ${formatNumber(task.total)} images`;
+        setText(bannerStatus, task.status === "cancelling" ? `Annulation en cours · ${progress}` : progress);
+        showBannerCounts(detecting ? task.detected : bannerAnalysis.detected,
+          detecting ? 0 : task.processed, detecting ? 0 : previousReplaced + (task.replaced || 0));
+      }
+    } while (["queued", "running", "cancelling"].includes(task.status));
+
+    if (task.status === "error") throw new Error(task.detail || "Le traitement a échoué.");
+    const report = task.result;
+    let summary = "";
+    if (detecting && task.status === "ready") {
+      bannerAnalysis = report;
+      showBannerCounts(report.detected, 0, 0);
+      summary = `${formatNumber(report.scanned)} images analysées. ${formatNumber(report.replaceable)} ont une source anglaise.`;
+      if (report.unreadable) summary += ` Fichiers illisibles (${formatNumber(report.unreadable)}).`;
+    } else if (!detecting && report) {
+      bannerReplacement = report;
+      const processed = report.replaced + report.failed + report.skipped;
+      showBannerCounts(bannerAnalysis.detected, processed, report.replaced_total);
+      if (report.replaced) refreshCurrentCollection();
+      summary = `${formatNumber(report.replaced)} images remplacées sur ${formatNumber(report.total)} dans cette recherche. ${formatNumber(report.failed)} en échec et ${formatNumber(report.skipped)} ignorées.`;
+      if (task.detail) summary += ` ${task.detail}`;
+      if (report.replaced + report.skipped === report.total) bannerAnalysis.replaceable = 0;
+    }
+    if (task.status === "cancelled") summary = `Traitement annulé. ${summary}`;
+    setText(bannerStatus, summary);
+  } catch (error) {
+    setText(bannerStatus, error.message);
+  } finally {
+    bannerTaskId = null;
+    bannerProgress.hidden = bannerCancel.hidden = true;
+    bannerCancel.disabled = bannerDetect.disabled = false;
+    bannerReplace.disabled = !bannerAnalysis?.replaceable;
+    bannerOpen.disabled = !bannerAnalysis?.detected;
+    if (detecting && !bannerAnalysis) void restoreBannerState();
+    void refreshNotifications();
+  }
+}
+
+async function restoreBannerState() {
+  try {
+    const { analysis, replacement } = await getJSON("/api/v2/image/localized-banner/state");
+    if (bannerDetect.disabled || bannerAnalysis || !analysis) return;
+    bannerAnalysis = analysis;
+    bannerReplacement = replacement;
+    const replaced = replacement?.replaced_total || 0;
+    const processed = replacement?.total == null ? replaced
+      : replacement.replaced + replacement.failed + replacement.skipped;
+    const finished = replaced >= analysis.replaceable ||
+      (replacement?.total != null && replacement.replaced + replacement.skipped === replacement.total);
+    if (finished) bannerAnalysis.replaceable = 0;
+    showBannerCounts(analysis.detected, processed, replaced);
+    bannerReplace.disabled = finished;
+    bannerOpen.disabled = !analysis.detected;
+  } catch (error) {
+    if (!bannerDetect.disabled && !bannerAnalysis) setText(bannerStatus, error.message);
+  }
+}
+
+bannerOpen.addEventListener("click", openBannerDialog);
+bannerMode.addEventListener("change", () => void showBannerResults(1));
+bannerPrev.addEventListener("click", () => void showBannerResults(bannerPage - 1));
+bannerNext.addEventListener("click", () => void showBannerResults(bannerPage + 1));
+bannerDetect.addEventListener("click", () => void runBannerTask("analyze"));
+bannerReplace.addEventListener("click", () => void runBannerTask("replace"));
+bannerCancel.addEventListener("click", async () => {
+  if (!bannerTaskId) return;
+  bannerCancel.disabled = true;
+  try {
+    await postJSON("/api/v2/image/task/cancel", { task_id: bannerTaskId });
+  } catch (error) {
+    setText(bannerStatus, error.message);
+    bannerCancel.disabled = false;
+  }
+});
+void restoreBannerState();
+
 const HOME_STATS_KEY = "database-magic-home-stats-v2";
 const HOME_COUNTER_IDS = ["stat-cards", "stat-editions", "stat-decks"];
 let homeStatsRequest, homeActivityRequest, homeActivitySnapshot, homeDeckCounter;
@@ -1239,16 +1434,21 @@ async function refreshHomeStats() {
     const counters = [
       [stats.complete_cards, stats.printings],
       [stats.complete_editions, stats.editions?.eligible],
-      (stats.complete_decks === null && homeDeckCounter) || [stats.complete_decks, stats.decks_total],
+      [stats.complete_decks === null && homeDeckCounter?.[1] === stats.decks_total
+        ? homeDeckCounter[0] : stats.complete_decks, stats.decks_total],
     ];
+    const restoreViewport = captureViewport("info");
     if (!renderHomeCounters(counters)) {
       throw new Error("Le serveur local est une ancienne version. Fermez-le puis relancez la Bibliothèque Magic.");
     }
     try { localStorage.setItem(HOME_STATS_KEY, JSON.stringify(counters)); }
     catch { /* Storage may be unavailable. */ }
     setText($("stats-error"), "");
+    restoreViewport?.();
   } catch (error) {
+    const restoreViewport = captureViewport("info");
     setText($("stats-error"), error.message);
+    restoreViewport?.();
   } finally {
     grid.setAttribute("aria-busy", "false");
   }
@@ -1259,6 +1459,7 @@ async function refreshHomeActivity() {
   if (homeActivitySnapshot === undefined) showDeckGridSkeleton(grid, 7);
   try {
     const { personal_decks: decks } = await getJSON("/api/v2/recent-activity");
+    const restoreViewport = captureViewport("info");
     const snapshot = JSON.stringify(decks);
     if (snapshot !== homeActivitySnapshot) {
       const recentDecks = decks.map(deck =>
@@ -1270,12 +1471,15 @@ async function refreshHomeActivity() {
       homeActivitySnapshot = snapshot;
     }
     errorBox.hidden = true;
+    restoreViewport?.();
   } catch (error) {
+    const restoreViewport = captureViewport("info");
     if (homeActivitySnapshot === undefined) {
       grid.replaceChildren();
     }
     setText(errorBox, `Activité récente indisponible : ${error.message}`);
     errorBox.hidden = false;
+    restoreViewport?.();
   } finally {
     grid.removeAttribute("aria-busy");
   }
@@ -1357,7 +1561,9 @@ function renderMaintenanceTask(task) {
 async function loadMaintenanceStatus() {
   try {
     const task = await getJSON("/api/v2/maintenance/update");
+    const restoreViewport = captureViewport("info");
     renderMaintenanceTask(task);
+    restoreViewport?.();
     if (["queued", "running", "cancelling", "restoring_images"].includes(task.status)) pollMaintenanceTask();
   } catch (error) {
     $("update-status").className = "maintenance-status error-state";
@@ -1894,9 +2100,11 @@ async function refreshSearchImages() {
       printing_ids: printings,
     }, { signal: controller.signal });
     if (request !== state.searchRequest || items !== state.searchItems) return;
+    const restoreViewport = captureViewport("recherche");
     for (const item of items) if (!item.proxy) item.image_slots = data.image_slots?.[item.printing_id] || [];
     renderEditionItems($("results"), items);
     setText($("search-status"), `${formatNumber(state.searchTotal)} résultat(s) · images actualisées`);
+    restoreViewport?.();
   } catch (error) {
     if (request === state.searchRequest && items === state.searchItems) {
       setText($("search-status"), `Actualisation des images impossible : ${error.message}`);
@@ -2083,10 +2291,12 @@ async function renderEditionPage(background = false) {
       editionPageKey = editionSelectionKey();
       if (state.view === "editions") syncRoute();
     }
+    const restoreViewport = captureViewport("editions", background);
     state.editionCardsTotal = data.total;
     renderEditionItems(container, data.items);
     updateEditionPager();
     updateBatchButtons();
+    restoreViewport?.();
     const current = () => state.view === "editions" && request === state.editionRequest;
     const prefetch = () => prefetchNeighbourPages(path, query, data.total, container, current);
     if (!focus || !current() || !revealEditionCard(container, focus, current, prefetch)) prefetch();
@@ -2918,14 +3128,16 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
       {
         const exportButton = node("button", "secondary-button card-image-icon image-export-button"); exportButton.append(cardActionIcon("download"));
         exportButton.type = "button";
-        exportButton.setAttribute("aria-label", "Télécharger l’image sur le Bureau");
+        exportButton.setAttribute("aria-label", "Télécharger la carte sur le Bureau");
         exportButton.disabled = !ready;
         exportButton.addEventListener("click", async () => {
           exportButton.disabled = true;
           try {
             const result = await postJSON("/api/v2/image/export", { provider_card_id: card.provider_card_id, face_index: card.proxy ? 0 : selectedFace });
             if (!exportButton.isConnected) return;
-            const status = node("p", "card-export-status", `Image enregistrée : ${result.path}`);
+            const status = node("p", "card-export-status", result.paths?.length === 2
+              ? `Recto et verso enregistrés dans ${result.folder}`
+              : `Image enregistrée : ${result.path}`);
             status.setAttribute("role", "status");
             imageWrap.querySelector(".card-export-status")?.remove();
             imageWrap.append(status);
@@ -3203,9 +3415,63 @@ async function refreshDeckResults() {
 function deckPageQuery() {
   return { ...state.deckAppliedFilters, limit: DECK_PAGE_SIZE, offset: state.deckPage * DECK_PAGE_SIZE };
 }
+let deckListEntries = new Map();
+let deckPreparationRunning = false;
+let deckPreparationRequested = false;
+
+function updateDeckListMedia(deck) {
+  const entry = deckListEntries.get(deck.id);
+  const { cover_image_path, composition_colors, colors } = deck;
+  const media = {};
+  for (const key of ["cover_image_path", "composition_colors", "colors", "media_summary", "complete", "loaded", "tokens_loaded"]) {
+    if (Object.hasOwn(deck, key)) media[key] = deck[key];
+  }
+  if (entry) {
+    const previous = entry.deck;
+    if ((previous.cover_image_path || null) !== (cover_image_path || null)) {
+      const image = personalImage({ image_path: cover_image_path }, "deck-box-art");
+      if (image.tagName === "IMG") image.alt = "";
+      entry.tile.querySelector(".deck-box-window").replaceChildren(image);
+    }
+    const nextColors = composition_colors ?? colors;
+    if (Array.isArray(nextColors) && JSON.stringify(previous.composition_colors ?? previous.colors) !== JSON.stringify(nextColors)) {
+      entry.tile.querySelector(".deck-box-mana").replaceChildren(colorSymbols(nextColors));
+    }
+    Object.assign(previous, media);
+  }
+  const cachedPages = cataloguePageCaches.get("/api/v2/decks")?.pages;
+  for (const page of cachedPages?.values() || []) {
+    const item = page.items.find(item => item.id === deck.id);
+    if (item) Object.assign(item, media);
+  }
+}
+
+async function prepareDeckList() {
+  const isVisible = () => state.view === "decks" && !state.openDeckId;
+  if (!isVisible()) return;
+  deckPreparationRequested = true;
+  if (deckPreparationRunning) return;
+  deckPreparationRunning = true;
+  try {
+    while (deckPreparationRequested) {
+      deckPreparationRequested = false;
+      const entries = deckListEntries;
+      for (const { deck } of entries.values()) {
+        if (!isVisible() || entries !== deckListEntries) break;
+        if ((deck.loaded && deck.tokens_loaded) || !deck.file_name) continue;
+        const { status, item } = await postJSON("/api/v2/decks/prepare", { deck_id: deck.id });
+        if (status === "ready" && item) updateDeckListMedia(item);
+        if (status === "paused") break;
+      }
+    }
+  } catch { /* A later visit can retry preparation. */ }
+  finally { deckPreparationRunning = false; }
+}
+
 function ensureDeckPage() {
   if (!state.deckExecuted) return;
   if (state.deckListKey !== params(deckPageQuery())) return renderDeckPage();
+  void prepareDeckList();
 }
 async function renderDeckPage(background = false) {
   if (state.openDeckId || !state.deckExecuted) return;
@@ -3221,6 +3487,7 @@ async function renderDeckPage(background = false) {
   $("download-deck-results").disabled = true;
   const container = $("deck-list");
   if (!background) {
+    deckListEntries = new Map();
     pageControls.get("deck-pager")(0, 1);
     container.setAttribute("aria-busy", "true");
     container.replaceChildren(pageLoading("Chargement des decks…"));
@@ -3228,11 +3495,13 @@ async function renderDeckPage(background = false) {
   try {
     const data = await fetchCataloguePage("/api/v2/decks", query, { signal: controller.signal });
     if (request !== state.deckRequest) return;
+    const restoreViewport = captureViewport("decks", background);
     state.deckTotal = data.total;
     updateBatchButtons();
-    container.replaceChildren();
-    if (!data.items.length) container.append(node("p", "empty-state", "Aucun deck préconstruit trouvé."));
-    else container.append(deckGridLoading());
+    const entries = new Map();
+    const items = document.createDocumentFragment();
+    if (!data.items.length) items.append(node("p", "empty-state", "Aucun deck préconstruit trouvé."));
+    else items.append(deckGridLoading());
     for (const deck of data.items) {
       const name = deckNameLabel(deck);
       const edition = node("span", "deck-tile-edition");
@@ -3249,13 +3518,18 @@ async function renderDeckPage(background = false) {
       const tile = deckCoverTile(name, deck.composition_colors ?? deck.colors, { image_path: deck.cover_image_path },
         () => void openDeck(deck.id), edition);
       tile.dataset.preconstructedDeckId = deck.id;
-      container.append(tile);
+      items.append(tile);
+      entries.set(deck.id, { deck, tile });
       deckLoadingObserver.observe(tile);
     }
+    container.replaceChildren(items);
+    deckListEntries = entries;
     const pages = Math.max(1, Math.ceil(data.total / DECK_PAGE_SIZE));
     pageControls.get("deck-pager")(state.deckPage, pages, `${formatNumber(data.total)} decks`);
+    restoreViewport?.();
     prefetchNeighbourPages("/api/v2/decks", query, data.total, container,
       () => state.view === "decks" && !state.openDeckId && request === state.deckRequest);
+    void prepareDeckList();
   } catch (error) {
     if (request === state.deckRequest) {
       state.deckListKey = null;
@@ -3344,12 +3618,6 @@ function scrollToDeckList() {
 }
 function closeDeck(urlMode = "push") {
   const wasOpen = Boolean(state.openDeckId);
-  const deck = state.selectedDeck;
-  const query = state.deckExecuted && deck ? deckPageQuery() : null;
-  const cached = query && cataloguePageCaches.get("/api/v2/decks")?.pages.get(query.offset);
-  const previous = cached?.items.find(item => item.id === deck.id);
-  const refresh = query && (!previous ||
-    (previous.cover_image_path || null) !== (deck.cover_image_path || null));
   ++state.deckDetailRequest;
   state.openDeckId = null;
   state.selectedDeck = null;
@@ -3363,19 +3631,8 @@ function closeDeck(urlMode = "push") {
     if (wasOpen) {
       state.deckListOpener?.focus({ preventScroll: true });
       scrollToDeckList();
-      if (!refresh) cataloguePageCaches.get("/api/v2/decks")?.resume?.();
-    }
-  }
-  if (refresh) {
-    if (state.view === "decks" && state.deckListKey === params(query)) {
-      const opener = state.deckListOpener;
-      void renderDeckPage(true).then(() => {
-        if (!opener || document.activeElement !== document.body || state.openDeckId || state.view !== "decks") return;
-        $("deck-list").querySelector(`[data-preconstructed-deck-id="${CSS.escape(deck.id)}"]`)?.focus({ preventScroll: true });
-      });
-    } else {
-      invalidatePageCache("/api/v2/decks");
-      state.deckListKey = null;
+      cataloguePageCaches.get("/api/v2/decks")?.resume?.();
+      void prepareDeckList();
     }
   }
 }
@@ -3405,8 +3662,10 @@ async function openDeck(deckId, urlMode = "push") {
     const data = await getJSON("/api/v2/deck", { id: deckId });
     if (request !== state.deckDetailRequest) return;
     if (!data.found) { target.replaceChildren(node("p", "empty-state", "Deck introuvable.")); return; }
+    const restoreViewport = captureViewport("decks", !changed);
     const deck = data.deck;
     state.selectedDeck = deck;
+    updateDeckListMedia(deck);
     if (state.view === "decks") syncRoute();
     const header = $("deck-open-heading");
     const eyebrow = [editionLabel(deck), productTypeLabel(deck.type)].filter(Boolean).join(" · ");
@@ -3446,6 +3705,7 @@ async function openDeck(deckId, urlMode = "push") {
       section.append(list); target.append(section);
     }
     target.append(scrollTopFooter("deck-open-heading"));
+    restoreViewport?.();
     if (state.deckTaskId) pollDeckTask();
     loadDeckFacets(true);
   } catch (error) { if (request === state.deckDetailRequest) showError(target, error.message); }
@@ -3659,6 +3919,7 @@ async function renderArchivePage(background = false) {
     const query = { limit: PAGE_SIZE, offset, status: $("archive-status").value };
     const data = archiveResolvedCount() ? await getJSON(path, query) : await fetchCataloguePage(path, query);
     if (request !== archiveRequest) return;
+    const restoreViewport = captureViewport("archives", background);
     state.archiveTotal = data.total;
     container.replaceChildren();
     if (!data.items.length) container.append(node("p", "empty-state", "Aucune archive sur cette page."));
@@ -3818,6 +4079,7 @@ async function renderArchivePage(background = false) {
     }
     setText($("archive-summary"),`${formatNumber(state.archiveTotal)} fichiers historiques sans identité exacte`);const visibleTotal = data.total + archiveResolvedCount();
     pageControls.get("archive-pager")(state.archivePage, Math.max(1, Math.ceil(visibleTotal / PAGE_SIZE)));
+    restoreViewport?.();
     if (!archiveResolvedCount()) prefetchNeighbourPages(path, query, data.total, container,
       () => state.view === "archives" && request === archiveRequest);
   } catch (error) {
@@ -3833,8 +4095,12 @@ attachScrollTop($("search-pager"), "search-title");
 attachScrollTop($("edition-pager"), "editions-title", true);
 attachScrollTop($("deck-pager"), "decks-title", true);
 attachScrollTop($("archive-pager"), "archive-title", true);
-document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => {
-  const view = button.dataset.view;
+document.querySelectorAll("[data-view]").forEach(control => control.addEventListener("click", event => {
+  if (control instanceof HTMLAnchorElement) {
+    if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+  }
+  const view = control.dataset.view;
   if (view === "decks" && state.view === view && state.openDeckId) {
     closeDeck();
     return;
@@ -3898,10 +4164,8 @@ async function refreshVisibleView() {
 $("refresh-view").addEventListener("click", async event => {
   const button = event.currentTarget;
   button.disabled = true;
-  const view = state.view, top = window.scrollY;
   try {
     await refreshVisibleView();
-    if (state.view === view) window.scrollTo({ top, behavior: "instant" });
   } finally {
     button.disabled = false;
   }
@@ -4189,8 +4453,10 @@ async function renderProxies({ quiet = false, paginating = false } = {}) {
         }
         if (!data.total) grid.append(node("p", "empty-state", "Aucun proxy dans la collection."));
         updatePager(proxyState.page, pages, `${formatNumber(data.total)} proxies`);
+        const restoreViewport = captureViewport("proxy", quiet && !paginating);
         root.replaceChildren(grid, pager);
         attachScrollTop(pager, "proxy-title", true);
+        restoreViewport?.();
         proxyState.snapshot = snapshot;
         prefetchNeighbourPages(path, query, data.total, grid,
             () => state.view === "proxy" && request === proxyState.request);
@@ -4552,9 +4818,11 @@ async function refreshOpenPersonalDeck() {
         if (!await flushPersonal() || personalState.deck !== deck || state.view !== "perso") return;
         const { deck: fresh } = await getJSON("/api/v2/personal-deck", { id: deck.id });
         if (personalState.deck !== deck || state.view !== "perso" || personalState.saved !== personalState.change) return;
+        const restoreViewport = captureViewport("perso");
         personalState.deck = fresh;
         renderPersonalEditor();
         personalStatus("Deck actualisé.");
+        restoreViewport?.();
     } catch (error) {
         if (personalState.deck === deck && state.view === "perso") personalStatus(error.message, true);
     }
@@ -5131,7 +5399,9 @@ function renderPersonalList() {
             groups = response.groups || [];
             importText.disabled = organizing || (busy && importing);
             organize.disabled = false;
+            const restoreViewport = captureViewport("perso", quiet);
             render();
+            restoreViewport?.();
         } catch (error) {
             if (request !== latestLoad || !list.isConnected || (quiet && decks)) return;
             showError(list, error.message);

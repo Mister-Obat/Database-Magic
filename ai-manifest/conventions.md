@@ -43,9 +43,10 @@ choix seulement souhaités, mais encore absents, sont listés dans
 - La consultation passe par des GET locaux. Une demande d’image passe par
   `POST /api/v2/download` depuis la fiche et peut être annulée ; le contrôle
   d’origine refuse un autre navigateur distant.
-- Le téléchargeur V2 n’autorise en production que les URL HTTPS de
-  `cards.scryfall.io` ; il refuse les redirections et borne taille, durée et
-  nombre de GET.
+- Le téléchargeur V2 autorise les URL d’image HTTPS de `cards.scryfall.io`
+  et les URL alternatives vérifiées prévues dans le
+  [manifest images](modules/images.manifest.md). Il refuse les redirections et
+  borne taille, durée et nombre de GET.
 - La priorité d’image codée est FR puis EN, au plus trois GET par langue et par
   face. Une bonne résolution FR termine la recherche ; sinon le meilleur candidat
   disponible est retenu selon le code.

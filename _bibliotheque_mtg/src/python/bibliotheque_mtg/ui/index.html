@@ -15,10 +15,10 @@
   <header class="topbar">
     <a class="brand" href="#info" aria-label="Accueil Database Magic"><img class="brand-mark" src="/logo.png" alt=""></a>
     <nav aria-label="Navigation principale">
-      <button data-view="info" class="nav-button" aria-label="Accueil" title="Accueil"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-home"></use></svg><span class="compact-nav-label">Accueil</span></button>
-      <button data-view="recherche" class="nav-button" aria-label="Recherche" title="Recherche"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-search"></use></svg><span class="compact-nav-label">Recherche</span></button>
-      <button data-view="editions" class="nav-button" aria-label="Éditions" title="Éditions"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-edition"></use></svg><span class="compact-nav-label">Éditions</span></button>
-      <button data-view="decks" class="nav-button" aria-label="Deck préconstruit" title="Deck préconstruit"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-deck"></use></svg><span class="compact-nav-label">Deck préconstruit</span></button>
+      <a href="#info" data-view="info" class="nav-button" aria-label="Accueil" title="Accueil"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-home"></use></svg><span class="compact-nav-label">Accueil</span></a>
+      <a href="#recherche" data-view="recherche" class="nav-button" aria-label="Recherche" title="Recherche"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-search"></use></svg><span class="compact-nav-label">Recherche</span></a>
+      <a href="#editions" data-view="editions" class="nav-button" aria-label="Éditions" title="Éditions"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-edition"></use></svg><span class="compact-nav-label">Éditions</span></a>
+      <a href="#decks" data-view="decks" class="nav-button" aria-label="Deck préconstruit" title="Deck préconstruit"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-deck"></use></svg><span class="compact-nav-label">Deck préconstruit</span></a>
       <button data-view="perso" class="nav-button" aria-label="Deck perso" title="Deck perso"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-deck"></use></svg><span class="compact-nav-label">Deck perso</span></button>
       <button data-view="proxy" class="nav-button" aria-label="Proxy" title="Proxy"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-image"></use></svg><span class="compact-nav-label">Proxy</span></button>
       <button data-view="archives" class="nav-button" aria-label="Archives" title="Archives"><svg class="search-icon compact-nav-icon" aria-hidden="true" focusable="false"><use href="#search-icon-archive"></use></svg><span class="compact-nav-label">Archives</span></button>
@@ -64,13 +64,45 @@
       <div id="stats" class="stats-grid" aria-live="polite" aria-busy="true">
         <article class="stat"><span>Cartes du catalogue</span><strong id="stat-cards">— / —</strong></article>
         <article class="stat"><span>Éditions du catalogue</span><strong id="stat-editions">— / —</strong></article>
-        <article class="stat"><span>Decks répertoriés</span><strong id="stat-decks">— / —</strong></article>
+        <article class="stat"><span>Decks complets / répertoriés</span><strong id="stat-decks">— / —</strong></article>
       </div>
       <p id="stats-error" class="muted error-state" role="status"></p>
       <section class="panel home-activity" aria-labelledby="home-recent-decks-title">
         <h2 id="home-recent-decks-title">Decks perso récemment modifiés</h2>
         <div id="home-recent-decks" class="home-recent-decks" aria-busy="true"></div>
         <p id="home-activity-error" class="muted error-state" role="status" hidden></p>
+      </section>
+      <section class="maintenance-panel" aria-labelledby="card-prices-title">
+        <div>
+          <h2 id="card-prices-title">Afficher le prix des cartes</h2>
+          <p class="muted" id="card-prices-description">Activez l’affichage du prix indicatif Cardmarket le plus bas disponible pour chaque carte, toutes éditions et variantes confondues.</p>
+          <p id="card-prices-status" class="muted" role="status" hidden></p>
+        </div>
+          <label class="secondary-button card-price-option">
+            <span>Prix Cardmarket</span>
+            <input id="card-prices-toggle" type="checkbox" role="switch" aria-describedby="card-prices-description card-prices-status">
+            <span class="card-price-switch" aria-hidden="true"></span>
+            <span class="card-price-switch-state" aria-hidden="true"></span>
+          </label>
+      </section>
+      <section class="maintenance-panel banner-panel" aria-labelledby="localized-banner-title">
+        <div>
+          <h2 id="localized-banner-title">Détection et remplacement des images avec bandeau</h2>
+          <p class="muted">Lorsqu’un fournisseur affiche une carte anglaise avec le bandeau noir « Localized Image Not Available » sur sa page française, la bibliothèque peut la remplacer par l’image anglaise sans bandeau de la même édition.</p>
+          <div class="version-history banner-actions">
+            <button id="localized-banner-detect" class="primary-button" type="button">Analyser les images avec bandeau</button>
+            <button id="localized-banner-replace" class="secondary-button" type="button" disabled>Remplacer les images avec bandeau</button>
+            <button id="localized-banner-open" class="secondary-button" type="button" aria-haspopup="dialog" disabled>Ouvrir la vue des cartes</button>
+            <button id="localized-banner-cancel" class="secondary-button" type="button" hidden>Annuler le traitement</button>
+          </div>
+          <p id="localized-banner-counts" class="muted" aria-live="polite">Images avec bandeau — · Traitées — · Remplacées —</p>
+          <progress id="localized-banner-progress" aria-label="Avancement du traitement" hidden></progress>
+          <p id="localized-banner-status" class="muted" role="status"></p>
+        </div>
+        <figure class="banner-example">
+          <img src="/localized-banner-example.webp" alt="Carte Abandon Hope avec le bandeau noir Localized Image Not Available et le logo FR" width="350" height="486" loading="lazy">
+          <figcaption>Exemple de bandeau</figcaption>
+        </figure>
       </section>
       <section class="maintenance-panel" aria-labelledby="maintenance-title">
         <div>
@@ -80,13 +112,6 @@
         <div class="version-history">
           <button id="update-library" class="primary-button" type="button"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg><span id="update-library-label">Lancer la mise à jour</span></button>
           <button id="version-history-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="version-history-list"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-history"></use></svg>Historique des versions</button>
-          <label class="secondary-button card-price-option">
-            <span>Prix Cardmarket</span>
-            <input id="card-prices-toggle" type="checkbox" role="switch" aria-describedby="card-prices-status">
-            <span class="card-price-switch" aria-hidden="true"></span>
-            <span class="card-price-switch-state" aria-hidden="true"></span>
-          </label>
-          <span id="card-prices-status" class="muted" role="status" hidden></span>
           <div id="version-history-list" class="version-history-list" hidden></div>
         </div>
         <p id="update-status" class="muted maintenance-status" aria-live="polite"></p>
@@ -116,7 +141,7 @@
         </div>
         <section class="catalogue-refine" id="search-refine-panel" aria-label="Tri et filtres complémentaires">
           <div id="search-refine-fields" class="catalogue-refine-fields">
-          <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-image"></use></svg>Images</span><select id="refine-images"><option value="all">Toutes les cartes</option><option value="with">Avec image uniquement</option><option value="without">Sans image uniquement</option></select></label>
+          <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-image"></use></svg>Images</span><select id="refine-images"><option value="all">Toutes les cartes</option><option value="with">Avec image uniquement</option><option value="without">Au moins une image manquante</option></select></label>
           <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-sort"></use></svg>Trier par</span><select id="refine-sort"><option value="date">Édition</option><option value="name">Nom</option><option value="added">Ajout récent</option><option value="mana">Valeur de mana</option><option value="power">Force</option><option value="toughness">Endurance</option></select></label>
           <label><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-order"></use></svg>Ordre</span><select id="refine-order"><option value="desc">Décroissant</option><option value="asc">Croissant</option></select></label>
           <fieldset><legend><span class="search-field-label"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-mana"></use></svg>Valeur de mana</span></legend><label>Minimum<input id="refine-mana-min" type="number" min="0" step="0.5"></label><label>Maximum<input id="refine-mana-max" type="number" min="0" step="0.5"></label></fieldset>
@@ -201,6 +226,22 @@
       <h2 id="shutdown-title">Fermer l’application ?</h2>
       <p id="shutdown-message">Voulez-vous vraiment arrêter l’application ?</p>
       <div class="shutdown-actions"><button id="shutdown-cancel" class="secondary-button" type="button" autofocus>Annuler</button><button id="shutdown-confirm" class="primary-button" type="button">Confirmer</button></div>
+    </dialog>
+    <dialog id="localized-banner-dialog" class="shutdown-dialog" aria-labelledby="localized-banner-results-title">
+      <h2 id="localized-banner-results-title">Images avec bandeau</h2>
+      <label>Afficher
+        <select id="localized-banner-mode">
+          <option value="detected">Images détectées</option>
+          <option value="replaced" disabled>Images remplacées</option>
+        </select>
+      </label>
+      <ul id="localized-banner-items"></ul>
+      <p id="localized-banner-page" role="status"></p>
+      <div class="shutdown-actions">
+        <button id="localized-banner-prev" class="secondary-button" type="button">Précédent</button>
+        <button id="localized-banner-next" class="secondary-button" type="button">Suivant</button>
+        <form method="dialog"><button class="secondary-button" type="submit" autofocus>Fermer</button></form>
+      </div>
     </dialog>
     <dialog id="image-choice-dialog" class="image-choice-dialog" aria-label="Comparer et choisir une image"><button class="dialog-close comparison-dialog-close" type="button" aria-label="Fermer la comparaison">×</button><div id="image-choice-content"></div></dialog>
     <dialog id="ai-batch-review" class="card-dialog" aria-labelledby="ai-batch-review-title">

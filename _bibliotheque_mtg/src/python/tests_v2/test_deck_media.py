@@ -6,6 +6,7 @@ from PIL import Image
 
 from bibliotheque_mtg import deck_media
 from bibliotheque_mtg.deck_media import enrich_deck_media, export_deck_to_desktop
+from bibliotheque_mtg.list_export import export_card_to_desktop
 
 
 @pytest.fixture
@@ -18,7 +19,7 @@ def catalog(tmp_path):
     CREATE TABLE editions(set_id TEXT, code TEXT, eligibility TEXT);
     CREATE TABLE printings(printing_id TEXT, set_id TEXT, layout TEXT);
     CREATE TABLE source_records(provider_card_id TEXT, printing_id TEXT, lang TEXT,
-      printed_name TEXT, name TEXT, mana_value REAL, colors_key TEXT);
+      printed_name TEXT, name TEXT, mana_value REAL, colors_key TEXT, raw_json TEXT);
     CREATE TABLE card_faces(printing_id TEXT, face_index INTEGER, physical_image INTEGER);
     CREATE TABLE image_assets(asset_id TEXT, relative_path TEXT);
     CREATE TABLE image_slots(printing_id TEXT, face_index INTEGER, status TEXT, asset_id TEXT);
@@ -29,9 +30,10 @@ def catalog(tmp_path):
     ]:
         conn.execute("INSERT INTO editions VALUES(?,?,?)", ("set", "TST", "eligible"))
         conn.execute("INSERT INTO printings VALUES(?,?,?)", (printing, "set", "modal_dfc" if faces > 1 else "normal"))
-        conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?)", (provider, printing, "en", None, en, mana, "R"))
+        conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,NULL)", (provider, printing, "en", None, en, mana, "R"))
         if fr:
-            conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?)", (provider + "fr", printing, "fr", fr, fr, mana, "R"))
+            raw = '{"card_faces":[{"printed_name":"Feu au recto"},{"printed_name":"Glace au verso"}]}'
+            conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?)", (provider + "fr", printing, "fr", fr, fr, mana, "R", raw))
         for face in range(faces):
             conn.execute("INSERT INTO card_faces VALUES(?,?,1)", (printing, face))
             rel = f"assets/webp/fr/{printing}-{face}.webp"
@@ -82,8 +84,40 @@ def test_export_png_faces_tokens_french_and_collision(catalog, tmp_path):
     assert Path(second["folder"]).name == "Deck _ test (2)"
     assert first["total"] == 5
     assert (Path(first["folder"]) / "Jetons" / "0 - Token Goblin.png").is_file()
-    assert any("Feu __ Glace" in Path(file).name for file in first["files"])
+    assert {Path(file).name for file in first["files"]} == {
+        "2 - Feu au recto (recto) (1).png", "2 - Feu au recto (verso) (1).png",
+        "2 - Feu au recto (recto) (2).png", "2 - Feu au recto (verso) (2).png",
+        "0 - Token Goblin.png",
+    }
     assert all(Image.open(file).format == "PNG" for file in first["files"])
+
+
+def test_card_export_from_either_face_uses_the_front_name_and_both_images(catalog, tmp_path):
+    desktop = tmp_path / "Desktop"
+    back = export_card_to_desktop("id1", 1, catalog, desktop)
+    front = export_card_to_desktop("id1fr", 0, catalog, desktop)
+    assert [Path(path).name for path in back["paths"]] == [
+        "2 - Feu au recto (recto).png", "2 - Feu au recto (verso).png",
+    ]
+    assert back["path"] == back["paths"][1]
+    assert front["path"] == front["paths"][0]
+    assert [Path(path).name for path in front["paths"]] == [
+        "2 - Feu au recto (recto) (2).png", "2 - Feu au recto (verso) (2).png",
+    ]
+    with Image.open(back["paths"][0]) as recto, Image.open(back["paths"][1]) as verso:
+        assert recto.getpixel((0, 0))[0] < verso.getpixel((0, 0))[0]
+
+
+def test_card_export_requires_both_physical_faces_but_ignores_nonphysical_faces(catalog, tmp_path):
+    desktop = tmp_path / "Desktop"
+    with sqlite3.connect(catalog) as conn:
+        conn.execute("DELETE FROM image_slots WHERE printing_id='p1' AND face_index=1")
+        conn.execute("INSERT INTO card_faces VALUES('p2',1,0)")
+    with pytest.raises(ValueError, match="deux images"):
+        export_card_to_desktop("id1", 0, catalog, desktop)
+    assert not desktop.exists()
+    single = export_card_to_desktop("id2", 0, catalog, desktop)
+    assert [Path(path).name for path in single["paths"]] == ["0 - Token Goblin.png"]
 
 
 def test_export_incomplete_deck_creates_no_folder(catalog, tmp_path):
