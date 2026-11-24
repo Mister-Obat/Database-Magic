@@ -34,6 +34,7 @@ _BATCH_IMAGE_RATE_LOCK = threading.Lock()
 _BATCH_IMAGE_NEXT_REQUEST = 0.0
 _BATCH_IMAGE_BLOCKED_UNTIL = 0.0
 _BATCH_IMAGE_MIN_INTERVAL = 0.25
+BATCH_IMAGE_WORKERS = 4
 _MAX_BYTES = 20 * 1024 * 1024
 _MAX_API_BYTES = 2 * 1024 * 1024
 _MAX_GETS = 3
@@ -655,14 +656,19 @@ def _fetch(url: str, session, test_hosts: set[str] | None = None,
     if not _allowed_url(url, test_hosts, allowed_hosts):
         return None, "url_non_autorisee", None
     if batch_rate_limit and urlsplit(url).hostname == "cards.scryfall.io":
-        with _BATCH_IMAGE_RATE_LOCK:
-            scheduled = max(time.monotonic(), _BATCH_IMAGE_NEXT_REQUEST, _BATCH_IMAGE_BLOCKED_UNTIL)
-            _BATCH_IMAGE_NEXT_REQUEST = scheduled + _BATCH_IMAGE_MIN_INTERVAL
-        if cancel_event is not None:
-            if cancel_event.wait(max(0.0, scheduled - time.monotonic())):
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
                 return None, "annule", None
-        else:
-            time.sleep(max(0.0, scheduled - time.monotonic()))
+            with _BATCH_IMAGE_RATE_LOCK:
+                now = time.monotonic()
+                delay = max(_BATCH_IMAGE_NEXT_REQUEST, _BATCH_IMAGE_BLOCKED_UNTIL) - now
+                if delay <= 0:
+                    _BATCH_IMAGE_NEXT_REQUEST = now + _BATCH_IMAGE_MIN_INTERVAL
+                    break
+            if cancel_event is None:
+                time.sleep(delay)
+            elif cancel_event.wait(delay):
+                return None, "annule", None
     try:
         response = session.get(url, timeout=timeout, allow_redirects=False, stream=True,
                                headers={"User-Agent": "BibliothequeMagicLocal/2.0", "Accept": "image/*"})

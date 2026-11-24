@@ -867,6 +867,16 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   pour incolore), une révision et des sections ordonnées identifiées par UUID.
   Les entrées conservent les identités exactes fournisseur/impression, leur
   quantité et les métadonnées utiles à la consultation hors catalogue futur.
+- Le champ `format` conserve le format de jeu du deck. La création propose
+  Commander par défaut et prépare les sections par type de carte, ainsi que
+  Commandant ou Réserve lorsque le format le prévoit. Le nom, le design et le
+  format se modifient ensemble. Un changement de format conserve les sections
+  et les cartes existantes. Les anciens decks dotés d’une zone de commandement
+  sont lus comme Commander. Les autres restent sans format explicite.
+- Le détail affiche le format en surtitre et signale chaque carte bannie dans
+  ce format par un cadre rouge et un libellé. Il utilise le statut du catalogue
+  actif pour l’impression exacte ou pour l’impression associée à un proxy.
+  Les couleurs restent calculées à partir de la composition.
 - Le champ `box_design` indique le modèle de boîte du deck personnel.
   Les valeurs admises sont `standard`, `obsidian`, `plains`, `island`,
   `swamp`, `mountain`, `forest`, `silver`, `copper`, `indigo`, `braise`,

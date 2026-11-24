@@ -1675,7 +1675,8 @@ body.personal-deck-drag-active * {
   max-width:600px;
   padding:1.2rem;
 }
-.personal-create>label:first-child {
+.personal-create>label,
+.personal-deck-format-field:not([hidden]) {
   display:grid;
   gap:.5rem;
 }
@@ -1837,17 +1838,26 @@ body.personal-deck-drag-active * {
   margin-top:auto;
 }
 .personal-deck-field-actions{display:flex;gap:.55rem;flex-wrap:wrap;margin-left:auto}
-.personal-color-field {
-  display:grid;
-  gap:.4rem;
+.personal-deck-format-field:not([hidden]) {
   color:var(--muted);
   font-size:.9rem;
 }
-.personal-color-field .mana-filter {
-  min-height:2.7rem;
+#view-perso .personal-deck-fields .personal-deck-field-actions {
+  flex-basis:100%;
+  justify-content:flex-end;
 }
 #view-perso .deck-card-tile {
   background:#1c1928;
+}
+#view-perso .deck-card-tile.personal-card-banned {
+  border-color:#ef7887;
+  background:#321d2a;
+}
+.personal-card-banned-label {
+  color:#ffadb6;
+  font-size:.8rem;
+  font-weight:600;
+  text-align:center;
 }
 #view-perso .deck-card-image {
   background:#262237;

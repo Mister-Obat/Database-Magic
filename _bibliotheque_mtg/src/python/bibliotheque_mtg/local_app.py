@@ -35,7 +35,7 @@ from .maintenance import MaintenanceCancelled, refresh_v2
 from .card_prices import read_card_prices, refresh_card_prices
 from .localized_banners import analyze_localized_banners, replace_localized_banners
 from .version_history import VersionHistoryError, activate_version, list_version_candidates
-from .image_download import (download_printing, ensure_catalogue_wal,
+from .image_download import (BATCH_IMAGE_WORKERS, download_printing, ensure_catalogue_wal,
                              refresh_printing_deep, preview_printing_candidate,
                              publish_preview_candidate, import_local_image, is_temporary_image_error)
 from .decks import (DECK_LIST_ELIGIBILITY, SUPPORTED_DECK_TYPES, _SET_NAMES_FR, _resolve_provider_ids,
@@ -183,7 +183,8 @@ def _start_banner_task(route: str, payload: dict) -> dict:
             analysis_id = uuid.uuid4().hex
 
             def analyze(cancel_event, progress):
-                counts, matches = analyze_localized_banners(current, cancel_event, progress)
+                counts, matches = analyze_localized_banners(
+                    current, cancel_event, progress, OPS_ROOT / "state" / "localized-banners.sqlite")
                 if not cancel_event.is_set():
                     with closing(_banner_store()) as conn, conn:
                         conn.execute("""DELETE FROM replacements WHERE analysis_id IN
@@ -974,6 +975,9 @@ def _catalogue_update_message(result: dict) -> str:
         message = "Aucune nouvelle édition ni liste de cartes détectée."
     else:
         message = f"Catalogue : {status or 'terminé'}."
+    restrictions = result.get("card_restrictions")
+    if restrictions and restrictions.get("changed"):
+        message += " Listes de cartes interdites et restreintes actualisées."
     coverage = result.get("official_french_text_coverage")
     if isinstance(coverage, dict) and coverage.get("status") == "incomplete":
         covered = coverage.get("oracle_ids_with_official_french_text")
@@ -1509,7 +1513,7 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
         remaining = iter(selected)
         consecutive_temporary_errors = 0
         stopped_for_network = False
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="magic-image-batch") as executor:
+        with ThreadPoolExecutor(max_workers=BATCH_IMAGE_WORKERS, thread_name_prefix="magic-image-batch") as executor:
             pending = {}
             def enqueue() -> None:
                 if _BATCH_CANCEL.is_set():
@@ -1520,7 +1524,7 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
                     return
                 pending[executor.submit(download_one, provider_id, missing_faces)] = name
 
-            for _ in range(4):
+            for _ in range(BATCH_IMAGE_WORKERS):
                 enqueue()
             while pending:
                 done, _ = wait(pending, return_when=FIRST_COMPLETED)
@@ -2620,8 +2624,9 @@ class LibraryHandler(BaseHTTPRequestHandler):
                     self._json(result)
                     return
                 if action == "create":
-                    deck = personal_decks.create_deck(PERSONAL_DECK_DB, payload.get("name"),
-                            payload.get("colors", []), payload.get("commander", False))
+                    deck = personal_decks.create_deck(
+                        PERSONAL_DECK_DB, payload.get("name"), payload.get("colors", []),
+                        payload.get("commander", "format" not in payload), deck_format=payload.get("format"))
                 elif action == "save":
                     deck = personal_decks.save_deck(PERSONAL_DECK_DB, payload.get("deck"))
                 elif action == "duplicate":

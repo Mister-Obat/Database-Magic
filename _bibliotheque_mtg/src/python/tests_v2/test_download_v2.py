@@ -90,9 +90,10 @@ def make_catalogue(tmp_path, base_url, *, fr_path="/image", en_path="/image", fa
     for lang, path, name in (("fr", fr_path, "Carte test"), ("en", en_path, "Test Card")):
         uris = {"png": base_url + path}
         raw = {"id": f"provider-{lang}", "name": name, "lang": lang, "image_uris": uris}
-        if face_count == 2:
+        if face_count > 1:
             raw.pop("image_uris")
-            raw["card_faces"] = [{"name": name + " A", "image_uris": uris}, {"name": name + " B", "image_uris": uris}]
+            raw["card_faces"] = [{"name": f"{name} {chr(65 + i)}", "image_uris": uris}
+                                 for i in range(face_count)]
         conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (f"provider-{lang}", "printing-demo", lang, "fixture", name, name if lang == "fr" else None,
                       "Artifact", None, "{1}", 1, "[]", "[]", "", "", "rare", "[]", "fixture rule", "fixture text", json.dumps(raw)))
@@ -118,6 +119,39 @@ def test_provider_responses_block_or_reject_without_following_redirects(image_se
     assert _fetch(image_server + "/redirect", session, host)[1] == "redirection_non_autorisee"
     assert _fetch("https://example.org/image.png", session)[1] == "url_non_autorisee"
     assert _fetch(image_server + "/timeout", session, host, timeout=(.05, .05))[1].startswith("erreur_reseau:")
+
+
+def test_scryfall_batch_rechecks_rate_limit_after_waiting(monkeypatch):
+    monkeypatch.setattr(image_download, "_BATCH_IMAGE_NEXT_REQUEST", 1.25)
+    monkeypatch.setattr(image_download, "_BATCH_IMAGE_BLOCKED_UNTIL", 0.0)
+    now = 1.0
+    delays = []
+    monkeypatch.setattr(image_download, "time", type("Clock", (), {"monotonic": staticmethod(lambda: now)}))
+    starts = []
+
+    class Stop:
+        @staticmethod
+        def is_set():
+            return False
+
+        @staticmethod
+        def wait(delay):
+            nonlocal now
+            delays.append(delay)
+            if len(delays) == 1:
+                monkeypatch.setattr(image_download, "_BATCH_IMAGE_BLOCKED_UNTIL", 2.0)
+            now += delay
+            return False
+
+    class Session:
+        @staticmethod
+        def get(*args, **kwargs):
+            starts.append(now)
+            raise requests.ConnectionError
+
+    _fetch("https://cards.scryfall.io/image.png", Session(), cancel_event=Stop(), batch_rate_limit=True)
+    assert delays == [0.25, 0.75]
+    assert starts == [2.0]
 
 
 def test_phyrexian_only_printing_downloads_its_exact_image(tmp_path, image_server):
@@ -995,3 +1029,104 @@ def test_banner_results_survive_requests_and_cancelled_rescan(tmp_path, monkeypa
     stop.set()
     app._start_banner_task(app._BANNER_ANALYZE, {})
     assert app._banner_session_state("v1") == {"analysis": analysis, "replacement": replacement}
+
+
+def make_banner_catalogue(tmp_path, faces):
+    ops, version, db, _ = make_catalogue(tmp_path, "https://cards.scryfall.io", face_count=faces)
+    with sqlite3.connect(db) as conn:
+        for face in range(faces):
+            path = version / "assets" / f"{face}.webp"
+            Image.new("RGB", (12, 16)).save(path)
+            conn.execute("INSERT INTO image_assets VALUES(?,?,?,?,?,?,?,?)",
+                         (f"old-{face}", path.relative_to(version).as_posix(), "image/webp",
+                          path.stat().st_size, 12, 16, "fr", "{}"))
+            conn.execute("UPDATE image_slots SET asset_id=?,status='ready',selected_language='fr' "
+                         "WHERE face_index=?", (f"old-{face}", face))
+    return ops, version, {"database": db, "version_id": "demo"}
+
+
+def test_banner_analysis_reuses_saved_verdicts_and_checks_changed_files(tmp_path, monkeypatch):
+    from bibliotheque_mtg import localized_banners as banners
+
+    ops, version, current = make_banner_catalogue(tmp_path, 2)
+    examined = []
+
+    def detect(image):
+        examined.append(image.width)
+        return image.width == 12
+
+    monkeypatch.setattr(banners, "has_localized_banner", detect)
+    cache = ops / "state" / "localized-banners.sqlite"
+
+    def scan():
+        return banners.analyze_localized_banners(current, threading.Event(), lambda **_: None, cache)[0]
+
+    assert scan() == {"scanned": 2, "detected": 2, "replaceable": 2, "unreadable": 0}
+    assert examined == [12, 12]
+    assert scan()["detected"] == 2
+    assert examined == [12, 12]
+
+    first = version / "assets" / "0.webp"
+    first.write_bytes(b"invalid image")
+    assert scan() == {"scanned": 2, "detected": 1, "replaceable": 1, "unreadable": 1}
+    Image.new("RGB", (13, 16)).save(first)
+    assert scan() == {"scanned": 2, "detected": 1, "replaceable": 1, "unreadable": 0}
+    assert scan()["detected"] == 1
+    assert examined == [12, 12, 13]
+
+
+def test_banner_replacement_fetches_in_parallel_and_records_exact_faces(tmp_path, monkeypatch):
+    from bibliotheque_mtg import localized_banners as banners
+
+    workers = image_download.BATCH_IMAGE_WORKERS
+    ops, _, current = make_banner_catalogue(tmp_path, workers)
+    monkeypatch.setattr(banners, "has_localized_banner", lambda image: image.width == 12)
+    file = io.BytesIO()
+    patterned_image((420, 650)).save(file, "PNG")
+    started = threading.Barrier(workers)
+
+    def fetch(_url, _session, *, cancel_event, batch_rate_limit):
+        assert batch_rate_limit and not cancel_event.is_set()
+        started.wait(5)
+        return file.getvalue(), None, None
+
+    monkeypatch.setattr(banners, "_fetch", fetch)
+    _, matches = banners.analyze_localized_banners(
+        current, threading.Event(), lambda **_: None, ops / "state" / "localized-banners.sqlite")
+    assert len(matches) == workers
+    pairs = []
+    report = banners.replace_localized_banners(
+        current, matches, ops, threading.Event(), lambda **_: None, on_replaced=pairs.append)
+    assert report == {"replaced": workers, "failed": 0, "skipped": 0, "total": workers}
+    assert sorted(pair["face_index"] for pair in pairs) == list(range(workers))
+    with sqlite3.connect(current["database"]) as conn:
+        assert conn.execute("SELECT selected_language FROM image_slots").fetchall() == [("en",)] * workers
+    assert banners.replace_localized_banners(
+        current, matches, ops, threading.Event(), lambda **_: None)["skipped"] == workers
+
+
+def test_banner_replacement_stops_queue_on_rate_limit(tmp_path, monkeypatch):
+    from bibliotheque_mtg import localized_banners as banners
+
+    workers = image_download.BATCH_IMAGE_WORKERS
+    ops, _, current = make_banner_catalogue(tmp_path, workers + 1)
+    monkeypatch.setattr(banners, "has_localized_banner", lambda image: True)
+    started = threading.Barrier(workers)
+    attempts = []
+
+    def fetch(_url, _session, *, cancel_event, batch_rate_limit):
+        attempts.append(True)
+        if started.wait(5) == 0:
+            return None, "limite_debit_429", 60
+        assert cancel_event.wait(5)
+        return None, "annule", None
+
+    monkeypatch.setattr(banners, "_fetch", fetch)
+    _, matches = banners.analyze_localized_banners(
+        current, threading.Event(), lambda **_: None, ops / "state" / "localized-banners.sqlite")
+    cancel = threading.Event()
+    report = banners.replace_localized_banners(current, matches, ops, cancel, lambda **_: None)
+    assert report["total"] == workers + 1
+    assert report["failed"] == 1 and report["replaced"] == 0
+    assert report["detail"] and not cancel.is_set()
+    assert len(attempts) == workers

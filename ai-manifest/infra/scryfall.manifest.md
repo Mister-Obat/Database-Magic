@@ -20,6 +20,11 @@ impression.
   construites en SQLite localement ; les éditions inchangées sont conservées.
   Cette voie ne détecte pas les corrections sans changement de nombre : le
   parcours All Cards complet reste disponible en CLI.
+- Le bouton Info vérifie aussi les interdictions et restrictions via une
+  recherche indépendante `/cards/search`, avec un résultat par carte. Le
+  programme contrôle le nombre total annoncé avant de remplacer le relevé.
+  Cette recherche ne resynchronise pas les listes de cartes admissibles après
+  une rotation. Une réponse partielle ou erronée conserve le relevé précédent.
 - Les réponses de métadonnées sont archivées sous
   `_bibliotheque_mtg/sources/scryfall/` avec fichiers `.meta.json`, ETag ou
   Last-Modified si disponibles.

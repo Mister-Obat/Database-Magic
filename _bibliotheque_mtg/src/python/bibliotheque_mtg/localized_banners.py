@@ -3,13 +3,15 @@
 import io
 import json
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing
+from threading import Event
 
 import requests
 from PIL import Image, ImageOps
 
 from .image_download import (
+    BATCH_IMAGE_WORKERS,
     _MAX_GETS,
     _allowed_url,
     _convertible,
@@ -45,6 +47,8 @@ _GLYPHS = (
     ".....-........-+-.+.-.+--+---....-.+.+.-+-++...++-.-.++",
 )
 _NORMALIZED_SIZE = (265, 369)
+# Increment when the visual detector changes to invalidate prior verdicts.
+_DETECTOR_VERSION = 1
 _REGION = (92, 127, 205, 164)
 _WIDTH = _REGION[2] - _REGION[0]
 _HEIGHT = _REGION[3] - _REGION[1]
@@ -98,22 +102,55 @@ def _english_sources(conn, printing_id, face_index):
     return None
 
 
+def _banner_path(version, relative_path):
+    path = (version / relative_path).resolve()
+    if not path.is_relative_to(version):
+        raise ValueError("asset outside catalogue version")
+    return path
+
+
 def _stored_banner(version, relative_path):
     try:
-        path = (version / relative_path).resolve()
-        if not path.is_relative_to(version):
-            return None
-        with Image.open(path) as image:
+        with Image.open(_banner_path(version, relative_path)) as image:
             return has_localized_banner(image)
     except (OSError, ValueError, Image.DecompressionBombError):
         return None
 
 
-def analyze_localized_banners(current, cancel_event, progress):
+def _file_signature(path):
+    stat = path.stat()
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+
+
+def _check_banner(version, relative_path, cached):
+    try:
+        path = _banner_path(version, relative_path)
+        signature = _file_signature(path)
+        entry = cached.get(relative_path)
+        if entry and entry[0] == signature:
+            return bool(entry[1]), None
+        with Image.open(path) as image:
+            banner = has_localized_banner(image)
+        if _file_signature(path) != signature:
+            return None, None
+        return banner, (relative_path, _DETECTOR_VERSION, signature, int(banner))
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None, None
+
+
+def analyze_localized_banners(current, cancel_event, progress, cache_path):
     db, version = current["database"], current["database"].parent.resolve()
     counts = {"scanned": 0, "detected": 0, "replaceable": 0, "unreadable": 0}
     matches = []
-    with closing(connect(db)) as conn, ThreadPoolExecutor(max_workers=8) as pool:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with (closing(connect(db)) as conn, closing(sqlite3.connect(cache_path)) as cache,
+          ThreadPoolExecutor(max_workers=8) as pool):
+        cache.execute("""
+            CREATE TABLE IF NOT EXISTS banner_verdicts (
+                relative_path TEXT PRIMARY KEY, detector_version INTEGER NOT NULL,
+                signature TEXT NOT NULL, banner INTEGER NOT NULL
+            ) WITHOUT ROWID
+        """)
         total = conn.execute("SELECT count(*) FROM image_slots WHERE status='ready'").fetchone()[0]
         rows = conn.execute("""
             SELECT s.printing_id,s.face_index,s.asset_id,a.relative_path,e.eligibility,
@@ -123,11 +160,21 @@ def analyze_localized_banners(current, cancel_event, progress):
             WHERE s.status='ready'
         """)
         progress(processed=0, total=total, detected=0)
-        while not cancel_event.is_set() and (batch := rows.fetchmany(64)):
-            checks = pool.map(lambda row: _stored_banner(version, row["relative_path"]), batch)
-            for row, banner in zip(batch, checks):
+        while not cancel_event.is_set() and (batch := rows.fetchmany(256)):
+            paths = [row["relative_path"] for row in batch]
+            placeholders = ",".join("?" for _ in paths)
+            cached = {path: (signature, banner) for path, signature, banner in cache.execute(
+                f"SELECT relative_path,signature,banner FROM banner_verdicts "
+                f"WHERE detector_version=? AND relative_path IN ({placeholders})",
+                (_DETECTOR_VERSION, *paths),
+            )}
+            checks = pool.map(lambda path: _check_banner(version, path, cached), paths)
+            updates = []
+            for row, (banner, update) in zip(batch, checks):
                 if cancel_event.is_set():
                     break
+                if update:
+                    updates.append(update)
                 counts["scanned"] += 1
                 if banner is None:
                     counts["unreadable"] += 1
@@ -149,83 +196,135 @@ def analyze_localized_banners(current, cancel_event, progress):
                         "edition": row["code"], "collector_number": row["collector_number"],
                         "relative_path": row["relative_path"],
                     })
+            if updates:
+                with cache:
+                    cache.executemany("INSERT OR REPLACE INTO banner_verdicts VALUES (?,?,?,?)", updates)
             progress(processed=counts["scanned"], total=total, detected=counts["detected"])
     matches.sort(key=lambda item: (item["edition"], item["collector_number"], item["face_index"]))
     return counts, matches
+
+
+_PROVIDER_STOP_ERRORS = {
+    "acces_refuse_403": "Scryfall a refusé l’accès.",
+    "limite_debit_429": "Scryfall a limité le débit. Relancez après le délai d’attente.",
+}
+
+
+def _fetch_replacement(match, version_id, stop):
+    provider_card_id, urls = match["english"]
+    with requests.Session() as session:
+        for url in urls:
+            data, error, _ = _fetch(url, session, cancel_event=stop, batch_rate_limit=True)
+            if error in _PROVIDER_STOP_ERRORS:
+                stop.set()
+                return None, error
+            if stop.is_set():
+                return None, "annule"
+            if error:
+                continue
+            try:
+                width, height = _convertible(data)
+                with Image.open(io.BytesIO(data)) as image:
+                    if has_localized_banner(image):
+                        continue
+            except (OSError, ValueError, Image.DecompressionBombError):
+                continue
+            return {
+                "version_id": version_id, "printing_id": match["printing_id"],
+                "provider_card_id": provider_card_id, "face_index": match["face_index"],
+                "old_status": "ready", "old_asset_id": match["asset_id"],
+                "language": "en", "source_url": url, "source_data": data,
+                "source_width": width, "source_height": height,
+                "mime_type": _image_mime_type(data), "source_record_id": provider_card_id,
+                "source_evidence": "replacement_localized_image_banner",
+            }, None
+    return None, None
+
+
+def _replacement_slot(conn, match):
+    return conn.execute("""
+        SELECT s.asset_id,a.relative_path FROM image_slots s JOIN image_assets a USING(asset_id)
+        WHERE s.printing_id=? AND s.face_index=? AND s.status='ready' AND s.asset_id=?
+    """, (match["printing_id"], match["face_index"], match["asset_id"])).fetchone()
+
+
+def _publish_replacement(conn, version, match, candidate, catalogue_root, on_replaced):
+    slot = _replacement_slot(conn, match)
+    if not slot or not _stored_banner(version, slot["relative_path"]):
+        return "skipped"
+    provider_card_id = candidate["provider_card_id"]
+    try:
+        published = publish_preview_candidate(
+            candidate, catalogue_root=catalogue_root,
+            provider_card_id=provider_card_id, face_index=match["face_index"])
+    except ValueError as exc:
+        return "skipped" if str(exc).startswith("candidate périmée") else "failed"
+    except (OSError, sqlite3.Error):
+        return "failed"
+    if on_replaced is not None:
+        on_replaced({
+            **{key: match[key] for key in
+               ("name", "edition", "collector_number", "face_index", "printing_id")},
+            "provider_card_id": provider_card_id,
+            "old_path": slot["relative_path"],
+            "new_path": published["relative_path"],
+        })
+    return "replaced"
 
 
 def replace_localized_banners(current, matches, catalogue_root, cancel_event, progress, *, on_replaced=None):
     db, version_id = current["database"], current["version_id"]
     version = db.parent.resolve()
     counts = {"replaced": 0, "failed": 0, "skipped": 0, "total": len(matches)}
-    progress(processed=0, **counts)
-    with requests.Session() as session, closing(connect(db)) as conn:
-        for processed, match in enumerate(matches, 1):
-            if cancel_event.is_set():
-                break
-            if resolve_current(catalogue_root)["version_id"] != version_id:
-                raise ValueError("La version active a changé. Relancez la détection.")
-            printing_id, face_index = match["printing_id"], match["face_index"]
-            old_asset_id = match["asset_id"]
-            slot = conn.execute("SELECT s.asset_id,a.relative_path FROM image_slots s "
-                                "JOIN image_assets a USING(asset_id) "
-                                "WHERE s.printing_id=? AND s.face_index=? AND s.status='ready'",
-                                (printing_id, face_index)).fetchone()
-            if (not slot or slot["asset_id"] != old_asset_id
-                    or not _stored_banner(version, slot["relative_path"])):
-                counts["skipped"] += 1
-            else:
-                provider_card_id, urls = match["english"]
-                outcome = "failed"
-                for url in urls:
-                    data, error, _ = _fetch(url, session, cancel_event=cancel_event, batch_rate_limit=True)
-                    if error in {"acces_refuse_403", "limite_debit_429"}:
-                        counts["failed"] += 1
-                        progress(processed=processed, **counts)
-                        detail = ("Scryfall a refusé l’accès." if error == "acces_refuse_403" else
-                                  "Scryfall a limité le débit. Relancez après le délai d’attente.")
-                        return {**counts, "detail": detail}
-                    if error:
-                        continue
-                    try:
-                        width, height = _convertible(data)
-                        with Image.open(io.BytesIO(data)) as image:
-                            if has_localized_banner(image):
-                                continue
-                    except (OSError, ValueError, Image.DecompressionBombError):
-                        continue
+    processed = 0
+    progress(processed=processed, **counts)
+    fetch_stop = Event()
+    remaining = iter(matches)
+    pending = {}
+    detail = None
+
+    def record(outcome):
+        nonlocal processed
+        counts[outcome] += 1
+        processed += 1
+        progress(processed=processed, **counts)
+
+    with (closing(connect(db)) as conn,
+          ThreadPoolExecutor(max_workers=BATCH_IMAGE_WORKERS, thread_name_prefix="magic-banner") as pool):
+        try:
+            while True:
+                if cancel_event.is_set():
+                    break
+                while not fetch_stop.is_set() and len(pending) < BATCH_IMAGE_WORKERS:
                     if cancel_event.is_set():
                         break
-                    candidate = {
-                        "version_id": version_id, "printing_id": printing_id,
-                        "provider_card_id": provider_card_id, "face_index": face_index,
-                        "old_status": "ready", "old_asset_id": old_asset_id,
-                        "language": "en", "source_url": url, "source_data": data,
-                        "source_width": width, "source_height": height,
-                        "mime_type": _image_mime_type(data), "source_record_id": provider_card_id,
-                        "source_evidence": "replacement_localized_image_banner",
-                    }
-                    try:
-                        published = publish_preview_candidate(
-                            candidate, catalogue_root=catalogue_root,
-                            provider_card_id=provider_card_id, face_index=face_index)
-                    except ValueError as exc:
-                        outcome = "skipped" if str(exc).startswith("candidate périmée") else "failed"
-                    except (OSError, sqlite3.Error):
-                        outcome = "failed"
+                    match = next(remaining, None)
+                    if match is None:
+                        break
+                    if resolve_current(catalogue_root)["version_id"] != version_id:
+                        raise ValueError("La version active a changé. Relancez la détection.")
+                    slot = _replacement_slot(conn, match)
+                    if not slot or not _stored_banner(version, slot["relative_path"]):
+                        record("skipped")
+                        continue
+                    pending[pool.submit(_fetch_replacement, match, version_id, fetch_stop)] = match
+                if not pending:
+                    break
+                done, _ = wait(pending, timeout=.1, return_when=FIRST_COMPLETED)
+                for future in done:
+                    if cancel_event.is_set():
+                        break
+                    match = pending.pop(future)
+                    candidate, error = future.result()
+                    if error in _PROVIDER_STOP_ERRORS:
+                        detail = detail or _PROVIDER_STOP_ERRORS[error]
+                        record("failed")
+                    elif error == "annule":
+                        continue
+                    elif candidate is None:
+                        record("failed")
                     else:
-                        outcome = "replaced"
-                        if on_replaced is not None:
-                            on_replaced({
-                                **{key: match[key] for key in
-                                   ("name", "edition", "collector_number", "face_index", "printing_id")},
-                                "provider_card_id": provider_card_id,
-                                "old_path": slot["relative_path"],
-                                "new_path": published["relative_path"],
-                            })
-                    break
-                if cancel_event.is_set() and outcome == "failed":
-                    break
-                counts[outcome] += 1
-            progress(processed=processed, **counts)
-    return counts
+                        record(_publish_replacement(conn, version, match, candidate, catalogue_root, on_replaced))
+        finally:
+            fetch_stop.set()
+    return {**counts, "detail": detail} if detail else counts

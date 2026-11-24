@@ -273,11 +273,18 @@ def refresh_v2(config_path: Path, *, dry_run: bool = False, progress=None, addit
 
     if additions_only:
         from .sources import run_additions_only
+        from .v2.restrictions import refresh_restrictions
         source_report = run_additions_only(
             config_path, current["database"],
-            progress=(lambda fraction, detail="": report("sources", fraction, detail)) if progress else None)
+            progress=(lambda fraction, detail="": report("sources", fraction * 0.8, detail)) if progress else None)
+        restrictions = refresh_restrictions(
+            config_path, catalogue_root, old_meta.get("source_archive_sha256", ""),
+            progress=(lambda fraction, detail="": report("sources", 0.8 + fraction * 0.2, detail)) if progress else None)
+        network_calls = dict(source_report.get("network_calls", {}))
+        for host, calls in restrictions["network_calls"].items():
+            network_calls[host] = network_calls.get(host, 0) + calls
         if source_report["status"] == "no_change":
-            return {"status": "no_change", "network_calls": source_report.get("network_calls", {}),
+            return {"status": "no_change", "network_calls": network_calls, "card_restrictions": restrictions,
                     "image_downloads": 0, "changes_published": 0,
                     "current_version": current["version_id"],
                     "official_french_text_coverage": source_report.get("official_french_text_coverage")}
@@ -317,7 +324,7 @@ def refresh_v2(config_path: Path, *, dry_run: bool = False, progress=None, addit
             except OSError as exc:
                 report_error = str(exc)
             return {"status": "updated", "version_id": version_id,
-                    "network_calls": source_report.get("network_calls", {}), "image_downloads": 0,
+                    "network_calls": network_calls, "card_restrictions": restrictions, "image_downloads": 0,
                     "official_french_text_coverage": source_report.get("official_french_text_coverage"),
                     "build_seconds": round(time.perf_counter() - started, 2),
                     "report_error": report_error, "pruned_versions": pruned_versions,

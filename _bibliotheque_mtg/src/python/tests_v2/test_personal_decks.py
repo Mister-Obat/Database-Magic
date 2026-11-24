@@ -24,7 +24,8 @@ def cards(tmp_path):
     try:
         conn.executescript("""
             CREATE TABLE editions(set_id TEXT, code TEXT, eligibility TEXT);
-            CREATE TABLE printings(printing_id TEXT, set_id TEXT, layout TEXT, collector_number TEXT);
+            CREATE TABLE printings(printing_id TEXT, set_id TEXT, layout TEXT, collector_number TEXT,
+                oracle_id TEXT);
             CREATE TABLE source_records(provider_card_id TEXT, printing_id TEXT, lang TEXT,
                 printed_name TEXT, name TEXT, mana_value REAL, type_line TEXT, colors_key TEXT, raw_json TEXT);
             CREATE TABLE card_faces(printing_id TEXT, face_index INTEGER, physical_image INTEGER);
@@ -36,8 +37,8 @@ def cards(tmp_path):
             ("p1", "id1", "Fire // Ice", "Feu // Glace", 2.0, 2, "Creature"),
             ("p2", "id2", "Token Goblin", None, 0.0, 1, "Token Creature"),
         ]:
-            conn.execute("INSERT INTO printings VALUES(?,?,?,?)",
-                         (printing, "set", "modal_dfc" if faces > 1 else "normal", provider))
+            conn.execute("INSERT INTO printings VALUES(?,?,?,?,?)",
+                         (printing, "set", "modal_dfc" if faces > 1 else "normal", provider, f"oracle-{printing}"))
             conn.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?,NULL)",
                          (provider, printing, "en", None, name, mana, kind, "UR" if faces > 1 else "R"))
             if french:
@@ -55,6 +56,34 @@ def cards(tmp_path):
     finally:
         conn.close()
     return db
+
+
+def test_format_templates_and_current_bans(cards, tmp_path):
+    db = tmp_path / "personal.sqlite"
+    with sqlite3.connect(cards) as conn:
+        conn.execute("UPDATE source_records SET raw_json=? WHERE provider_card_id='id1'", (
+            json.dumps({"legalities": {"modern": "banned", "commander": "legal", "vintage": "restricted"}}),
+        ))
+    deck = personal.create_deck(db, "Formats", [], deck_format="modern")
+    assert any(section.get("source_section") == "sideboard" for section in deck["sections"])
+    assert not any(section.get("source_section") == "commander" for section in deck["sections"])
+    commander = personal.create_deck(db, "Commander", [], deck_format="commander")
+    assert commander["sections"][0]["source_section"] == "commander"
+    assert not any(section.get("source_section") == "sideboard" for section in commander["sections"])
+    deck = personal.add_card(db, deck["id"], cards, "id1fr")
+    assert personal.with_media(deck, cards)["cover_card"]["banned_formats"] == ["modern"]
+    draft = personal.with_media(deck, cards)
+    draft["format"] = "commander"
+    saved = personal.save_deck(db, draft)
+    assert saved["format"] == "commander"
+    assert saved["sections"] == deck["sections"]
+    assert personal.duplicate_deck(db, deck["id"], "Copie", saved["revision"])["format"] == "commander"
+    assert personal._read_document(json.dumps({k: v for k, v in commander.items() if k != "format"}))[
+        "format"] == "commander"
+    draft = personal.with_media(saved, cards)
+    draft["format"] = "inventé"
+    with pytest.raises(ValueError, match="Format"):
+        personal.save_deck(db, draft)
 
 
 def test_durable_revisions_backup_and_conflict(tmp_path):

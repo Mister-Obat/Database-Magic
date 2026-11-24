@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .deck_media import NON_PLAYABLE_SECTIONS, composition_colors, enrich_deck_media, export_deck_to_desktop
-from .v2.query import connect
+from .v2.query import card_legalities, connect
 
 
 SECTION_NAMES = ("Créatures", "Rituels", "Éphémères", "Artefacts", "Enchantements",
@@ -21,6 +21,16 @@ SECTION_NAMES = ("Créatures", "Rituels", "Éphémères", "Artefacts", "Enchante
 SECTION_LABELS = {"commander": "Commandant", "mainboard": "Deck principal",
                   "sideboard": "Réserve", "display_commander": "Commandant de présentation",
                   "planar_deck": "Deck planaire", "scheme_deck": "Machinations", "tokens": "Jetons"}
+DEFAULT_FORMAT = "commander"
+COMMANDER_FORMATS = frozenset({
+    "commander", "duel", "brawl", "competitivebrawl", "standardbrawl", "oathbreaker",
+    "paupercommander", "predh", "tlr",
+})
+SIDEBOARD_FORMATS = frozenset({
+    "standard", "pioneer", "modern", "pauper", "legacy", "vintage", "premodern",
+    "oldschool", "alchemy", "historic", "timeless", "penny", "future", "tlr",
+})
+DECK_FORMATS = COMMANDER_FORMATS | SIDEBOARD_FORMATS | {"gladiator"}
 _BACKUP_LOCK = threading.Lock()
 _UNSPECIFIED_POSITION = object()
 DEFAULT_BOX_DESIGN = "standard"
@@ -52,6 +62,12 @@ def _colors(value):
     if not isinstance(value, list) or any(not isinstance(c, str) or len(c) != 1 or c not in "WUBRG" for c in value):
         raise ValueError("Couleurs invalides : choisir W/U/B/R/G.")
     return [c for c in "WUBRG" if c in value]
+
+
+def _deck_format(value):
+    if value is not None and (not isinstance(value, str) or value not in DECK_FORMATS):
+        raise ValueError("Format de deck invalide.")
+    return value
 
 
 def _box_design(value):
@@ -128,6 +144,9 @@ def _read_document(document):
     if not sections and deck["sections"]:
         sections = [{"id": deck["sections"][0]["id"], "name": "Deck principal", "cards": []}]
     deck["sections"] = sections
+    deck.setdefault("format", DEFAULT_FORMAT if any(
+        section.get("source_section") == "commander" for section in sections
+    ) else None)
     return deck
 
 
@@ -171,19 +190,26 @@ def _write(conn, deck):
     return deck
 
 
-def _new(name, colors, sections=None, commander=False, *, box_design=DEFAULT_BOX_DESIGN):
-    names = (["Commandant"] if commander else []) + list(SECTION_NAMES)
+def _new(name, colors, sections=None, *, deck_format=None, box_design=DEFAULT_BOX_DESIGN):
+    if sections is None:
+        sections = [{"id": _id(), "name": label, "cards": []} for label in SECTION_NAMES]
+        sections[-1]["source_section"] = "tokens"
+        if deck_format in COMMANDER_FORMATS:
+            command = {"id": _id(), "name": "Commandant", "source_section": "commander", "cards": []}
+            if deck_format == "oathbreaker":
+                command["name"] = "Oathbreaker"
+                sections.insert(0, {"id": _id(), "name": "Sort signature", "cards": []})
+            sections.insert(0, command)
+        if deck_format in SIDEBOARD_FORMATS:
+            sections.insert(-1, {"id": _id(), "name": "Réserve", "source_section": "sideboard", "cards": []})
     return {"id": _id(), "name": _text(name, "Nom"), "colors": _colors(colors), "revision": 1,
-            "box_design": _box_design(box_design),
-            "sections": sections if sections is not None else [
-                {"id": _id(), "name": name, "cards": [],
-                 **({"source_section": "tokens"} if name == "Jetons" else
-                    {"source_section": "commander"} if name == "Commandant" else {})} for name in names]}
+            "box_design": _box_design(box_design), "format": deck_format, "sections": sections}
 
 
-def create_deck(path, name, colors, commander=False):
+def create_deck(path, name, colors, commander=False, *, deck_format=None):
+    deck_format = _deck_format(deck_format) or (DEFAULT_FORMAT if commander else None)
     with _database(path) as conn:
-        return _write(conn, _new(name, colors, commander=bool(commander)))
+        return _write(conn, _new(name, colors, deck_format=deck_format))
 
 
 def create_deck_from_text(path, name, colors, sections):
@@ -199,7 +225,8 @@ def create_deck_from_text(path, name, colors, sections):
             cards.append({**card, "id": _id()})
         prepared.append({**section, "id": _id(), "name": _text(section["name"], "Nom de section"),
                          "cards": cards})
-    deck = _new(name, colors, sections=prepared)
+    deck_format = DEFAULT_FORMAT if any(s.get("source_section") == "commander" for s in prepared) else None
+    deck = _new(name, colors, sections=prepared, deck_format=deck_format)
     with _database(path) as conn:
         return _write(conn, deck)
 
@@ -214,7 +241,7 @@ def duplicate_deck(path, deck_id, name, revision):
             for card in section["cards"]:
                 card["id"] = _id()
         return _write(conn, _new(name, source["colors"], sections=source["sections"],
-                                 box_design=source["box_design"]))
+                                 deck_format=source["format"], box_design=source["box_design"]))
 
 
 def _read_connection(path):
@@ -406,6 +433,7 @@ def save_deck(path, draft):
         if type(draft.get("revision")) is not int or draft["revision"] != current["revision"]:
             raise RevisionConflict("Ce deck a changé. Rechargez-le avant de réessayer.")
         box_design = _box_design(draft.get("box_design", current["box_design"]))
+        deck_format = _deck_format(draft.get("format", current["format"]))
         sections = draft.get("sections")
         if not isinstance(sections, list) or not 1 <= len(sections) <= 100:
             raise ValueError("Conserver de 1 à 100 sections.")
@@ -446,7 +474,7 @@ def save_deck(path, draft):
             if old["id"] not in seen_sections:
                 cleaned[0]["cards"].extend(c for c in old["cards"] if c["id"] not in seen_cards)
         current.update(name=_text(draft.get("name"), "Nom"), colors=_colors(draft.get("colors")),
-                       box_design=box_design, sections=cleaned, revision=current["revision"] + 1)
+                       box_design=box_design, format=deck_format, sections=cleaned, revision=current["revision"] + 1)
         return _write(conn, current)
 
 
@@ -499,9 +527,8 @@ def add_card(path, deck_id, catalog_db, provider_id, printing_id=None, section_i
 
 def import_preconstructed(path, source, catalog_db):
     commander = bool((source.get("sections") or {}).get("commander"))
-    sections = _new("Import", [], commander=commander)["sections"]
-    if commander:
-        sections[0]["source_section"] = "commander"
+    deck_format = DEFAULT_FORMAT if commander else None
+    sections = _new("Import", [], deck_format=deck_format)["sections"]
     by_name = {s["name"]: s for s in sections}
     for key, entries in (source.get("sections") or {}).items():
         if key == "display_commander":
@@ -539,7 +566,7 @@ def import_preconstructed(path, source, catalog_db):
     colors = source.get("colors") or []
     if isinstance(colors, str):
         colors = list(colors)
-    deck = _new(source.get("name_fr") or source.get("name"), colors, sections or None)
+    deck = _new(source.get("name_fr") or source.get("name"), colors, sections or None, deck_format=deck_format)
     deck["source_deck_id"] = source.get("id")
     with _database(path) as conn:
         return _write(conn, deck)
@@ -580,6 +607,8 @@ def with_media(deck, catalog_db, proxy_lookup=None):
     result = copy.deepcopy(deck)
     # Keep snapshot text if the exact card disappears from a future catalogue.
     enriched = enrich_deck_media({"sections": {s["id"]: s["cards"] for s in result["sections"]}}, catalog_db)
+    cards_by_printing = {}
+    cards_by_proxy_source = {}
     for section in result["sections"]:
         for card, media in zip(section["cards"], enriched["sections"][section["id"]]):
             card.update({key: value for key, value in media.items() if key.startswith("image_")})
@@ -593,6 +622,23 @@ def with_media(deck, catalog_db, proxy_lookup=None):
                     for key in ("name", "printed_name", "type_line", "mana_value", "colors_key", "collector_number", "image_url"):
                         card[key] = current.get(key)
                     card.update(image_ready=True, image_status="ready")
+                    if current.get("proxy_source_id"):
+                        cards_by_proxy_source.setdefault(current["proxy_source_id"], []).append(card)
+            elif card.get("set_code") != "proxy" and card.get("printing_id"):
+                cards_by_printing.setdefault(card["printing_id"], []).append(card)
+    if result.get("id"):
+        if cards_by_proxy_source:
+            with closing(connect(catalog_db)) as conn:
+                for source_id, cards in cards_by_proxy_source.items():
+                    row = conn.execute("SELECT printing_id FROM source_records WHERE provider_card_id = ?",
+                                       (source_id,)).fetchone()
+                    if row:
+                        cards_by_printing.setdefault(row["printing_id"], []).extend(cards)
+        for printing_id, statuses in card_legalities(catalog_db, cards_by_printing).items():
+            banned_formats = [key for key, status in statuses.items() if status == "banned"]
+            if banned_formats:
+                for card in cards_by_printing[printing_id]:
+                    card["banned_formats"] = banned_formats
     cover_section = _cover_section(result)
     first = cover_section["cards"] if cover_section else []
     result["cover_card"] = copy.deepcopy(first[0]) if first else None

@@ -56,6 +56,17 @@ active se résout par `v3-staging/current.json`.
 par identité exacte entre publications ; les impressions absentes de la
 version précédente reçoivent la date de construction.
 
+`v2.query.card_legalities` restitue les statuts Scryfall par format pour les
+impressions demandées. Les catalogues historiques possèdent déjà ces données
+dans `source_records.raw_json`. Le format absent ou le statut fournisseur
+inconnu reste sans statut exploitable.
+La recherche ciblée d’Info conserve les interdictions et restrictions par
+Oracle dans `card-restrictions.json` à la racine de publication. Le relevé
+remplace les statuts `banned` et `restricted` pour les formats couverts, y
+compris lorsqu’une carte sort de la liste. Un statut retiré n’est pas assimilé
+à `legal`. Le relevé est compatible avec les versions partageant le hash de
+l’archive complète qui lui sert de base.
+
 1. `run_sources(config_path, refresh=True, metadata_only=True)` relève le
    descripteur All Cards, l’archive, les séries et les galeries ; il écrit les
    sources locales et `reports/sources.json`.

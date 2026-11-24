@@ -4785,6 +4785,7 @@ function personalImage(card, className = "deck-card-image") {
 async function showPersonalDecks() {
     if (personalState.deck) {
         renderPersonalEditor();
+        await refreshPersonalOnFocus();
         return;
     }
     const remembered = personalRead(PERSONAL_CURRENT_KEY);
@@ -4801,8 +4802,28 @@ async function refreshPersonalOnFocus() {
     if (personalState.saving || personalState.change !== personalState.saved) return;
     try {
         const result = await getJSON("/api/v2/personal-deck", { id: deck.id });
-        if (personalState.deck !== deck || personalState.saving || personalState.change !== personalState.saved) return;
-        if (result.deck.revision === deck.revision) return;
+        if (state.view !== "perso" || personalState.deck !== deck || personalState.saving
+            || personalState.change !== personalState.saved) return;
+        if (result.deck.revision === deck.revision) {
+            if (personalState.editing || personalState.drag) return;
+            const bannedByCard = new Map(result.deck.sections.flatMap(section =>
+                section.cards.map(card => [card.id, card.banned_formats])));
+            let bansChanged = false;
+            for (const section of deck.sections) {
+                for (const card of section.cards) {
+                    const banned = bannedByCard.get(card.id);
+                    if (String(card.banned_formats) === String(banned)) continue;
+                    card.banned_formats = banned;
+                    bansChanged = true;
+                }
+            }
+            if (bansChanged) {
+                const restoreViewport = captureViewport("perso");
+                renderPersonalEditor();
+                restoreViewport?.();
+            }
+            return;
+        }
         if (personalState.editing) {
             personalStatus("Ce deck a changé dans un autre onglet. Terminez l’édition puis actualisez le deck.", true);
             return;
@@ -4829,11 +4850,23 @@ async function refreshOpenPersonalDeck() {
 }
 window.addEventListener("focus", () => void refreshPersonalOnFocus());
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshPersonalOnFocus(); });
-function personalColorField(values, onChange) {
-    const field = node("div", "personal-color-field");
-    field.append(node("span", "", "Couleurs du deck"), personalColors(values.length ? values : ["C"],
-        colors => onChange(colors.filter(color => color !== "C"))));
-    return field;
+const personalDeckFormats = new Map([
+    ["commander", "Commander"], ["duel", "Duel Commander"], ["paupercommander", "Pauper Commander"],
+    ["oathbreaker", "Oathbreaker"], ["predh", "PreDH"], ["tlr", "Tiny Leaders Reborn"],
+    ["standard", "Standard"], ["pioneer", "Pioneer"], ["modern", "Modern"], ["pauper", "Pauper"],
+    ["legacy", "Legacy"], ["vintage", "Vintage"], ["oldschool", "Old School"], ["premodern", "Premodern"],
+    ["penny", "Penny Dreadful"], ["future", "Futur Standard"], ["alchemy", "Alchemy"],
+    ["historic", "Historique"], ["timeless", "Intemporel"], ["gladiator", "Gladiator"],
+    ["brawl", "Brawl"], ["competitivebrawl", "Brawl compétitif"], ["standardbrawl", "Brawl Standard"],
+]);
+function personalDeckFormatField(value = "commander", { allowUnset = false } = {}) {
+    const field = node("label", "personal-deck-format-field", "Type de deck");
+    const select = node("select");
+    if (allowUnset) select.append(new Option("Sans format", ""));
+    for (const [key, name] of personalDeckFormats) select.append(new Option(name, key));
+    select.value = value ?? "";
+    field.append(select);
+    return { field, select };
 }
 const deckLoadingObserver = new IntersectionObserver(entries => {
     for (const { target, isIntersecting } of entries) {
@@ -5418,22 +5451,20 @@ function renderPersonalCreate() {
     name.required = true;
     name.maxLength = 200;
     label.append(name);
-    let colors = [];
+    const { field: formatField, select: format } = personalDeckFormatField();
     const submit = node("button", "primary-button", "Créer le deck"), errorBox = node("p", "error-state");
     submit.type = "submit";
     const back = personalButton("Retour à la liste", renderPersonalList);
     errorBox.hidden = true;
     errorBox.setAttribute("role", "alert");
-    form.append(label, personalColorField([], value => {
-        colors = value;
-    }), errorBox, submit, back);
+    form.append(label, formatField, errorBox, submit, back);
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
         submit.disabled = true;
         back.disabled = true;
         errorBox.hidden = true;
         try {
-            await postJSON("/api/v2/personal-decks/create", { name: name.value.trim(), colors, commander: true });
+            await postJSON("/api/v2/personal-decks/create", { name: name.value.trim(), format: format.value });
             if (form.isConnected) renderPersonalList();
         }
         catch (error) {
@@ -5480,8 +5511,10 @@ async function openPersonalDeck(id) {
                     if (!current) continue;
                     card.mana_value = current.mana_value ?? card.mana_value;
                     card.colors_key = current.colors_key ?? card.colors_key;
+                    card.banned_formats = current.banned_formats;
                 }
             }
+            if (draft.format === undefined) draft.format = result.deck.format;
             personalState.deck = draft;
             personalState.change = 1;
             renderPersonalEditor();
@@ -5746,7 +5779,7 @@ function confirmPersonalCardSort(deck, sectionGrids, button) {
 }
 function updatePersonalHeading(deck = null, editButton = null) {
     const [eyebrow, heading] = deckTitleContent(
-        deck ? "Deck personnel" : "Votre collection de compositions",
+        deck ? personalDeckFormats.get(deck.format) ?? "Deck personnel" : "Votre collection de compositions",
         deck?.name || "Deck perso",
         deck ? deck.composition_colors ?? deck.colors ?? [] : null,
         "personal-title",
@@ -5842,12 +5875,14 @@ function renderPersonalEditor() {
             "Écriture du fichier TXT…", result => `Fichier créé sur le Bureau · ${result.file || result.path}`),
     );
     const editButton = personalButton("Modifier", () => {
-        personalState.editing = { name: deck.name, boxDesign: deck.box_design ?? "standard" };
+        personalState.editing = {
+            name: deck.name, boxDesign: deck.box_design ?? "standard", format: deck.format ?? null,
+        };
         renderPersonalEditor();
         $("personal-content").querySelector(".personal-deck-fields input")?.focus();
     });
     editButton.classList.add("personal-heading-edit");
-    editButton.setAttribute("aria-label", "Modifier le nom et le design de la boîte");
+    editButton.setAttribute("aria-label", "Modifier le nom, le design de la boîte et le type du deck");
     updatePersonalHeading(deck, editing ? null : editButton);
     const organize = personalButton(sectionOrganization ? "Terminer l’organisation" : "Organiser les sections", () => {
         personalState.sectionOrganization = sectionOrganization ? null : { name: "" };
@@ -5923,7 +5958,9 @@ function renderPersonalEditor() {
         design.setAttribute("aria-haspopup", "dialog");
         design.setAttribute("aria-labelledby", `${designLabel.id} ${design.id}`);
         designField.append(designLabel, design);
-        fields.append(label, designField, buttons);
+        const { field: formatField, select: format } = personalDeckFormatField(editing.format, { allowUnset: true });
+        format.addEventListener("change", () => { editing.format = format.value || null; });
+        fields.append(label, designField, formatField, buttons);
         fields.addEventListener("submit", event => {
             event.preventDefault();
             const nextName = name.value.trim();
@@ -5931,6 +5968,7 @@ function renderPersonalEditor() {
             const designChanged = editing.boxDesign !== (deck.box_design ?? "standard");
             deck.name = nextName;
             deck.box_design = editing.boxDesign;
+            deck.format = editing.format;
             personalChanged();
             finish();
             if (designChanged) void flushPersonal().then(async saved => {
@@ -6036,6 +6074,10 @@ function renderPersonalEditor() {
             registerAIBatchTarget(open, preview, card);
             if (preview.tagName !== "IMG") open.append(node("span", "deck-card-name", cardName));
             tile.append(open);
+            if (card.banned_formats?.includes(deck.format)) {
+                tile.classList.add("personal-card-banned");
+                tile.append(node("span", "personal-card-banned-label", "Interdit dans ce format"));
+            }
             const countLabel = node("label", "personal-quantity", "Quantité"), count = node("input");
             count.type = "number";
             count.min = "1";
@@ -6188,9 +6230,11 @@ async function choosePersonalDeck(card) {
     name.disabled = true;
     nameLabel.hidden = true;
     nameLabel.append(name);
+    const { field: formatField, select: format } = personalDeckFormatField();
+    formatField.hidden = format.disabled = true;
     const create = personalButton("Créer un deck", () => {
         nameLabel.hidden = !nameLabel.hidden;
-        name.disabled = nameLabel.hidden;
+        formatField.hidden = name.disabled = format.disabled = nameLabel.hidden;
         create.setAttribute("aria-expanded", String(!nameLabel.hidden));
         create.textContent = nameLabel.hidden ? "Créer un deck" : "Annuler la création";
         if (!nameLabel.hidden) name.focus();
@@ -6201,7 +6245,7 @@ async function choosePersonalDeck(card) {
     validate.type = "submit";
     const footer = node("div", "personal-picker-footer");
     footer.append(create, validate);
-    form.append(nameLabel, footer);
+    form.append(nameLabel, formatField, footer);
     const body = node("div", "personal-picker-body");
     body.append(status, list);
     dialog.append(heading, body, form);
@@ -6230,7 +6274,7 @@ async function choosePersonalDeck(card) {
     function setBusy(value) {
         busy = value;
         create.disabled = validate.disabled = value;
-        name.disabled = value || nameLabel.hidden;
+        name.disabled = format.disabled = value || nameLabel.hidden;
         for (const button of list.querySelectorAll("button")) button.disabled = value;
     }
     function deckButton(deck) {
@@ -6261,9 +6305,10 @@ async function choosePersonalDeck(card) {
         if (!deckName) { report("Saisissez un nom de deck.", true); name.focus(); return; }
         setBusy(true);
         try {
-            const { deck } = await postJSON("/api/v2/personal-decks/create", { name: deckName, colors: [], commander: true });
+            const { deck } = await postJSON("/api/v2/personal-decks/create", { name: deckName, format: format.value });
             name.value = "";
-            nameLabel.hidden = true;
+            format.value = "commander";
+            nameLabel.hidden = formatField.hidden = true;
             create.textContent = "Créer un deck";
             create.setAttribute("aria-expanded", "false");
             const button = deckButton(deck);

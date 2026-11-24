@@ -236,3 +236,13 @@ du même lot, jusqu’à la prochaine analyse ou au changement de version active
 Les résultats du dernier scan terminé de chaque version du catalogue et les
 paires avant/après sont conservés dans la base locale `state/localized-banners.sqlite`.
 Chaque succès est enregistré séparément pour rester visible après un redémarrage.
+Le détecteur conserve aussi ses résultats par fichier et version de signature,
+avec la taille et les dates du fichier. Un autre scan réutilise les verdicts
+des fichiers inchangés, recompte les slots prêts et recalcule les sources EN
+pour les bandeaux détectés. Les fichiers nouveaux, modifiés ou illisibles
+sont contrôlés à nouveau. Les verdicts déjà validés restent acquis en cas
+d'interruption.
+
+Le remplacement peut chevaucher jusqu'à quatre GET, comme le téléchargement
+groupé des images manquantes. Les écritures d'assets et du rapport restent
+sérialisées. Un refus 403 ou une réponse 429 arrête les nouveaux GET du lot.

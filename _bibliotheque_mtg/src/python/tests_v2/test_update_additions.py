@@ -3,7 +3,35 @@ import hashlib
 import json
 import sqlite3
 
+import pytest
+
 from bibliotheque_mtg import sources
+from bibliotheque_mtg.v2.restrictions import refresh_restrictions
+
+
+def test_restriction_update_replaces_complete_snapshot_and_rejects_partial_response(monkeypatch, tmp_path):
+    monkeypatch.setattr(sources, "_load_config", lambda *_: {"network": {
+        "user_agent": "test", "minimum_scryfall_interval_ms": 0}})
+    complete = True
+
+    def pages(_client, url, *, max_pages):
+        assert "banned%3Acommander" in url and "restricted%3Avintage" in url
+        yield url, {"total_cards": 1 if complete else 2, "data": [
+            {"oracle_id": "oracle", "legalities": {"commander": "banned", "vintage": "legal"}},
+        ]}
+
+    monkeypatch.setattr(sources, "iter_api_pages", pages)
+    args = (tmp_path / "config.json", tmp_path, "archive-sha")
+    assert refresh_restrictions(*args)["changed"] is True
+    snapshot = tmp_path / "card-restrictions.json"
+    original = snapshot.read_bytes()
+    assert json.loads(original)["cards"] == {"oracle": {"commander": "banned"}}
+    assert refresh_restrictions(*args)["changed"] is False
+
+    complete = False
+    with pytest.raises(sources.SourceFormatError, match="incomplets"):
+        refresh_restrictions(*args)
+    assert snapshot.read_bytes() == original
 
 
 def test_additions_only_fetches_only_growing_set(monkeypatch, tmp_path):

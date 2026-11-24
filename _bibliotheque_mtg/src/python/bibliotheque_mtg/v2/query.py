@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import sqlite3
 import os
 import re
@@ -9,6 +10,8 @@ import unicodedata
 from collections import OrderedDict
 from contextlib import closing, contextmanager
 from pathlib import Path
+
+from .restrictions import RESTRICTED_STATUSES, active_restrictions
 
 CONTRACT_VERSION = "2.0.0"
 MAX_PAGE_SIZE = 100
@@ -567,6 +570,48 @@ def read_search_rank_page(db, ranks, *, display_language):
         return [item for start in range(0, len(printing_ids), 300)
                 for item in _search_page_records(c, printing_ids[start:start + 300],
                                                  display_language=display_language)]
+
+
+def card_legalities(db, printing_ids):
+    """Read Scryfall format statuses for exact catalogue printings."""
+    printing_ids = list(dict.fromkeys(printing_ids))
+    result = {}
+    if not printing_ids:
+        return result
+    with _connection(db) as connection:
+        restrictions = active_restrictions(db, connection)
+        for offset in range(0, len(printing_ids), 500):
+            batch = printing_ids[offset:offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = connection.execute(f"""
+                SELECT sr.printing_id, p.oracle_id,
+                    CASE WHEN json_type(sr.raw_json, '$.legalities') = 'object'
+                        THEN json_extract(sr.raw_json, '$.legalities') END AS legalities
+                FROM source_records sr JOIN printings p USING(printing_id)
+                WHERE printing_id IN ({placeholders}) AND json_valid(raw_json)
+                ORDER BY printing_id, lang != 'en', lang, provider_card_id
+            """, batch)
+            oracle_ids = {}
+            for row in rows:
+                printing_id = row["printing_id"]
+                oracle_ids[printing_id] = row["oracle_id"]
+                legalities = json.loads(row["legalities"] or "null")
+                if not isinstance(legalities, dict):
+                    continue
+                statuses = result.setdefault(printing_id, {})
+                for key, status in legalities.items():
+                    if status in ("legal", "not_legal", "restricted", "banned"):
+                        statuses.setdefault(key, status)
+            if restrictions:
+                for printing_id, oracle_id in oracle_ids.items():
+                    if not oracle_id:
+                        continue
+                    statuses = result.setdefault(printing_id, {})
+                    for key in restrictions["formats"]:
+                        if statuses.get(key) in RESTRICTED_STATUSES:
+                            statuses.pop(key)
+                    statuses.update(restrictions["cards"].get(oracle_id, {}))
+    return result
 
 
 def card_detail(db, provider_card_id):

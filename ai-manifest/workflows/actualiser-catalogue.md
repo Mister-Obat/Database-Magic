@@ -10,6 +10,10 @@ les éditions nouvelles ou agrandies via l’API Scryfall, construit seulement c
 éditions, les fusionne dans une copie du catalogue local puis actualise l’index
 des decks préconstruits. Il affiche les étapes et permet l’annulation. Le parcours
 CLI reste la resynchronisation complète des corrections anciennes.
+Le bouton Info actualise également le relevé des interdictions et restrictions
+Scryfall quand aucune nouvelle édition n’est à publier. Les statuts changés
+sont visibles à la prochaine lecture du deck. La resynchronisation complète
+actualise aussi l’admissibilité après rotation.
 
 ## Préconditions
 

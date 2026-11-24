@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 import sqlite3
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import patch
 from bibliotheque_mtg.proxies import Proxies
 from bibliotheque_mtg.v2 import api
 from bibliotheque_mtg.v2.catalogue import migrate
-from bibliotheque_mtg.v2.query import _french_type_aliases, _match_term, card_detail, edition_cards, list_editions, search_cards
+from bibliotheque_mtg.v2.query import _french_type_aliases, _match_term, card_detail, card_legalities, edition_cards, list_editions, search_cards
 from .test_catalogue_v2 import source_database
 
 
@@ -42,6 +43,42 @@ class QueryV2Tests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_card_legalities_preserve_distinct_statuses_and_translation_fallback(self):
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            printing_id = conn.execute(
+                "SELECT printing_id FROM source_records WHERE provider_card_id='en-1'"
+            ).fetchone()[0]
+            conn.executemany(
+                "UPDATE source_records SET raw_json=? WHERE provider_card_id=?",
+                [(' {"legalities":{"commander":"banned","modern":"not_legal","vintage":"restricted","other":true}}', 'en-1'),
+                 (' {"legalities":{"commander":"legal","legacy":"legal"}}', 'fr-1')],
+            )
+        self.assertEqual({printing_id: {"commander": "banned", "modern": "not_legal",
+                                       "vintage": "restricted", "legacy": "legal"}},
+                         card_legalities(self.db, [printing_id, printing_id, "missing"]))
+
+    def test_card_legalities_apply_new_bans_and_remove_old_ones_for_same_archive(self):
+        root = self.db.parent
+        version = root / "versions" / "current-example"
+        version.mkdir(parents=True)
+        self.db = self.db.replace(version / "catalogue.sqlite")
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            printing_id, oracle_id = conn.execute(
+                "SELECT printing_id, oracle_id FROM source_records JOIN printings USING(printing_id) "
+                "WHERE provider_card_id='en-1'"
+            ).fetchone()
+            conn.execute("UPDATE source_records SET raw_json=? WHERE printing_id=?",
+                         (json.dumps({"legalities": {"commander": "banned", "vintage": "legal"}}), printing_id))
+        path = root / "card-restrictions.json"
+        snapshot = {"archive_sha256": "d" * 64, "formats": ["commander", "vintage"],
+                    "cards": {oracle_id: {"vintage": "restricted"}}}
+        path.write_text(json.dumps(snapshot), encoding="utf-8")
+        self.assertEqual({printing_id: {"vintage": "restricted"}}, card_legalities(self.db, [printing_id]))
+        snapshot["archive_sha256"] = "old"
+        path.write_text(json.dumps(snapshot), encoding="utf-8")
+        self.assertEqual({printing_id: {"commander": "banned", "vintage": "legal"}},
+                         card_legalities(self.db, [printing_id]))
 
     def test_search_merges_proxies_by_display_name_before_pagination(self):
         root = Path(self.temp.name)
