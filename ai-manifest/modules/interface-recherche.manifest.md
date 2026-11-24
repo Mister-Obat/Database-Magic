@@ -17,13 +17,18 @@ Voir [maintenance](maintenance-publication.manifest.md) pour l’import.
 
 ## Analyse et remplacement des images avec bandeau
 
-Entre les prix et la maintenance, un panneau de l’Accueil montre une vraie
-carte avec le bandeau Scryfall et donne accès à deux opérations distinctes.
+Sur l’Accueil, le panneau de mise à jour suit les decks perso récents et
+précède l’affichage des prix. Après les prix, le panneau des bandeaux montre
+un exemple Scryfall et donne accès à deux opérations distinctes.
 L’analyse locale indique combien de bandeaux ont été détectés. Le remplacement
 indique le nombre de faces traitées et remplacées, puis rend le bilan du lot.
-La modale pagine les images détectées ou les paires avant/après remplacées
-depuis la dernière analyse. Les compteurs et les résultats sont restaurés
-au rechargement pour la version active du catalogue.
+La modale pagine les images détectées lors de la dernière analyse terminée
+ou les paires avant/après conservées pour la version active du catalogue.
+Pendant une nouvelle analyse, les résultats précédents restent consultables.
+La progression chiffrée compte les fichiers à contrôler de nouveau, après
+l’inventaire local. Si aucun contrôle n’a été nécessaire, le bilan affiche
+« Aucune nouvelle image à analyser. » Les compteurs et les résultats sont
+restaurés au rechargement.
 
 ## Cartes proxy
 
@@ -573,9 +578,13 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   qu'elle est trouvée sans confirmation de recherche ; la fiche et la grille
   active sont relues. La comparaison avec choix ancien/nouveau demeure pour une
   face qui possède déjà une image. Un aperçu seul ne vaut jamais publication.
-- Une recherche d'image depuis la visionneuse télécharge aussi les autres faces
-  manquantes de la même impression. Les imports de listes et de decks demandent
-  déjà toutes les faces physiques avec `download_printing`.
+- La visionneuse lance d'abord la recherche pour la face affichée. Une fois
+  cette tâche terminée, les autres faces manquantes de la même impression se
+  téléchargent en arrière-plan sans retarder la comparaison. Une recherche
+  annulée ne lance aucun téléchargement complémentaire. Si un lot est actif,
+  le serveur répond `download_busy` à cette demande complémentaire. Les imports
+  de listes et de decks demandent déjà toutes les faces physiques avec
+  `download_printing`.
 - Les liens Accueil, Recherche, Éditions et Deck préconstruit s’ouvrent aussi
   dans un nouvel onglet du navigateur par clic molette. Un clic simple reste
   dans l’application et reprend la vue mémorisée.
@@ -868,9 +877,10 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Les entrées conservent les identités exactes fournisseur/impression, leur
   quantité et les métadonnées utiles à la consultation hors catalogue futur.
 - Le champ `format` conserve le format de jeu du deck. La création propose
-  Commander par défaut et prépare les sections par type de carte, ainsi que
-  Commandant ou Réserve lorsque le format le prévoit. Le nom, le design et le
-  format se modifient ensemble. Un changement de format conserve les sections
+  Sans format par défaut et prépare les sections par type de carte, ainsi que
+  Commandant ou Réserve lorsque le format le prévoit. Le sélecteur reprend la
+  palette du catalogue. Le nom, le design et le format se modifient ensemble,
+  avec les actions centrées sous les champs. Un changement de format conserve les sections
   et les cartes existantes. Les anciens decks dotés d’une zone de commandement
   sont lus comme Commander. Les autres restent sans format explicite.
 - Le détail affiche le format en surtitre et signale chaque carte bannie dans
@@ -993,9 +1003,12 @@ Le lanceur utilisateur est `Lancer_Bibliotheque_Magic.bat`. Voir la
   Les tris par nom et par ajout restent des vues non modifiables.
   Chaque section de la liste, y compris la première, reprend le séparateur
   et l’espacement des sections d’une composition ouverte.
-- Le nom, les couleurs et le tri filtrent la liste de Deck perso immédiatement.
-  Le mode de couleur conserve Incolore exclusif et la correspondance normale
-  ou exacte. La création est hors des filtres.
+- La liste de Deck perso combine immédiatement le nom, les couleurs et le
+  format sélectionné, puis applique le tri. Le menu Format suit les deux
+  menus de tri et reprend les formats de création d'un deck. « Tous les
+  formats » est sélectionné par défaut et « Sans format » affiche les decks
+  sans type enregistré. Le mode de couleur conserve Incolore exclusif et la
+  correspondance normale ou exacte. La création est hors des filtres.
 - Dans la composition, le glisser-déposer fait défiler la page près des bords.
   La carte saisie suit le pointeur en relief. Un emplacement visible décale les
   cartes voisines dans la section survolée, y compris entre sections.

@@ -20,10 +20,11 @@ import webbrowser
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from functools import lru_cache
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import ExitStack, closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 
+import requests
 from PIL import Image, ImageOps
 
 from .v2 import api
@@ -180,17 +181,21 @@ def _start_banner_task(route: str, payload: dict) -> dict:
         if route == _BANNER_ANALYZE:
             if payload:
                 raise ValueError("Aucun paramètre attendu.")
-            analysis_id = uuid.uuid4().hex
+            with closing(_banner_store()) as conn:
+                previous = conn.execute("SELECT analysis_id FROM analyses WHERE version_id=?",
+                                        (current["version_id"],)).fetchone()
+            analysis_id = previous[0] if previous else uuid.uuid4().hex
 
             def analyze(cancel_event, progress):
                 counts, matches = analyze_localized_banners(
                     current, cancel_event, progress, OPS_ROOT / "state" / "localized-banners.sqlite")
                 if not cancel_event.is_set():
                     with closing(_banner_store()) as conn, conn:
-                        conn.execute("""DELETE FROM replacements WHERE analysis_id IN
-                            (SELECT analysis_id FROM analyses WHERE version_id=?)""", (current["version_id"],))
-                        conn.execute("INSERT OR REPLACE INTO analyses VALUES (?, ?, ?, ?, NULL)",
-                                     (current["version_id"], analysis_id, json.dumps(counts), json.dumps(matches)))
+                        conn.execute("""
+                            INSERT INTO analyses VALUES (?, ?, ?, ?, NULL)
+                            ON CONFLICT(version_id) DO UPDATE SET
+                                counts=excluded.counts, matches=excluded.matches, report=NULL
+                        """, (current["version_id"], analysis_id, json.dumps(counts), json.dumps(matches)))
                 return {"analysis_id": analysis_id, **counts}
 
             return _start_image_task("banner_analysis", "Analyse des bandeaux Scryfall",
@@ -741,7 +746,7 @@ def _same_name_french_image_references(db: Path, provider_card_id: str,
     """Return ready local French images for same-name or same-Oracle printings."""
     with connect(db) as conn:
         target = conn.execute(
-            "SELECT p.printing_id,p.oracle_id,p.layout,sr.lang,sr.name,sr.printed_name "
+            "SELECT p.printing_id,p.oracle_id,p.layout "
             "FROM source_records sr JOIN printings p USING(printing_id) "
             "WHERE sr.provider_card_id=?", (provider_card_id,)).fetchone()
         if target is None:
@@ -758,35 +763,55 @@ def _same_name_french_image_references(db: Path, provider_card_id: str,
             (target["printing_id"],)).fetchall()
         if not rows and target["oracle_id"]:
             rows = conn.execute(
-                "SELECT sr.name,sr.printed_name FROM source_records sr "
-                "JOIN printings p USING(printing_id) WHERE p.oracle_id=? AND sr.lang='fr' "
+                "SELECT sr.name,sr.printed_name FROM printings p "
+                "CROSS JOIN source_records sr USING(printing_id) WHERE p.oracle_id=? AND sr.lang='fr' "
                 "ORDER BY sr.provider_card_id LIMIT 1", (target["oracle_id"],)).fetchall()
         for row in rows:
             target_names.update(str(row[key]).strip() for key in ("name", "printed_name")
                                 if row[key] and str(row[key]).strip())
 
-        clauses, parameters = [], []
+        candidates, parameters = [], []
         if target["oracle_id"]:
-            clauses.append("p.oracle_id=?")
+            candidates.append(
+                "SELECT sr.provider_card_id FROM printings p "
+                "CROSS JOIN source_records sr USING(printing_id) WHERE p.oracle_id=? AND sr.lang='fr'")
             parameters.append(target["oracle_id"])
         if target_names:
-            placeholders = ",".join("?" for _ in target_names)
-            clauses.append(f"(sr.name COLLATE NOCASE IN ({placeholders}) "
-                           f"OR sr.printed_name COLLATE NOCASE IN ({placeholders}))")
-            parameters.extend(sorted(target_names))
-            parameters.extend(sorted(target_names))
-        if not clauses:
+            names = sorted(target_names)
+            placeholders = ",".join("?" for _ in names)
+            candidates.append(
+                "SELECT sr.provider_card_id FROM source_records sr "
+                f"WHERE sr.lang='fr' AND sr.name COLLATE NOCASE IN ({placeholders})")
+            parameters.extend(names)
+            # The catalogue indexes the French printed name verbatim in FTS5.
+            # Confirm exact equality after MATCH, which also accepts token/diacritic variants.
+            # Keep a relational lookup for names without a guaranteed searchable token.
+            if all("\x00" not in name and any(c.isascii() and c.isalnum() for c in name)
+                   for name in names):
+                phrases = " OR ".join('"' + name.replace('"', '""') + '"' for name in names)
+                printed_from = ("source_search CROSS JOIN source_records sr "
+                                "ON sr.provider_card_id=source_search.provider_card_id "
+                                "WHERE source_search MATCH ? AND ")
+                parameters.append(f"lang : fr AND printed_name : ({phrases})")
+            else:
+                printed_from = "source_records sr WHERE "
+            candidates.append(
+                "SELECT sr.provider_card_id FROM " + printed_from +
+                f"sr.lang='fr' AND sr.printed_name COLLATE NOCASE IN ({placeholders})")
+            parameters.extend(names)
+        if not candidates:
             return []
         query = (
+            "WITH candidates AS (" + " UNION ".join(candidates) + ") "
             "SELECT DISTINCT sr.provider_card_id,sr.printing_id,sr.name,sr.printed_name,"
             "p.oracle_id,p.layout,e.name AS edition_name,e.code AS set_code,p.collector_number,"
             "s.face_index,a.relative_path,a.mime_type,a.width,a.height "
-            "FROM source_records sr JOIN printings p USING(printing_id) "
+            "FROM candidates CROSS JOIN source_records sr USING(provider_card_id) "
+            "CROSS JOIN printings p USING(printing_id) "
             "JOIN editions e USING(set_id) "
             "JOIN image_slots s ON s.printing_id=p.printing_id AND s.face_index=? "
             "JOIN image_assets a USING(asset_id) "
-            "WHERE sr.lang='fr' AND p.printing_id<>? AND p.layout=? "
-            "AND (" + " OR ".join(clauses) + ") "
+            "WHERE p.printing_id<>? AND p.layout=? "
             "AND s.status='ready' AND a.language='fr' "
             "AND EXISTS (SELECT 1 FROM card_faces cf WHERE cf.printing_id=p.printing_id "
             "AND cf.face_index=? AND cf.physical_image=1) "
@@ -794,8 +819,8 @@ def _same_name_french_image_references(db: Path, provider_card_id: str,
             "AND cf.physical_image=1)=? "
             "ORDER BY e.name,p.collector_number,p.printing_id LIMIT 48")
         return [dict(row) for row in conn.execute(
-            query, (face_index, target["printing_id"], target["layout"],
-                    *parameters, face_index, face_count))]
+            query, (*parameters, face_index, target["printing_id"], target["layout"],
+                    face_index, face_count))]
 
 
 def _same_name_text_reference(db: Path, visual_provider_id: str,
@@ -1316,7 +1341,7 @@ def _run_list_task(task_id: str, value: str) -> None:
                 try:
                     report = download_printing(
                         item["provider_card_id"], catalogue_root=CATALOGUE_ROOT,
-                        ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.json")
+                        ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.sqlite")
                     item["download"] = report
                     item["status"] = "ready" if report.get("results") and all(
                         face.get("status") in {"ready", "already_ready"} for face in report["results"]) else "failed"
@@ -1366,7 +1391,7 @@ def _run_deck_task(task_id: str, deck_id: str, cancel: threading.Event) -> None:
                 try:
                     report = download_printing(
                         provider_id, catalogue_root=CATALOGUE_ROOT,
-                        ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.json",
+                        ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.sqlite",
                         cancel_event=cancel,
                     )
                     statuses = [result.get("status") for result in report.get("results", [])]
@@ -1493,6 +1518,11 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
         with _BATCH_LOCK:
             _BATCH_TASK.update(total=len(selected), unavailable=unavailable,
                                processing_started_at=time.time())
+        worker = threading.local()
+
+        def open_session(sessions: ExitStack) -> None:
+            worker.session = sessions.enter_context(requests.Session())
+
         def download_one(provider_id: str, missing_faces: list[int]) -> tuple[bool, str, bool]:
             if _BATCH_CANCEL.is_set():
                 return False, "annulé", False
@@ -1500,8 +1530,9 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
                 raise RuntimeError("La version du catalogue a changé pendant le téléchargement")
             try:
                 report = download_printing(provider_id, catalogue_root=CATALOGUE_ROOT,
-                    ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.json",
-                    face_indexes=missing_faces, cancel_event=_BATCH_CANCEL, parallel_fetch=True)
+                    ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.sqlite",
+                    face_indexes=missing_faces, cancel_event=_BATCH_CANCEL, parallel_fetch=True,
+                    session=worker.session)
                 results = report.get("results", [])
                 success = bool(results) and all(item["status"] in {"ready", "already_ready"} for item in results)
                 reasons = [item.get("reason") or item["status"] for item in results]
@@ -1513,7 +1544,9 @@ def _run_batch_task(task_id: str, mode: str, filters: dict, catalog_db: Path) ->
         remaining = iter(selected)
         consecutive_temporary_errors = 0
         stopped_for_network = False
-        with ThreadPoolExecutor(max_workers=BATCH_IMAGE_WORKERS, thread_name_prefix="magic-image-batch") as executor:
+        with (ExitStack() as sessions,
+              ThreadPoolExecutor(max_workers=BATCH_IMAGE_WORKERS, thread_name_prefix="magic-image-batch",
+                                 initializer=open_session, initargs=(sessions,)) as executor):
             pending = {}
             def enqueue() -> None:
                 if _BATCH_CANCEL.is_set():
@@ -1865,7 +1898,7 @@ def _prepare_image_preview(provider_id: str, face_index: int, catalog_db: Path, 
         return {"status": "cancelled"}
     report = preview_printing_candidate(
         provider_id, catalogue_root=CATALOGUE_ROOT,
-        ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.json",
+        ledger_path=OPS_ROOT / "state" / "v2-image-download-ledger.sqlite",
         face_index=face_index, cancel_event=cancel_event)
     if report["status"] != "candidate":
         candidates = []
@@ -2626,7 +2659,7 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 if action == "create":
                     deck = personal_decks.create_deck(
                         PERSONAL_DECK_DB, payload.get("name"), payload.get("colors", []),
-                        payload.get("commander", "format" not in payload), deck_format=payload.get("format"))
+                        payload.get("commander", False), deck_format=payload.get("format"))
                 elif action == "save":
                     deck = personal_decks.save_deck(PERSONAL_DECK_DB, payload.get("deck"))
                 elif action == "duplicate":
@@ -3259,15 +3292,22 @@ class LibraryHandler(BaseHTTPRequestHandler):
                 return
             cancel = threading.Event()
             with _MAINTENANCE_LOCK:
-                if _maintenance_is_active() or _batch_is_active():
+                if _maintenance_is_active():
                     self._json({"error": "maintenance_in_progress"}, 409)
+                    return
+                if _batch_is_active():
+                    if route == "/api/v2/download":
+                        self._json({"error": "download_busy",
+                                    "detail": "Un téléchargement groupé est en cours."}, 409)
+                    else:
+                        self._json({"error": "maintenance_in_progress"}, 409)
                     return
                 with _ACTIVE_DOWNLOADS_LOCK:
                     _ACTIVE_DOWNLOADS[task_id] = cancel
             try:
                 kwargs = {
                     "catalogue_root": CATALOGUE_ROOT,
-                    "ledger_path": OPS_ROOT / "state" / "v2-image-download-ledger.json",
+                    "ledger_path": OPS_ROOT / "state" / "v2-image-download-ledger.sqlite",
                     "face_indexes": [payload["face_index"]] if "face_index" in payload else None,
                     "cancel_event": cancel,
                 }

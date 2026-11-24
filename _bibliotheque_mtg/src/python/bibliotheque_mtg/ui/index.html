@@ -72,6 +72,19 @@
         <div id="home-recent-decks" class="home-recent-decks" aria-busy="true"></div>
         <p id="home-activity-error" class="muted error-state" role="status" hidden></p>
       </section>
+      <section class="maintenance-panel" aria-labelledby="maintenance-title">
+        <div>
+          <h2 id="maintenance-title">Mettre à jour la bibliothèque</h2>
+          <p class="muted">Recherche les nouvelles éditions, les nouvelles cartes et les nouveaux decks préconstruits. Aucune image n’est téléchargée ; la mise à jour peut prendre plusieurs minutes.</p>
+        </div>
+        <div class="version-history">
+          <button id="update-library" class="primary-button" type="button"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg><span id="update-library-label">Lancer la mise à jour</span></button>
+          <button id="version-history-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="version-history-list"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-history"></use></svg>Historique des versions</button>
+          <div id="version-history-list" class="version-history-list" hidden></div>
+        </div>
+        <p id="update-status" class="muted maintenance-status" aria-live="polite"></p>
+        <div id="update-steps" class="maintenance-steps" aria-live="polite" hidden></div>
+      </section>
       <section class="maintenance-panel" aria-labelledby="card-prices-title">
         <div>
           <h2 id="card-prices-title">Afficher le prix des cartes</h2>
@@ -103,19 +116,6 @@
           <img src="/localized-banner-example.webp" alt="Carte Abandon Hope avec le bandeau noir Localized Image Not Available et le logo FR" width="350" height="486" loading="lazy">
           <figcaption>Exemple de bandeau</figcaption>
         </figure>
-      </section>
-      <section class="maintenance-panel" aria-labelledby="maintenance-title">
-        <div>
-          <h2 id="maintenance-title">Mettre à jour la bibliothèque</h2>
-          <p class="muted">Recherche les nouvelles éditions, les nouvelles cartes et les nouveaux decks préconstruits. Aucune image n’est téléchargée ; la mise à jour peut prendre plusieurs minutes.</p>
-        </div>
-        <div class="version-history">
-          <button id="update-library" class="primary-button" type="button"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-refresh"></use></svg><span id="update-library-label">Lancer la mise à jour</span></button>
-          <button id="version-history-toggle" class="secondary-button" type="button" aria-expanded="false" aria-controls="version-history-list"><svg class="search-icon" aria-hidden="true" focusable="false"><use href="#search-icon-history"></use></svg>Historique des versions</button>
-          <div id="version-history-list" class="version-history-list" hidden></div>
-        </div>
-        <p id="update-status" class="muted maintenance-status" aria-live="polite"></p>
-        <div id="update-steps" class="maintenance-steps" aria-live="polite" hidden></div>
       </section>
       <section class="maintenance-panel list-import-panel" aria-labelledby="list-import-title">
         <div><h2 id="list-import-title">Récupérer une liste de cartes</h2>

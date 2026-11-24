@@ -184,14 +184,17 @@ def test_phyrexian_only_printing_downloads_its_exact_image(tmp_path, image_serve
         assert conn.execute("SELECT name,printed_name FROM source_records WHERE lang='ph'").fetchone() == ('Vorinclex, Voice of Hunger', None)
 
 
-def test_download_prefers_hd_french_then_publishes_one_face_only(tmp_path, image_server):
+@pytest.mark.parametrize("parallel_fetch", [False, True])
+def test_download_prefers_hd_french_then_publishes_one_face_only(tmp_path, image_server, parallel_fetch):
     ops, version, db, manifest = make_catalogue(tmp_path, image_server, fr_path="/corrupt", en_path="/image", face_count=2)
     before_index = hashlib.sha256((version / "editions" / "index.json").read_bytes()).hexdigest()
     before_other = json.loads(manifest.read_text(encoding="utf-8"))
-    report = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.json",
-                               test_hosts={"127.0.0.1"}, face_indexes=[0])
+    before_counts = ImageFixtureHandler.counts.copy()
+    report = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.sqlite",
+                               test_hosts={"127.0.0.1"}, face_indexes=[0], parallel_fetch=parallel_fetch)
     assert report["results"] == [{"face_index": 0, "status": "ready", "language": "en", "relative_path": report["results"][0]["relative_path"], "width": 531, "height": 738, "source_width": 600, "source_height": 800}]
-    assert ImageFixtureHandler.counts["/corrupt"] == 1 and ImageFixtureHandler.counts["/image"] == 1
+    for path in ("/corrupt", "/image"):
+        assert ImageFixtureHandler.counts[path] - before_counts.get(path, 0) == 1
     after = json.loads(manifest.read_text(encoding="utf-8"))
     assert after["slots"][0]["status"] == "ready" and after["slots"][0]["selected_language"] == "en"
     assert after["slots"][1] == before_other["slots"][1]
@@ -221,21 +224,21 @@ def test_download_prefers_hd_french_then_publishes_one_face_only(tmp_path, image
     conn.commit(); conn.close()
     doc = json.loads(manifest.read_text(encoding="utf-8")); doc["slots"][0]["path"] = legacy_relative
     manifest.write_text(json.dumps(doc), encoding="utf-8")
-    second = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.json",
+    second = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.sqlite",
                                test_hosts={"127.0.0.1"}, face_indexes=[0])
     assert second["results"][0]["status"] == "normalized_existing"
     assert (second["results"][0]["width"], second["results"][0]["height"]) == (531, 738)
-    assert ImageFixtureHandler.counts["/image"] == 1
+    assert ImageFixtureHandler.counts["/image"] - before_counts.get("/image", 0) == 1
     asset = version / second["results"][0]["relative_path"]
     with Image.open(asset) as image: assert image.size == (531, 738)
-    third = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.json",
+    third = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.sqlite",
                               test_hosts={"127.0.0.1"}, face_indexes=[0])
     assert third["results"][0]["status"] == "already_ready"
     asset.write_bytes(b"corrupt")
-    check = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.json",
+    check = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.sqlite",
                               test_hosts={"127.0.0.1"}, face_indexes=[0])
     assert check["results"][0]["status"] == "corrupt_requires_repair"
-    fixed = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.json",
+    fixed = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.sqlite",
                               test_hosts={"127.0.0.1"}, face_indexes=[0], repair=True)
     assert fixed["results"][0]["status"] == "ready"
     asset = version / fixed["results"][0]["relative_path"]
@@ -448,17 +451,91 @@ def test_preview_candidate_does_not_publish_until_explicit_commit(tmp_path, imag
     assert json.loads(manifest.read_text(encoding="utf-8"))["slots"][0]["path"] == published["relative_path"]
 
 
+def test_preview_overlaps_metadata_and_keeps_source_order(tmp_path, image_server, monkeypatch):
+    ops, _, db, _ = make_catalogue(tmp_path, image_server, fr_path="/high", en_path="/image")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE source_records SET raw_json=json_set(raw_json, '$.image_uris.large', ?) WHERE lang='fr'",
+            (image_server + "/medium",))
+
+    metadata = threading.Barrier(2)
+    original_source_started = threading.Event()
+
+    def live_fr(*args, **kwargs):
+        metadata.wait(timeout=3)
+        assert original_source_started.wait(3)
+        return None, "not_found", None
+
+    def gallery(*args, **kwargs):
+        metadata.wait(timeout=3)
+        return []
+
+    fetch = image_download._fetch
+    image_requests = threading.Barrier(3)
+
+    def fetch_with_overlap(url, session, test_hosts, **kwargs):
+        if url.endswith("/image"):
+            original_source_started.set()
+        image_requests.wait(timeout=3)
+        return fetch(url, session, {"127.0.0.1"}, **kwargs)
+
+    monkeypatch.setattr(image_download, "_fetch_live_fr", live_fr)
+    monkeypatch.setattr(image_download, "_official_gallery_images", gallery)
+    monkeypatch.setattr(image_download, "_fetch", fetch_with_overlap)
+    monkeypatch.setattr(image_download, "_allowed_url", lambda url, *args: url.startswith(image_server + "/"))
+
+    preview = preview_printing_candidate(
+        "provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.sqlite", face_index=0)
+    assert [(item["language"], item["source_width"]) for item in preview["candidates"]] == [
+        ("fr", 900), ("fr", 420), ("en", 600)]
+    assert [item["source_record_id"] for item in preview["candidates"]] == [
+        "provider-fr", "provider-fr", "provider-en"]
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_preview_refusal_stops_host_but_preserves_independent_sources(tmp_path, monkeypatch, status):
+    same_host = "http://127.0.0.1:80"
+    other_host = "http://localhost:80"
+    ops, _, db, _ = make_catalogue(tmp_path, same_host, fr_path=f"/{status}", en_path="/high")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE source_records SET raw_json=json_set(raw_json, '$.image_uris.large', ?) "
+                     "WHERE lang='en'", (other_host + "/image",))
+    refused = threading.Event()
+    data = io.BytesIO()
+    patterned_image((600, 800)).save(data, "PNG")
+
+    def fetch(url, session, test_hosts, *, preview_stop, **kwargs):
+        if url == f"{same_host}/{status}":
+            preview_stop.set()
+            refused.set()
+            return None, "acces_refuse_403" if status == 403 else "limite_debit_429", 1
+        assert refused.wait(3)
+        if url == same_host + "/high":
+            assert preview_stop.is_set()
+            return None, "preview_start_skipped", None
+        assert not preview_stop.is_set()
+        return data.getvalue(), None, None
+
+    monkeypatch.setattr(image_download, "_fetch", fetch)
+    preview = preview_printing_candidate(
+        "provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.sqlite",
+        face_index=0, test_hosts={"127.0.0.1", "localhost"})
+    assert [item["source_url"] for item in preview["candidates"]] == [other_host + "/image"]
+
+
 def test_preview_excludes_current_source_and_keeps_other_language(tmp_path, image_server):
     ops, _, _, _ = make_catalogue(tmp_path, image_server, fr_path="/high", en_path="/image")
     first = download_printing("provider-fr", catalogue_root=ops, ledger_path=ops / "ledger.json",
                               test_hosts={"127.0.0.1"})
     assert first["results"][0]["status"] == "ready"
+    prior_gets = ImageFixtureHandler.counts["/high"]
     preview = preview_printing_candidate("provider-fr", catalogue_root=ops,
                                          ledger_path=ops / "ledger.json", face_index=0,
                                          test_hosts={"127.0.0.1"})
     assert preview["status"] == "candidate"
     assert all(item["source_url"] != first["results"][0].get("source_url") for item in preview["candidates"])
     assert {item["language"] for item in preview["candidates"]} == {"en"}
+    assert ImageFixtureHandler.counts["/high"] == prior_gets
 
 
 def test_official_gallery_matches_exact_french_name(tmp_path, monkeypatch):
@@ -699,6 +776,51 @@ def test_interrupted_attempt_resumes_and_double_click_deduplicates(tmp_path, ima
         reports = list(pool.map(lambda _: go(), range(2)))
     assert sorted(r["results"][0]["status"] for r in reports) == ["already_ready", "ready"]
     assert ImageFixtureHandler.counts.get("/image", 0) - before == 1
+
+
+def test_sqlite_download_ledger_imports_json_once_and_preserves_entries(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    legacy = path.with_suffix(".json")
+    entry = {"gets": 2, "errors": ["http_404"]}
+    legacy.write_text(json.dumps({"schema_version": 1, "faces": {"old": entry}}), encoding="utf-8")
+    with image_download._open_ledger(path) as (get_entry, save_entry):
+        assert get_entry("old") == entry
+        save_entry("old", {**entry, "gets": 3})
+        with image_download._open_ledger(path) as (_, save_other):
+            save_other("new", {"gets": 1})
+    assert json.loads(legacy.read_text(encoding="utf-8"))["faces"]["old"] == entry
+    with image_download._open_ledger(path) as (get_entry, _):
+        assert get_entry("old")["gets"] == 3
+        assert get_entry("new")["gets"] == 1
+
+
+def test_batch_runs_eight_cards_and_reuses_worker_sessions(tmp_path, monkeypatch):
+    from bibliotheque_mtg import local_app as app
+
+    db = tmp_path / "catalogue.sqlite"
+    monkeypatch.setattr(app, "resolve_current", lambda _: {"database": db})
+    monkeypatch.setattr(app, "_batch_printings", lambda *args: (
+        [(str(index), str(index), [0]) for index in range(9)], 0))
+    monkeypatch.setattr(app, "_BATCH_CANCEL", threading.Event())
+    task = {"completed": 0, "ready": 0, "failed": 0, "errors": []}
+    monkeypatch.setattr(app, "_BATCH_TASK", task)
+    started = threading.Barrier(8)
+    sessions = set()
+
+    def download(provider_id, *, session, parallel_fetch, **_):
+        assert parallel_fetch
+        if int(provider_id) < 8:
+            sessions.add(session)
+            started.wait(5)
+        else:
+            assert session in sessions
+        return {"results": [{"status": "ready"}]}
+
+    monkeypatch.setattr(app, "download_printing", download)
+    app._run_batch_task("test", "search", {}, db)
+    assert len(sessions) == 8
+    assert task["status"] == "complete"
+    assert task["ready"] == 9
 
 
 def test_manual_import_wins_over_batch_fetch_in_progress(tmp_path, image_server, monkeypatch):
@@ -1030,6 +1152,15 @@ def test_banner_results_survive_requests_and_cancelled_rescan(tmp_path, monkeypa
     app._start_banner_task(app._BANNER_ANALYZE, {})
     assert app._banner_session_state("v1") == {"analysis": analysis, "replacement": replacement}
 
+    stop.clear()
+    rescanned = app._start_banner_task(app._BANNER_ANALYZE, {})
+    assert rescanned["analysis_id"] == analysis["analysis_id"]
+    assert app._banner_session_state("v1") == {
+        "analysis": rescanned,
+        "replacement": {"replacement_id": analysis["analysis_id"], "replaced_total": 1},
+    }
+    assert app._banner_result_page({"replacement_id": analysis["analysis_id"]})["items"][0] == pair
+
 
 def make_banner_catalogue(tmp_path, faces):
     ops, version, db, _ = make_catalogue(tmp_path, "https://cards.scryfall.io", face_count=faces)
@@ -1048,7 +1179,9 @@ def make_banner_catalogue(tmp_path, faces):
 def test_banner_analysis_reuses_saved_verdicts_and_checks_changed_files(tmp_path, monkeypatch):
     from bibliotheque_mtg import localized_banners as banners
 
-    ops, version, current = make_banner_catalogue(tmp_path, 2)
+    ops, version, current = make_banner_catalogue(tmp_path, 5)
+    with sqlite3.connect(current["database"]) as conn:
+        conn.execute("UPDATE image_slots SET status='missing', asset_id=NULL WHERE face_index >= 2")
     examined = []
 
     def detect(image):
@@ -1058,63 +1191,95 @@ def test_banner_analysis_reuses_saved_verdicts_and_checks_changed_files(tmp_path
     monkeypatch.setattr(banners, "has_localized_banner", detect)
     cache = ops / "state" / "localized-banners.sqlite"
 
-    def scan():
-        return banners.analyze_localized_banners(current, threading.Event(), lambda **_: None, cache)[0]
+    progress = []
 
-    assert scan() == {"scanned": 2, "detected": 2, "replaceable": 2, "unreadable": 0}
+    def scan():
+        progress.clear()
+        return banners.analyze_localized_banners(
+            current, threading.Event(), lambda **event: progress.append(event), cache)[0]
+
+    assert scan() == {"scanned": 2, "analyzed": 2, "detected": 2, "replaceable": 2, "unreadable": 0}
     assert examined == [12, 12]
-    assert scan()["detected"] == 2
+    assert scan() == {"scanned": 2, "analyzed": 0, "detected": 2, "replaceable": 2, "unreadable": 0}
+    assert progress[-1] == {"processed": 0, "total": 0}
     assert examined == [12, 12]
 
     first = version / "assets" / "0.webp"
     first.write_bytes(b"invalid image")
-    assert scan() == {"scanned": 2, "detected": 1, "replaceable": 1, "unreadable": 1}
+    assert scan() == {"scanned": 2, "analyzed": 1, "detected": 1, "replaceable": 1, "unreadable": 1}
     Image.new("RGB", (13, 16)).save(first)
-    assert scan() == {"scanned": 2, "detected": 1, "replaceable": 1, "unreadable": 0}
+    assert scan() == {"scanned": 2, "analyzed": 1, "detected": 1, "replaceable": 1, "unreadable": 0}
+    assert progress[-1] == {"processed": 1, "total": 1}
     assert scan()["detected"] == 1
     assert examined == [12, 12, 13]
+
+    with sqlite3.connect(current["database"]) as conn:
+        conn.execute("UPDATE image_slots SET status='ready', asset_id='old-' || face_index WHERE face_index >= 2")
+    assert scan()["analyzed"] == 3
+    assert progress[-1] == {"processed": 3, "total": 3}
+    assert scan()["analyzed"] == 0
 
 
 def test_banner_replacement_fetches_in_parallel_and_records_exact_faces(tmp_path, monkeypatch):
     from bibliotheque_mtg import localized_banners as banners
 
-    workers = image_download.BATCH_IMAGE_WORKERS
-    ops, _, current = make_banner_catalogue(tmp_path, workers)
+    workers = 8
+    total = workers + 1
+    ops, _, current = make_banner_catalogue(tmp_path, total)
     monkeypatch.setattr(banners, "has_localized_banner", lambda image: image.width == 12)
     file = io.BytesIO()
     patterned_image((420, 650)).save(file, "PNG")
     started = threading.Barrier(workers)
+    sessions = set()
+    lock = threading.Lock()
+    publishing = threading.Event()
+    refilled = threading.Event()
 
-    def fetch(_url, _session, *, cancel_event, batch_rate_limit):
+    def fetch(_url, session, *, cancel_event, batch_rate_limit, batch_min_interval):
         assert batch_rate_limit and not cancel_event.is_set()
-        started.wait(5)
+        assert batch_min_interval == .125
+        with lock:
+            first_request = session not in sessions
+            sessions.add(session)
+        if first_request:
+            started.wait(5)
+        else:
+            assert publishing.wait(5)
+            refilled.set()
         return file.getvalue(), None, None
 
     monkeypatch.setattr(banners, "_fetch", fetch)
     _, matches = banners.analyze_localized_banners(
         current, threading.Event(), lambda **_: None, ops / "state" / "localized-banners.sqlite")
-    assert len(matches) == workers
+    assert len(matches) == total
     pairs = []
+
+    def on_replaced(pair):
+        publishing.set()
+        assert refilled.wait(5)
+        pairs.append(pair)
+
     report = banners.replace_localized_banners(
-        current, matches, ops, threading.Event(), lambda **_: None, on_replaced=pairs.append)
-    assert report == {"replaced": workers, "failed": 0, "skipped": 0, "total": workers}
-    assert sorted(pair["face_index"] for pair in pairs) == list(range(workers))
+        current, matches, ops, threading.Event(), lambda **_: None, on_replaced=on_replaced)
+    assert report == {"replaced": total, "failed": 0, "skipped": 0, "total": total}
+    assert len(sessions) == workers
+    assert sorted(pair["face_index"] for pair in pairs) == list(range(total))
     with sqlite3.connect(current["database"]) as conn:
-        assert conn.execute("SELECT selected_language FROM image_slots").fetchall() == [("en",)] * workers
+        assert conn.execute("SELECT selected_language FROM image_slots").fetchall() == [("en",)] * total
     assert banners.replace_localized_banners(
-        current, matches, ops, threading.Event(), lambda **_: None)["skipped"] == workers
+        current, matches, ops, threading.Event(), lambda **_: None)["skipped"] == total
 
 
 def test_banner_replacement_stops_queue_on_rate_limit(tmp_path, monkeypatch):
     from bibliotheque_mtg import localized_banners as banners
 
-    workers = image_download.BATCH_IMAGE_WORKERS
+    workers = 8
     ops, _, current = make_banner_catalogue(tmp_path, workers + 1)
     monkeypatch.setattr(banners, "has_localized_banner", lambda image: True)
     started = threading.Barrier(workers)
     attempts = []
 
-    def fetch(_url, _session, *, cancel_event, batch_rate_limit):
+    def fetch(_url, _session, *, cancel_event, batch_rate_limit, batch_min_interval):
         attempts.append(True)
         if started.wait(5) == 0:
             return None, "limite_debit_429", 60

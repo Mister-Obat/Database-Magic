@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, closing, contextmanager
 from functools import lru_cache
 import hashlib
 import json
@@ -13,6 +15,7 @@ import uuid
 import unicodedata
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urljoin
+from weakref import WeakValueDictionary
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -25,6 +28,8 @@ from .v2.query import connect
 
 
 _LOCK = threading.Lock()
+_GALLERY_LOCKS_GUARD = threading.Lock()
+_GALLERY_LOCKS = WeakValueDictionary()
 _WAL_INIT_LOCK = threading.Lock()
 _WAL_READY: set[Path] = set()
 _SCRYFALL_API_LOCK = threading.Lock()
@@ -33,8 +38,11 @@ _SCRYFALL_API_MIN_INTERVAL = 0.6
 _BATCH_IMAGE_RATE_LOCK = threading.Lock()
 _BATCH_IMAGE_NEXT_REQUEST = 0.0
 _BATCH_IMAGE_BLOCKED_UNTIL = 0.0
-_BATCH_IMAGE_MIN_INTERVAL = 0.25
-BATCH_IMAGE_WORKERS = 4
+_BATCH_IMAGE_MIN_INTERVAL = 0.125
+BATCH_IMAGE_WORKERS = 8
+_PREVIEW_IMAGE_WORKERS = 8
+_PREVIEW_IMAGE_MIN_INTERVAL = 0.05
+_PREVIEW_GETS_PER_LANGUAGE = 8
 _MAX_BYTES = 20 * 1024 * 1024
 _MAX_API_BYTES = 2 * 1024 * 1024
 _MAX_GETS = 3
@@ -48,8 +56,18 @@ _SIZES = {"png": 0, "large": 1, "jpeg": 2, "normal": 3, "art_crop": 4, "crop": 5
 _GALLERY_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
 _PRODUCT_GALLERY_CACHE: dict[str, tuple[float, str, list[str]]] = {}
 _CONTENTFUL_CLIENT_CACHE: tuple[float, str, str] | None = None
+_CONTENTFUL_DIRECT_RETRY_AT = 0.0
 _CONTENTFUL_ENTRY_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _CONTENTFUL_DIRECT_CACHE: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
+
+
+def _gallery_lock(key):
+    with _GALLERY_LOCKS_GUARD:
+        lock = _GALLERY_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _GALLERY_LOCKS[key] = lock
+        return lock
 
 
 def _gallery_key(value: str) -> str:
@@ -110,47 +128,50 @@ def _gallery_metadata(session, url: str, *, headers: dict, params: dict | None =
 
 def _contentful_client(session, scripts: list[str]) -> tuple[str, str] | None:
     global _CONTENTFUL_CLIENT_CACHE
-    cached = _CONTENTFUL_CLIENT_CACHE
-    if cached and time.monotonic() - cached[0] < 3600:
-        return cached[1], cached[2]
-    for script in reversed(scripts[-4:]):
-        parsed = urlsplit(script)
-        if parsed.scheme != "https" or parsed.hostname != "magic.wizards.com" or not parsed.path.startswith("/_nuxt/"):
-            continue
-        body = _gallery_metadata(session, script, headers={"Accept": "application/javascript"})
-        if not body:
-            continue
-        match = re.search(rb'space:"([A-Za-z0-9]+)",host:"cdn\.contentful\.com",accessToken:"([A-Za-z0-9_-]+)"', body)
-        if match:
-            space, token = match.group(1).decode("ascii"), match.group(2).decode("ascii")
-            _CONTENTFUL_CLIENT_CACHE = (time.monotonic(), space, token)
-            return space, token
-    return None
+    with _gallery_lock(("client", tuple(scripts))):
+        cached = _CONTENTFUL_CLIENT_CACHE
+        if cached and time.monotonic() - cached[0] < 3600:
+            return cached[1], cached[2]
+        for script in reversed(scripts[-4:]):
+            parsed = urlsplit(script)
+            if parsed.scheme != "https" or parsed.hostname != "magic.wizards.com" or not parsed.path.startswith("/_nuxt/"):
+                continue
+            body = _gallery_metadata(session, script, headers={"Accept": "application/javascript"})
+            if not body:
+                continue
+            match = re.search(rb'space:"([A-Za-z0-9]+)",host:"cdn\.contentful\.com",accessToken:"([A-Za-z0-9_-]+)"', body)
+            if match:
+                space, token = match.group(1).decode("ascii"), match.group(2).decode("ascii")
+                _CONTENTFUL_CLIENT_CACHE = (time.monotonic(), space, token)
+                return space, token
+        return None
 
 
 def _contentful_entry(session, space: str, token: str, entry_id: str) -> dict | None:
     if not re.fullmatch(r"[A-Za-z0-9]{1,64}", entry_id):
         return None
     key = (space, entry_id)
-    cached = _CONTENTFUL_ENTRY_CACHE.get(key)
-    if cached and time.monotonic() - cached[0] < 3600:
-        return cached[1]
-    url = f"https://cdn.contentful.com/spaces/{space}/environments/master/entries/{entry_id}"
-    body = _gallery_metadata(session, url,
-                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                             params={"locale": "fr"})
-    if not body:
-        return None
-    try:
-        value = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(value, dict):
-        return None
-    if len(_CONTENTFUL_ENTRY_CACHE) >= 1024:
-        _CONTENTFUL_ENTRY_CACHE.pop(next(iter(_CONTENTFUL_ENTRY_CACHE)))
-    _CONTENTFUL_ENTRY_CACHE[key] = (time.monotonic(), value)
-    return value
+    with _gallery_lock(("entry", key)):
+        cached = _CONTENTFUL_ENTRY_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < 3600:
+            return cached[1]
+        url = f"https://cdn.contentful.com/spaces/{space}/environments/master/entries/{entry_id}"
+        body = _gallery_metadata(session, url,
+                                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                                 params={"locale": "fr"})
+        if not body:
+            return None
+        try:
+            value = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        with _GALLERY_LOCKS_GUARD:
+            if len(_CONTENTFUL_ENTRY_CACHE) >= 1024:
+                _CONTENTFUL_ENTRY_CACHE.pop(next(iter(_CONTENTFUL_ENTRY_CACHE), None), None)
+            _CONTENTFUL_ENTRY_CACHE[key] = (time.monotonic(), value)
+        return value
 
 
 def _product_gallery_images(page_url: str, english_name: str, french_name: str,
@@ -193,6 +214,44 @@ def _product_gallery_images(page_url: str, english_name: str, french_name: str,
     return results
 
 
+def _contentful_direct_client(session):
+    global _CONTENTFUL_DIRECT_RETRY_AT
+    with _gallery_lock(("direct-client",)):
+        cached = _CONTENTFUL_CLIENT_CACHE
+        now = time.monotonic()
+        if cached and now - cached[0] < 3600:
+            return cached[1], cached[2]
+        if now < _CONTENTFUL_DIRECT_RETRY_AT:
+            return None
+        bootstrap = "https://magic.wizards.com/fr/products/modern-horizons-3/card-image-gallery"
+        scripts = []
+        used_cached_page = False
+        if _CONTENTFUL_CLIENT_CACHE is None or time.monotonic() - _CONTENTFUL_CLIENT_CACHE[0] >= 3600:
+            sample = _WIZARDS_INDEX_PATH.parent / "gallery" / "articles" / "modern_horizons_3.html"
+            try:
+                page_html = sample.read_bytes() if sample.is_file() and sample.stat().st_size <= 1024 * 1024 else None
+            except OSError:
+                page_html = None
+            used_cached_page = page_html is not None
+            if page_html is None:
+                page_html = _gallery_metadata(session, bootstrap, headers={"Accept": "text/html"})
+            if page_html:
+                soup = BeautifulSoup(page_html, "html.parser")
+                scripts = [urljoin(bootstrap, script.get("src", "")) for script in soup.select("script[src]")
+                           if script.get("src", "").startswith("/_nuxt/")]
+        client = _contentful_client(session, scripts)
+        if not client and used_cached_page:
+            live_page = _gallery_metadata(session, bootstrap, headers={"Accept": "text/html"})
+            if live_page:
+                soup = BeautifulSoup(live_page, "html.parser")
+                scripts = [urljoin(bootstrap, script.get("src", "")) for script in soup.select("script[src]")
+                           if script.get("src", "").startswith("/_nuxt/")]
+                client = _contentful_client(session, scripts)
+        if not client and not getattr(session, "cancelled", False):
+            _CONTENTFUL_DIRECT_RETRY_AT = time.monotonic() + 30
+        return client
+
+
 def _contentful_direct_images(set_code: str, english_name: str, french_name: str,
                               collector_number: str, session) -> list[dict]:
     """Query Wizards' public card catalogue for one exact set/name/number."""
@@ -200,76 +259,55 @@ def _contentful_direct_images(set_code: str, english_name: str, french_name: str
     if not re.fullmatch(r"[a-z0-9-]{1,120}", identifier) or not set_code or not collector_number:
         return []
     key = (set_code.casefold(), identifier, str(collector_number))
-    cached = _CONTENTFUL_DIRECT_CACHE.get(key)
-    if cached and time.monotonic() - cached[0] < 3600:
-        return cached[1]
-    bootstrap = "https://magic.wizards.com/fr/products/modern-horizons-3/card-image-gallery"
-    scripts = []
-    used_cached_page = False
-    if _CONTENTFUL_CLIENT_CACHE is None or time.monotonic() - _CONTENTFUL_CLIENT_CACHE[0] >= 3600:
-        sample = _WIZARDS_INDEX_PATH.parent / "gallery" / "articles" / "modern_horizons_3.html"
+    with _gallery_lock(("direct-card", key)):
+        cached = _CONTENTFUL_DIRECT_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < 3600:
+            return cached[1]
+        client = _contentful_direct_client(session)
+        if not client:
+            return []
+        space, token = client
+        url = f"https://cdn.contentful.com/spaces/{space}/environments/master/entries"
+        params = {"content_type": "magicCard",
+                  "fields.foundInSet.sys.contentType.sys.id": "productSet",
+                  "fields.foundInSet.fields.abbreviation": set_code.casefold(),
+                  "fields.identifier": identifier,
+                  "fields.collectorNumber": str(collector_number),
+                  "locale": "fr", "limit": 5, "include": 0}
+        body = _gallery_metadata(session, url,
+                                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                                 params=params, max_bytes=256 * 1024)
+        if not body:
+            return []
         try:
-            page_html = sample.read_bytes() if sample.is_file() and sample.stat().st_size <= 1024 * 1024 else None
-        except OSError:
-            page_html = None
-        used_cached_page = page_html is not None
-        if page_html is None:
-            page_html = _gallery_metadata(session, bootstrap, headers={"Accept": "text/html"})
-        if page_html:
-            soup = BeautifulSoup(page_html, "html.parser")
-            scripts = [urljoin(bootstrap, script.get("src", "")) for script in soup.select("script[src]")
-                       if script.get("src", "").startswith("/_nuxt/")]
-    client = _contentful_client(session, scripts)
-    if not client and used_cached_page:
-        live_page = _gallery_metadata(session, bootstrap, headers={"Accept": "text/html"})
-        if live_page:
-            soup = BeautifulSoup(live_page, "html.parser")
-            scripts = [urljoin(bootstrap, script.get("src", "")) for script in soup.select("script[src]")
-                       if script.get("src", "").startswith("/_nuxt/")]
-            client = _contentful_client(session, scripts)
-    if not client:
-        return []
-    space, token = client
-    url = f"https://cdn.contentful.com/spaces/{space}/environments/master/entries"
-    params = {"content_type": "magicCard",
-              "fields.foundInSet.sys.contentType.sys.id": "productSet",
-              "fields.foundInSet.fields.abbreviation": set_code.casefold(),
-              "fields.identifier": identifier,
-              "fields.collectorNumber": str(collector_number),
-              "locale": "fr", "limit": 5, "include": 0}
-    body = _gallery_metadata(session, url,
-                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                             params=params, max_bytes=256 * 1024)
-    if not body:
-        return []
-    try:
-        payload = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return []
-    results = []
-    for card in payload.get("items", [])[:5] if isinstance(payload, dict) else []:
-        if not isinstance(card, dict) or card.get("sys", {}).get("contentType", {}).get("sys", {}).get("id") != "magicCard":
-            continue
-        fields = card.get("fields", {})
-        if (not isinstance(fields, dict) or str(fields.get("collectorNumber") or "") != str(collector_number)
-                or _gallery_key(str(fields.get("identifier") or "")) != identifier):
-            continue
-        name = str(fields.get("name") or "")
-        if not name or (french_name and _gallery_key(name) != _gallery_key(french_name)):
-            continue
-        image_url = fields.get("face")
-        parsed = urlsplit(image_url) if isinstance(image_url, str) else None
-        if (not parsed or parsed.scheme != "https" or parsed.hostname != "media.wizards.com"
-                or not parsed.path.rsplit("/", 1)[-1].casefold().startswith("fr_")):
-            continue
-        entry_id = str(card.get("sys", {}).get("id") or "")
-        results.append({"url": image_url, "language": "fr", "source": "wizards_contentful",
-                        "allow_host": "media.wizards.com",
-                        "evidence": f"{url}/{entry_id}" if re.fullmatch(r"[A-Za-z0-9]{1,64}", entry_id) else url})
-    if len(_CONTENTFUL_DIRECT_CACHE) >= 1024:
-        _CONTENTFUL_DIRECT_CACHE.pop(next(iter(_CONTENTFUL_DIRECT_CACHE)))
-    _CONTENTFUL_DIRECT_CACHE[key] = (time.monotonic(), results)
-    return results
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return []
+        results = []
+        for card in payload.get("items", [])[:5] if isinstance(payload, dict) else []:
+            if not isinstance(card, dict) or card.get("sys", {}).get("contentType", {}).get("sys", {}).get("id") != "magicCard":
+                continue
+            fields = card.get("fields", {})
+            if (not isinstance(fields, dict) or str(fields.get("collectorNumber") or "") != str(collector_number)
+                    or _gallery_key(str(fields.get("identifier") or "")) != identifier):
+                continue
+            name = str(fields.get("name") or "")
+            if not name or (french_name and _gallery_key(name) != _gallery_key(french_name)):
+                continue
+            image_url = fields.get("face")
+            parsed = urlsplit(image_url) if isinstance(image_url, str) else None
+            if (not parsed or parsed.scheme != "https" or parsed.hostname != "media.wizards.com"
+                    or not parsed.path.rsplit("/", 1)[-1].casefold().startswith("fr_")):
+                continue
+            entry_id = str(card.get("sys", {}).get("id") or "")
+            results.append({"url": image_url, "language": "fr", "source": "wizards_contentful",
+                            "allow_host": "media.wizards.com",
+                            "evidence": f"{url}/{entry_id}" if re.fullmatch(r"[A-Za-z0-9]{1,64}", entry_id) else url})
+        with _GALLERY_LOCKS_GUARD:
+            if len(_CONTENTFUL_DIRECT_CACHE) >= 1024:
+                _CONTENTFUL_DIRECT_CACHE.pop(next(iter(_CONTENTFUL_DIRECT_CACHE), None), None)
+            _CONTENTFUL_DIRECT_CACHE[key] = (time.monotonic(), results)
+        return results
 
 
 def _official_gallery_images(set_name: str, french_name: str, session, *,
@@ -323,45 +361,47 @@ def _official_gallery_images(set_name: str, french_name: str, session, *,
     results = []
     seen = set()
     for url in urls[:3]:
-        cached = _GALLERY_CACHE.get(url)
-        if cached and time.monotonic() - cached[0] < 3600:
-            images = cached[1]
-        else:
-            try:
-                response = session.get(url, timeout=(8, 15), allow_redirects=False, stream=True,
-                                       headers={"User-Agent": "BibliothequeMagicLocal/2.0", "Accept": "text/html"})
+        with _gallery_lock(("page", url)):
+            cached = _GALLERY_CACHE.get(url)
+            if cached and time.monotonic() < cached[0]:
+                images = cached[1]
+            else:
                 try:
-                    if response.status_code == 404:
-                        _GALLERY_CACHE[url] = (time.monotonic(), {})
-                        continue
-                    if response.status_code != 200 or "text/html" not in response.headers.get("Content-Type", "").casefold():
-                        continue
-                    body = bytearray()
-                    for chunk in response.iter_content(65536):
-                        body.extend(chunk)
+                    response = session.get(url, timeout=(8, 15), allow_redirects=False, stream=True,
+                                           headers={"User-Agent": "BibliothequeMagicLocal/2.0", "Accept": "text/html"})
+                    try:
+                        if response.status_code in {301, 302, 303, 307, 308, 404, 410}:
+                            ttl = 3600 if response.status_code in {404, 410} else 60
+                            _GALLERY_CACHE[url] = (time.monotonic() + ttl, {})
+                            continue
+                        if response.status_code != 200 or "text/html" not in response.headers.get("Content-Type", "").casefold():
+                            continue
+                        body = bytearray()
+                        for chunk in response.iter_content(65536):
+                            body.extend(chunk)
+                            if len(body) > 1024 * 1024:
+                                break
                         if len(body) > 1024 * 1024:
-                            break
-                    if len(body) > 1024 * 1024:
-                        continue
-                finally:
-                    response.close()
-            except requests.RequestException:
-                continue
-            soup = BeautifulSoup(bytes(body), "html.parser")
-            if "/fr/products/" in url:
-                gallery_node = soup.select_one("[data-cig-v][data-ctf-id]")
-                entry_id = gallery_node.get("data-ctf-id", "") if gallery_node else ""
-                scripts = [urljoin(url, script.get("src", "")) for script in soup.select("script[src]")
-                           if script.get("src", "").startswith("/_nuxt/")]
-                if re.fullmatch(r"[A-Za-z0-9]{1,64}", entry_id):
-                    _PRODUCT_GALLERY_CACHE[url] = (time.monotonic(), entry_id, scripts)
-            images = {}
-            for image in soup.select("img[alt][src], img[alt][data-src]"):
-                source = urljoin(url, image.get("data-src") or image.get("src") or "")
-                source = source.replace("http://media.wizards.com/", "https://media.wizards.com/", 1)
-                if urlsplit(source).hostname == "media.wizards.com" and urlsplit(source).scheme == "https":
-                    images.setdefault(_gallery_key(image["alt"]), []).append(source)
-            _GALLERY_CACHE[url] = (time.monotonic(), images)
+                            continue
+                    finally:
+                        response.close()
+                except requests.RequestException:
+                    continue
+                soup = BeautifulSoup(bytes(body), "html.parser")
+                if "/fr/products/" in url:
+                    gallery_node = soup.select_one("[data-cig-v][data-ctf-id]")
+                    entry_id = gallery_node.get("data-ctf-id", "") if gallery_node else ""
+                    scripts = [urljoin(url, script.get("src", "")) for script in soup.select("script[src]")
+                               if script.get("src", "").startswith("/_nuxt/")]
+                    if re.fullmatch(r"[A-Za-z0-9]{1,64}", entry_id):
+                        _PRODUCT_GALLERY_CACHE[url] = (time.monotonic(), entry_id, scripts)
+                images = {}
+                for image in soup.select("img[alt][src], img[alt][data-src]"):
+                    source = urljoin(url, image.get("data-src") or image.get("src") or "")
+                    source = source.replace("http://media.wizards.com/", "https://media.wizards.com/", 1)
+                    if urlsplit(source).hostname == "media.wizards.com" and urlsplit(source).scheme == "https":
+                        images.setdefault(_gallery_key(image["alt"]), []).append(source)
+                _GALLERY_CACHE[url] = (time.monotonic() + 3600, images)
         for source in ([] if exact_only else images.get(_gallery_key(french_name), [])):
             if source in seen:
                 continue
@@ -586,6 +626,42 @@ def _save_ledger(path: Path, value: dict):
     os.replace(temp, path)
 
 
+@contextmanager
+def _open_ledger(path: Path):
+    if path.suffix == ".json":
+        def get_entry(key):
+            return _load_ledger(path)["faces"].get(key, {})
+
+        def save_entry(key, entry):
+            value = _load_ledger(path)
+            value["faces"][key] = entry
+            _save_ledger(path, value)
+
+        yield get_entry, save_entry
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path, isolation_level=None)) as conn:
+        if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+            conn.execute("BEGIN IMMEDIATE")
+            with conn:
+                if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
+                    conn.execute("CREATE TABLE faces (key TEXT PRIMARY KEY, entry TEXT NOT NULL) WITHOUT ROWID")
+                    faces = _load_ledger(path.with_suffix(".json"))["faces"]
+                    conn.executemany("INSERT INTO faces VALUES (?, ?)",
+                                     ((key, json.dumps(entry)) for key, entry in faces.items()))
+                    conn.execute("PRAGMA user_version=1")
+
+        def get_entry(key):
+            row = conn.execute("SELECT entry FROM faces WHERE key=?", (key,)).fetchone()
+            return json.loads(row[0]) if row else {}
+
+        def save_entry(key, entry):
+            conn.execute("INSERT OR REPLACE INTO faces VALUES (?, ?)", (key, json.dumps(entry)))
+
+        yield get_entry, save_entry
+
+
 def _read_webp(data: bytes):
     if not data or len(data) > _MAX_BYTES:
         raise ValueError("taille invalide")
@@ -649,26 +725,38 @@ def _set_manifest_slot(version: Path, set_id: str, printing_id: str, face_index:
 def _fetch(url: str, session, test_hosts: set[str] | None = None,
            allowed_hosts: set[str] | None = None,
            timeout: tuple[float, float] = (8, 20), cancel_event=None,
-           batch_rate_limit: bool = False) -> tuple[bytes | None, str | None, float | None]:
+           batch_rate_limit: bool = False,
+           batch_min_interval: float = _BATCH_IMAGE_MIN_INTERVAL,
+           preview_stop=None) -> tuple[bytes | None, str | None, float | None]:
     global _BATCH_IMAGE_NEXT_REQUEST, _BATCH_IMAGE_BLOCKED_UNTIL
     if cancel_event is not None and cancel_event.is_set():
         return None, "annule", None
     if not _allowed_url(url, test_hosts, allowed_hosts):
         return None, "url_non_autorisee", None
-    if batch_rate_limit and urlsplit(url).hostname == "cards.scryfall.io":
+    limit_scryfall = batch_rate_limit and urlsplit(url).hostname == "cards.scryfall.io"
+    if limit_scryfall:
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 return None, "annule", None
             with _BATCH_IMAGE_RATE_LOCK:
                 now = time.monotonic()
+                if preview_stop is not None:
+                    if preview_stop.is_set():
+                        return None, "preview_start_skipped", None
+                    if _BATCH_IMAGE_BLOCKED_UNTIL > now:
+                        return None, "limite_debit_429", _BATCH_IMAGE_BLOCKED_UNTIL - now
                 delay = max(_BATCH_IMAGE_NEXT_REQUEST, _BATCH_IMAGE_BLOCKED_UNTIL) - now
                 if delay <= 0:
-                    _BATCH_IMAGE_NEXT_REQUEST = now + _BATCH_IMAGE_MIN_INTERVAL
+                    _BATCH_IMAGE_NEXT_REQUEST = now + batch_min_interval
                     break
             if cancel_event is None:
                 time.sleep(delay)
             elif cancel_event.wait(delay):
                 return None, "annule", None
+    if cancel_event is not None and cancel_event.is_set():
+        return None, "annule", None
+    if preview_stop is not None and preview_stop.is_set():
+        return None, "preview_start_skipped", None
     try:
         response = session.get(url, timeout=timeout, allow_redirects=False, stream=True,
                                headers={"User-Agent": "BibliothequeMagicLocal/2.0", "Accept": "image/*"})
@@ -685,7 +773,7 @@ def _fetch(url: str, session, test_hosts: set[str] | None = None,
                     if retry_time.tzinfo is None: retry_time = retry_time.replace(tzinfo=timezone.utc)
                     retry_value = max(0.0, (retry_time - datetime.now(timezone.utc)).total_seconds())
                 except (TypeError, ValueError, OverflowError): retry_value = 60.0
-            if batch_rate_limit and urlsplit(url).hostname == "cards.scryfall.io":
+            if limit_scryfall:
                 with _BATCH_IMAGE_RATE_LOCK:
                     _BATCH_IMAGE_BLOCKED_UNTIL = max(_BATCH_IMAGE_BLOCKED_UNTIL,
                                                       time.monotonic() + retry_value)
@@ -733,8 +821,11 @@ def _convertible(data: bytes, *, minimum_side: int = _MIN_SOURCE_SIDE):
 def _publish_face(db: Path, version: Path, printing: dict, face_index: int, language: str,
                   source_url: str, source_data: bytes, source_width: int, source_height: int,
                   *, deep_refresh: bool = False, source_provider: str = "scryfall",
-                  source_evidence: str | None = None, source_record_id: str | None = None) -> dict:
-    webp, width, height = _encode_webp(source_data, method=4 if source_provider == "historical_import" else 6)
+                  source_evidence: str | None = None, source_record_id: str | None = None,
+                  encoded_webp: tuple[bytes, int, int] | None = None) -> dict:
+    if encoded_webp is None:
+        encoded_webp = _encode_webp(source_data, method=4 if source_provider == "historical_import" else 6)
+    webp, width, height = encoded_webp
     digest = hashlib.sha256(webp).hexdigest()
     relative = f"assets/webp/{language}/{digest}.webp"
     output = (version / relative).resolve()
@@ -792,6 +883,94 @@ def _publish_face(db: Path, version: Path, printing: dict, face_index: int, lang
             "width": width, "height": height, "source_width": source_width, "source_height": source_height}
 
 
+def _gallery_for_printing(printing, french_name, english_name, session, *, exact_only, cancel_event):
+    class GallerySession:
+        @property
+        def cancelled(self):
+            return cancel_event is not None and cancel_event.is_set()
+
+        def get(self, *args, **kwargs):
+            if self.cancelled:
+                raise requests.RequestException("annule")
+            return session.get(*args, **kwargs)
+
+    return _official_gallery_images(
+        printing["name"], french_name, GallerySession(), english_name=english_name,
+        collector_number=printing["collector_number"], set_code=printing["code"], exact_only=exact_only)
+
+
+def _queue_preview_images(pools, languages, *, worker, executor, test_hosts, manual_by_url,
+                          old_url, cancel_event, face_index, attempts, stop_by_host, pending):
+    """Start bounded work in source order, independently of other languages."""
+    plan = []
+    for language in languages:
+        eligible = 0
+        for url in dict.fromkeys(pools.get(language, ())):
+            if eligible == _PREVIEW_GETS_PER_LANGUAGE:
+                break
+            source = manual_by_url.get(url)
+            allowed_hosts = {str(source["allow_host"])} if source else None
+            if not _allowed_url(url, test_hosts, allowed_hosts):
+                attempts.append({"face": face_index, "language": language, "url_rejected": True})
+                continue
+            eligible += 1
+            if url != old_url:
+                host = urlsplit(url).hostname
+                stop = stop_by_host.setdefault(host, threading.Event())
+                minimum = int(source.get("minimum_side", 1)) if source else 1
+                plan.append((language, url, allowed_hosts, minimum, stop))
+
+    def fetch(item):
+        _, url, allowed_hosts, minimum, stop = item
+        data, error, retry = _fetch(url, worker.session, test_hosts, allowed_hosts=allowed_hosts,
+                                    cancel_event=cancel_event, batch_rate_limit=True,
+                                    batch_min_interval=_PREVIEW_IMAGE_MIN_INTERVAL, preview_stop=stop)
+        if error in {"limite_debit_429", "acces_refuse_403"}:
+            stop.set()
+        if error:
+            return None, error, retry
+        try:
+            width, height = _convertible(data, minimum_side=minimum)
+        except ValueError:
+            return None, "image_invalide", None
+        return (data, width, height, url), None, None
+
+    queued = {}
+    for item in plan:
+        language, url, _, minimum, _ = item
+        key = (url, minimum)
+        if key not in pending:
+            pending[key] = executor.submit(fetch, item)
+        queued.setdefault(language, []).append(pending[key])
+    return queued
+
+
+def _collect_preview_images(queued, languages, face_index, attempts):
+    _LOCK.release()
+    try:
+        outcomes = [(language, future.result()) for language in languages for future in queued.get(language, ())]
+    finally:
+        _LOCK.acquire()
+
+    candidates = {language: [] for language in languages}
+    entries = {}
+    for language, (candidate, error, retry) in outcomes:
+        if error == "preview_start_skipped":
+            continue
+        entry = entries.setdefault(language, {"gets": 0, "errors": [], "temporary_errors_refunded": True})
+        if error:
+            entry["errors"].append(error)
+            attempts.append({"face": face_index, "language": language, "error": error, "retry_after": retry})
+            if error != "annule" and not is_temporary_image_error(error):
+                entry["gets"] += 1
+            if error == "limite_debit_429":
+                entry["retry_after_epoch"] = time.time() + float(retry or 60)
+        else:
+            entry["gets"] += 1
+            candidates[language].append(candidate)
+    return candidates, entries
+
+
 def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Path, session=None,
                       test_hosts: set[str] | None = None, face_indexes: list[int] | None = None,
                       cancel_event=None, repair: bool = False, _deep_refresh: bool = False,
@@ -815,9 +994,10 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
     languages = (*_PREFERRED_LANGUAGES, *(lang for lang in raws if lang not in _PREFERRED_LANGUAGES))
     french_name = raws.get("fr", {}).get("printed_name") or ""
     if not french_name and printing["oracle_id"]:
+        # Start with the few printings of this oracle rather than scanning all French records.
         with connect(db) as conn:
             translation = conn.execute(
-                "SELECT sr.printed_name FROM source_records sr JOIN printings p USING(printing_id) "
+                "SELECT sr.printed_name FROM printings p CROSS JOIN source_records sr USING(printing_id) "
                 "WHERE p.oracle_id=? AND sr.lang='fr' AND sr.printed_name IS NOT NULL LIMIT 1",
                 (printing["oracle_id"],)).fetchone()
         french_name = translation[0] if translation else ""
@@ -830,14 +1010,66 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
         if not requested or not requested.issubset({int(slot["face_index"]) for slot in slots}):
             raise ValueError("face demandée invalide")
         slots = [slot for slot in slots if int(slot["face_index"]) in requested]
-    s = session or requests.Session()
-    with _LOCK:
-        ledger = _load_ledger(ledger_path)
+    def source_pools(face_index):
+        pools = {lang: _ordered_uris(raw, face_index, full_card_only=_preview_only,
+                                     compact=not _deep_refresh) for lang, raw in raws.items()}
+        manual_by_url = {}
+        if _deep_refresh:
+            for candidate in _manual_candidates(printing["code"], printing["collector_number"], face_index):
+                manual_by_url[candidate["url"]] = candidate
+                pools.setdefault(candidate["language"], []).append(candidate["url"])
+        if test_hosts is None and not pools.get("en"):
+            signed_art = _signed_art_candidate(printing, raws.get("en", {}), face_index)
+            if signed_art:
+                url = signed_art["url"]
+                manual_by_url[url] = signed_art
+                pools.setdefault("en", []).append(url)
+        return pools, manual_by_url
+
+    with ExitStack() as resources, _LOCK, _open_ledger(ledger_path) as (get_entry, save_entry):
+        s = session or resources.enter_context(requests.Session())
         results, attempts = [], []
+        english_name = (raws.get("en") or raws.get("fr") or {}).get("name") or ""
+        preview_gallery = None
+        if _preview_only:
+            preview_worker = threading.local()
+            sessions = iter([session or resources.enter_context(requests.Session())
+                             for _ in range(_PREVIEW_IMAGE_WORKERS)])
+
+            def initialize_worker():
+                preview_worker.session = next(sessions)
+
+            preview_executor = resources.enter_context(ThreadPoolExecutor(
+                max_workers=_PREVIEW_IMAGE_WORKERS, thread_name_prefix="image-preview",
+                initializer=initialize_worker))
+            if test_hosts is None and (french_name or english_name) and any(slot["face_index"] == 0 for slot in slots):
+                gallery_session = session or resources.enter_context(requests.Session())
+                preview_gallery = preview_executor.submit(
+                    _gallery_for_printing, printing, french_name, english_name, gallery_session,
+                    exact_only=False, cancel_event=cancel_event)
+            preview_face = slots[0]["face_index"]
+            preview_pools = source_pools(preview_face)
+            with connect(db) as conn:
+                previous = conn.execute(
+                    "SELECT provenance_json FROM image_slots WHERE printing_id=? AND face_index=?",
+                    (printing["printing_id"], preview_face)).fetchone()
+            try:
+                old_source = json.loads(previous[0] or "{}") if previous else {}
+            except (TypeError, json.JSONDecodeError):
+                old_source = {}
+            preview_options = {
+                "worker": preview_worker, "executor": preview_executor, "test_hosts": test_hosts,
+                "manual_by_url": preview_pools[1], "old_url": old_source.get("source_url"),
+                "cancel_event": cancel_event, "face_index": preview_face, "attempts": attempts,
+                "stop_by_host": {}, "pending": {},
+            }
+            queued = _queue_preview_images(preview_pools[0],
+                                           (language for language in languages if language != "fr"),
+                                           **preview_options)
         live_fr_raw = None
         if _deep_refresh:
             api_key = f"scryfall-api:{printing['printing_id']}:fr"
-            api_entry = ledger["faces"].setdefault(api_key, {"gets": 0, "errors": []})
+            api_entry = get_entry(api_key)
             now = time.time()
             if cancel_event is not None and cancel_event.is_set():
                 lookup_status = "cancelled"
@@ -852,12 +1084,21 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                 if expected_raw is None:
                     lookup_status = "identity_source_unavailable"
                 else:
-                    live_fr_raw, lookup_status, retry = _fetch_live_fr(
-                        printing["code"], printing["collector_number"], s, cancel_event=cancel_event)
+                    if _preview_only:
+                        _LOCK.release()
+                    try:
+                        live_fr_raw, lookup_status, retry = _fetch_live_fr(
+                            printing["code"], printing["collector_number"], s, cancel_event=cancel_event)
+                    finally:
+                        if _preview_only:
+                            _LOCK.acquire()
+                    if _preview_only:
+                        api_entry = get_entry(api_key) or {"gets": 0, "errors": []}
                     api_entry["gets"] = int(api_entry.get("gets", 0)) + 1
                     api_entry["last_checked_epoch"] = time.time()
                     if lookup_status == "rate_limited":
-                        api_entry["retry_after_epoch"] = time.time() + float(retry or 60)
+                        api_entry["retry_after_epoch"] = max(float(api_entry.get("retry_after_epoch", 0)),
+                                                              time.time() + float(retry or 60))
                     elif lookup_status == "blocked":
                         api_entry["blocked"] = True
                     elif lookup_status == "not_found":
@@ -871,7 +1112,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                             live_fr_raw = None
                             lookup_status = "candidate_identity_rejected"
                             api_entry.setdefault("errors", []).append(lookup_status)
-                    _save_ledger(ledger_path, ledger)
+                    save_entry(api_key, api_entry)
             attempts.append({"kind": "metadata", "source": "scryfall_api", "language": "fr",
                              "status": lookup_status})
         for slot in slots:
@@ -883,7 +1124,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
             if live_status is None:
                 raise ValueError("slot d’image disparu")
             current_quality = 0
-            if _deep_refresh and live_status["status"] == "ready":
+            if _deep_refresh and not _preview_only and live_status["status"] == "ready":
                 with connect(db) as conn:
                     current_asset = conn.execute("SELECT a.asset_id,a.relative_path,a.width,a.height,a.provenance_json "
                                                   "FROM image_slots s LEFT JOIN image_assets a USING(asset_id) "
@@ -940,30 +1181,29 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                 _set_manifest_slot(version, printing["set_id"], printing["printing_id"], slot["face_index"],
                                    status="missing", language=None, relative_path=None)
             face_index = slot["face_index"]
-            pools = {lang: _ordered_uris(raw, face_index, full_card_only=_preview_only,
-                                         compact=not _deep_refresh) for lang, raw in raws.items()}
+            pools, manual_by_url = preview_pools if _preview_only else source_pools(face_index)
             live_fr_urls = _ordered_uris(live_fr_raw, face_index, full_card_only=_preview_only) if live_fr_raw is not None else []
             if live_fr_raw is not None:
                 pools["fr"] = live_fr_urls + pools.get("fr", [])
-            manual_by_url = {}
-            if _deep_refresh:
-                for candidate in _manual_candidates(printing["code"], printing["collector_number"], face_index):
-                    manual_by_url[candidate["url"]] = candidate
-                    pools.setdefault(candidate["language"], []).append(candidate["url"])
-            if test_hosts is None and not pools.get("en"):
-                signed_art = _signed_art_candidate(printing, raws.get("en", {}), face_index)
-                if signed_art:
-                    url = signed_art["url"]
-                    manual_by_url[url] = signed_art
-                    pools.setdefault("en", []).append(url)
             if (test_hosts is None and face_index == 0
                     and (_preview_only or (not pools.get("fr") and printing["layout"] != "art_series"))):
-                english_name = (raws.get("en") or raws.get("fr") or {}).get("name") or ""
-                gallery_candidates = (_official_gallery_images(
-                    printing["name"], french_name, s, english_name=english_name,
-                    collector_number=printing["collector_number"], set_code=printing["code"],
-                    exact_only=not _preview_only)
-                    if (french_name or english_name) and (_preview_only or not reviewed_wizards) else [])
+                gallery_candidates = []
+                if preview_gallery is not None:
+                    _LOCK.release()
+                    try:
+                        gallery_candidates = preview_gallery.result()
+                    finally:
+                        _LOCK.acquire()
+                elif (french_name or english_name) and not reviewed_wizards:
+                    if parallel_fetch:
+                        _LOCK.release()
+                    try:
+                        gallery_candidates = _gallery_for_printing(
+                            printing, french_name, english_name, s, exact_only=not _preview_only,
+                            cancel_event=cancel_event)
+                    finally:
+                        if parallel_fetch:
+                            _LOCK.acquire()
                 if reviewed_wizards:
                     gallery_candidates.insert(0, reviewed_wizards)
                 for candidate in gallery_candidates:
@@ -981,22 +1221,28 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
             got: dict[str, list[tuple[bytes,int,int,str]]] = {lang: [] for lang in languages}
             chosen = None; deferred = None
             deep_run_id = uuid.uuid4().hex if _deep_refresh else None
-            for language in languages:
+            if _preview_only:
+                queued.update(_queue_preview_images(pools, ("fr",), **preview_options))
+                got, entries = _collect_preview_images(queued, languages, face_index, attempts)
+                for language, entry in entries.items():
+                    key = f"deep:{deep_run_id}:{printing['printing_id']}:{face_index}:{language}"
+                    save_entry(key, entry)
+            for language in (() if _preview_only else languages):
                 urls = pools.get(language, [])
                 if not urls:
                     continue
                 key = (f"deep:{deep_run_id}:{printing['printing_id']}:{face_index}:{language}"
                        if _deep_refresh else f"{printing['printing_id']}:{face_index}:{language}")
-                ledger_entry = ledger["faces"].get(key, {})
-                if float(ledger_entry.get("retry_after_epoch", 0)) > time.time():
+                entry = get_entry(key)
+                if float(entry.get("retry_after_epoch", 0)) > time.time():
                     deferred = "limite_debit_429"
                     break
-                if ledger_entry and not ledger_entry.get("temporary_errors_refunded"):
+                if entry and not entry.get("temporary_errors_refunded"):
                     refunded = sum(is_temporary_image_error(error) or error == "annule"
-                                   for error in ledger_entry.get("errors", []))
-                    ledger_entry["gets"] = max(0, int(ledger_entry.get("gets", 0)) - refunded)
-                    ledger_entry["temporary_errors_refunded"] = True
-                used = int(ledger_entry.get("gets", 0))
+                                   for error in entry.get("errors", []))
+                    entry["gets"] = max(0, int(entry.get("gets", 0)) - refunded)
+                    entry["temporary_errors_refunded"] = True
+                used = int(entry.get("gets", 0))
                 if _deep_refresh:
                     urls = list(dict.fromkeys(urls))
                 temporary_error = None
@@ -1004,7 +1250,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                 for url in urls:
                     if cancel_event is not None and cancel_event.is_set():
                         deferred = "annule"; break
-                    limit = 6 if _preview_only else _MAX_GETS
+                    limit = _MAX_GETS
                     if used >= limit or fetched >= limit:
                         break
                     manual_source = manual_by_url.get(url)
@@ -1014,22 +1260,21 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                     fetched += 1
                     if parallel_fetch:
                         # Reserve this attempt before releasing the ledger lock.
-                        entry = ledger["faces"].setdefault(key, {"gets": 0, "errors": []})
                         entry["gets"] = used + 1
-                        _save_ledger(ledger_path, ledger)
+                        save_entry(key, entry)
                         _LOCK.release()
                         try:
                             data, error, retry = _fetch(url, s, test_hosts, allowed_hosts=allowed_hosts,
                                                         cancel_event=cancel_event, batch_rate_limit=True)
                         finally:
                             _LOCK.acquire()
-                        ledger = _load_ledger(ledger_path)
-                        used = int(ledger["faces"].get(key, {}).get("gets", used + 1))
+                        entry = get_entry(key)
+                        used = int(entry.get("gets", used + 1))
                     else:
                         data, error, retry = _fetch(url, s, test_hosts, allowed_hosts=allowed_hosts,
                                                     cancel_event=cancel_event)
                         used += 1
-                    entry = ledger["faces"].setdefault(key, {"gets": 0, "errors": []}); entry["gets"] = used
+                    entry["gets"] = used
                     entry["temporary_errors_refunded"] = True
                     if error:
                         entry.setdefault("errors", []).append(error)
@@ -1047,7 +1292,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                         continue
                     try:
                         minimum = (int(manual_source.get("minimum_side", 1)) if manual_source else
-                                   1 if _preview_only else _MIN_SOURCE_SIDE)
+                                   _MIN_SOURCE_SIDE)
                         width, height = _convertible(data, minimum_side=minimum)
                     except ValueError as exc:
                         entry.setdefault("errors", []).append("image_invalide")
@@ -1059,24 +1304,20 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                     if not _deep_refresh and ((width >= _MIN_SOURCE_SIDE and height >= _MIN_SOURCE_SIDE)
                                               or exact_alternate):
                         chosen = (language, data, width, height, url); break
-                _save_ledger(ledger_path, ledger)
+                if entry:
+                    save_entry(key, entry)
                 if _deep_refresh and got[language]:
                     data, width, height, url = max(got[language], key=lambda x: x[1] * x[2])
                     chosen = (language, data, width, height, url)
                 if not got[language] and not deferred:
                     deferred = temporary_error
-                if (chosen and not _preview_only) or deferred: break
+                if chosen or deferred: break
             if _preview_only:
+                if cancel_event is not None and cancel_event.is_set():
+                    results.append({"face_index": face_index, "status": "cancelled", "reason": "annule"})
+                    continue
                 candidates = []
                 seen = set()
-                with connect(db) as conn:
-                    previous = conn.execute(
-                        "SELECT provenance_json FROM image_slots WHERE printing_id=? AND face_index=?",
-                        (printing["printing_id"], face_index)).fetchone()
-                try:
-                    old_source = json.loads(previous[0] or "{}") if previous else {}
-                except (TypeError, json.JSONDecodeError):
-                    old_source = {}
                 for lang in languages:
                     for data, width, height, url in got[lang]:
                         digest = hashlib.sha256(data).hexdigest()
@@ -1107,8 +1348,25 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                 if fallback_lang:
                     data, width, height, url = max(got[fallback_lang], key=lambda x: x[1]*x[2])
                     chosen = (fallback_lang, data, width, height, url)
+            encoded_webp = None
             if chosen and parallel_fetch and not _deep_refresh:
-                # An explicit import can publish while this batch is fetching.
+                _LOCK.release()
+                try:
+                    encoded_webp = _encode_webp(chosen[1], method=4)
+                finally:
+                    _LOCK.acquire()
+                active = resolve_current(catalogue_root)["database"] == db
+                if not active or (cancel_event is not None and cancel_event.is_set()):
+                    key = f"{printing['printing_id']}:{face_index}:{chosen[0]}"
+                    entry = get_entry(key)
+                    if entry:
+                        entry["gets"] = max(0, int(entry.get("gets", 0)) - 1)
+                        save_entry(key, entry)
+                    if active:
+                        results.append({"face_index": face_index, "status": "cancelled"})
+                        continue
+                    raise ValueError("La version du catalogue a changé pendant le téléchargement")
+                # An explicit import can publish while this batch is fetching or encoding.
                 # Keep the image selected by the user if it won that race.
                 with connect(db) as conn:
                     latest_status = conn.execute(
@@ -1121,7 +1379,7 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                 lang, data, width, height, url = chosen
                 manual_source = manual_by_url.get(url)
                 candidate_quality = width * height
-                if _deep_refresh and not _preview_only and current_quality and candidate_quality < current_quality:
+                if _deep_refresh and current_quality and candidate_quality < current_quality:
                     results.append({"face_index": face_index, "status": "lower_quality_kept_existing",
                                     "candidate_language": lang, "candidate_source_dimensions": [width, height]})
                     continue
@@ -1131,40 +1389,22 @@ def download_printing(provider_id: str, *, catalogue_root: Path, ledger_path: Pa
                 source_evidence = manual_source["evidence"] if manual_source else None
                 source_record_id = (live_fr_raw.get("id") if is_live_fr else
                                     raws.get(lang, {}).get("id"))
-                if _preview_only:
-                    results.append({"face_index": face_index, "status": "candidate", "candidate": {
-                        "provider_card_id": provider_id,
-                        "printing_id": printing["printing_id"],
-                        "face_index": int(face_index),
-                        "version_id": current["version_id"],
-                        "old_asset_id": slot["asset_id"],
-                        "old_status": slot["status"],
-                        "language": lang,
-                        "source_url": url,
-                        "source_data": data,
-                        "mime_type": _image_mime_type(data),
-                        "source_width": width,
-                        "source_height": height,
-                        "source_provider": source_provider,
-                        "source_evidence": source_evidence,
-                        "source_record_id": source_record_id,
-                    }})
-                    continue
                 try:
                     published = _publish_face(db, version, printing, face_index, lang, url, data, width, height,
                                               deep_refresh=_deep_refresh,
                                               source_provider=source_provider,
                                               source_evidence=source_evidence,
-                                              source_record_id=source_record_id)
+                                              source_record_id=source_record_id,
+                                              encoded_webp=encoded_webp)
                 except sqlite3.OperationalError as exc:
                     if "locked" in str(exc).casefold() and not _deep_refresh:
                         # The GET returned a valid image. A local commit failure
                         # must not consume the final network attempt forever.
                         retry_key = f"{printing['printing_id']}:{face_index}:{lang}"
-                        entry = ledger["faces"].get(retry_key)
+                        entry = get_entry(retry_key)
                         if entry:
                             entry["gets"] = max(0, int(entry.get("gets", 0)) - 1)
-                            _save_ledger(ledger_path, ledger)
+                            save_entry(retry_key, entry)
                     raise
                 results.append(published)
             else:
@@ -1218,7 +1458,8 @@ def preview_printing_candidate(provider_id: str, *, catalogue_root: Path, ledger
 
 
 def publish_preview_candidate(candidate: dict, *, catalogue_root: Path,
-                              provider_card_id: str, face_index: int) -> dict:
+                              provider_card_id: str, face_index: int,
+                              _encoded_webp: tuple[bytes, int, int] | None = None) -> dict:
     """Publish a preview only if the active identity and previous slot still match."""
     with _LOCK:
         current = resolve_current(catalogue_root)
@@ -1229,7 +1470,7 @@ def publish_preview_candidate(candidate: dict, *, catalogue_root: Path,
         if candidate.get("face_index") != face_index:
             raise ValueError("candidate périmée : index de face différent")
         db, version = current["database"], current["database"].parent
-        with connect(db) as conn:
+        with closing(connect(db)) as conn:
             row = conn.execute("SELECT p.printing_id,p.set_id,e.code,e.name,e.eligibility,p.collector_number,p.layout "
                                "FROM source_records sr JOIN printings p USING(printing_id) JOIN editions e USING(set_id) "
                                "WHERE sr.provider_card_id=?", (provider_card_id,)).fetchone()
@@ -1262,7 +1503,8 @@ def publish_preview_candidate(candidate: dict, *, catalogue_root: Path,
                              candidate["source_url"], source_data, width, height,
                              deep_refresh=True, source_provider=candidate.get("source_provider") or "scryfall",
                              source_evidence=candidate.get("source_evidence"),
-                             source_record_id=candidate.get("source_record_id"))
+                             source_record_id=candidate.get("source_record_id"),
+                             encoded_webp=_encoded_webp)
 
 
 def import_local_image(provider_card_id: str, face_index: int, source_data: bytes,

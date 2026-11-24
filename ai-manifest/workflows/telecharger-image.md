@@ -11,6 +11,12 @@ d'abord confirmation, puis prépare plusieurs variantes FR/EN distinctes de
 l'image actuelle. Une seconde modale au-dessus de la fiche indique leurs dimensions d'origine et permet
 d'agrandir chaque variante au survol, au focus ou au clic. Seule la validation
 d'une variante sélectionnée publie un nouvel asset.
+La recherche donne la priorité à la face affichée. Les téléchargements des
+autres faces manquantes démarrent après la recherche en arrière-plan, sauf si
+elle a été annulée.
+Pendant un téléchargement groupé, la visionneuse peut rechercher et valider
+une variante pour la face affichée. Si le lot a modifié cette face entre-temps,
+la validation demande de relancer la recherche.
 
 ## Préconditions
 

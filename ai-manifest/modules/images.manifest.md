@@ -22,7 +22,8 @@ reste réservée à la prévisualisation avec choix humain.
   et face, avec URL, langue, source et preuve.
 - `local_app.py` déclenche l’opération par `POST /api/v2/download` et permet
   l’annulation.
-- Le journal durable est `_bibliotheque_mtg/state/v2-image-download-ledger.json` ;
+- Le journal durable de l’application est `state/v2-image-download-ledger.sqlite`.
+  Le premier accès importe une fois le journal JSON historique, qui reste sur disque.
   les assets sont dans la version active sous `assets/webp/<langue>/`.
 - Les mêmes images prêtes sont présentées de façon permanente sous
   `_bibliotheque_mtg/Images/<édition>/`, par impression et face, avec un lien
@@ -34,13 +35,24 @@ reste réservée à la prévisualisation avec choix humain.
   carte, la face et un suffixe dérivé de l'identité d'impression.
 - `tests_v2/test_download_v2.py` couvre langues, faces, budget, erreurs réseau,
   reprise et réparation.
-- Le téléchargement groupé peut chevaucher au plus quatre GET d'images. Les
-  départs vers `cards.scryfall.io` sont espacés d'au moins 250 ms, et un 429
-  reporte globalement les suivants selon `Retry-After`. Le journal et la
-  publication restent sérialisés ; les appels de téléchargement individuels
+- Le téléchargement groupé peut traiter huit impressions en continu avec une
+  session HTTP par travailleur. L'ordre de choix des langues et des sources reste
+  identique à celui du téléchargement individuel. La conversion WebP se fait en
+  parallèle. Les départs vers `cards.scryfall.io` sont espacés d'au moins 125 ms, et un 429
+  reporte globalement les suivants selon `Retry-After`. Le journal enregistre
+  uniquement la clé modifiée à chaque tentative. Les écritures de publication
+  restent sérialisées ; les appels de téléchargement individuels
   conservent leur comportement ordinaire. Un import manuel reste autorisé
   pendant ce lot ; avant de publier une image récupérée, le lot revérifie le
   slot pour conserver une image publiée entre-temps.
+- Les recherches Wizards d'impressions distinctes se chevauchent. Seul le
+  remplissage d'une même entrée de cache est sérialisé. Une découverte
+  infructueuse du client Contentful laisse un délai court avant une nouvelle
+  tentative de découverte, sans bloquer les galeries déjà utilisables.
+
+- La recherche d'un nom français de secours part de l'identité Oracle et de
+  ses impressions, puis consulte leurs lignes françaises via l'index
+  impression/langue. Les lots utilisent la même recherche que la fiche.
 
 Les anciens algorithmes de `images.py` servent au
 [parcours historique](historique.manifest.md) ; le bouton de l’application V2
@@ -112,13 +124,25 @@ Les autres slots et les fichiers de la sauvegarde restent inchangés.
   requêtes restent bornées et toute tentative est enregistrée sous une clé
   distincte de relance approfondie.
 - Le mode de prévisualisation applique les mêmes recherches et contrôles de
-  source mais ne publie pas le résultat. Il examine jusqu'à six URL par langue
-  FR et EN, déduplique les octets identiques et écarte l'URL et le hash source
+  source mais ne publie pas le résultat. Il examine jusqu'à huit URL par langue
+  disponible, déduplique les octets identiques et écarte l'URL et le hash source
   de l'image déjà publiée. Il rend plusieurs images sources validées avec leur
   langue et leurs dimensions d'origine. La validation d'une variante choisie
   revérifie la version active, l'impression, la face et l'asset antérieur avant
   d'appeler la publication existante. Une candidate refusée ou expirée ne
   modifie pas `image_slots`, `image_assets` ni `images.json`.
+- La prévisualisation chevauche la découverte Wizards et la vérification FR
+  Scryfall. Huit téléchargements d’images au plus se chevauchent, toutes langues
+  confondues. Les URL déjà connues des autres langues démarrent pendant la
+  découverte des sources françaises. Le budget est de huit URL par langue
+  et face, avec un ordre de présentation FR, EN puis autres langues. Le CDN Scryfall partage
+  son délai `Retry-After` avec le lot. Un 403 ou 429 bloque les nouveaux GET de
+  l’hôte concerné. Les sources indépendantes restent utilisables.
+  L’URL déjà publiée est exclue du réseau sans ouvrir de place supplémentaire
+  dans le budget.
+- Les références françaises locales sont présélectionnées par les index Oracle
+  et de noms puis vérifiées par identité exacte ou égalité de nom, en conservant
+  les contrôles de face, de mise en page et de disponibilité locale.
 - Si aucune nouvelle image n'est trouvée, le parcours IA peut utiliser l'image
   prête du slot exact comme référence visuelle, après validation du chemin et
   du décodage. Elle ne devient pas une nouvelle variante à valider dans le
@@ -231,18 +255,22 @@ anglaise et de la version active protège les autres images et les slots
 modifiés depuis l’analyse. Un échec conserve l’image en place. Les compteurs
 sont actualisés pendant les deux opérations. Le rapport paginé des remplacements
 réussis utilise les deux fichiers locaux et reste disponible après une relance
-du même lot, jusqu’à la prochaine analyse ou au changement de version active.
+du même lot ou de l’analyse dans la version active.
 
 Les résultats du dernier scan terminé de chaque version du catalogue et les
 paires avant/après sont conservés dans la base locale `state/localized-banners.sqlite`.
 Chaque succès est enregistré séparément pour rester visible après un redémarrage.
 Le détecteur conserve aussi ses résultats par fichier et version de signature,
-avec la taille et les dates du fichier. Un autre scan réutilise les verdicts
-des fichiers inchangés, recompte les slots prêts et recalcule les sources EN
-pour les bandeaux détectés. Les fichiers nouveaux, modifiés ou illisibles
-sont contrôlés à nouveau. Les verdicts déjà validés restent acquis en cas
-d'interruption.
+avec la taille et les dates du fichier. Un inventaire compare ces signatures
+sans décoder les fichiers inchangés. Seuls les fichiers nouveaux, modifiés ou
+précédemment illisibles passent au détecteur et comptent dans sa progression.
+Les verdicts conservés restent inclus dans le bilan et les bandeaux à traiter.
+Les verdicts déjà validés restent acquis en cas d'interruption.
 
-Le remplacement peut chevaucher jusqu'à quatre GET, comme le téléchargement
-groupé des images manquantes. Les écritures d'assets et du rapport restent
-sérialisées. Un refus 403 ou une réponse 429 arrête les nouveaux GET du lot.
+Le remplacement peut chevaucher jusqu'à huit GET d'images statiques Scryfall,
+avec des départs espacés d'au moins 125 ms. Chaque travailleur réutilise sa
+connexion HTTP, prépare le WebP à 531 × 738 en qualité 95 avec la méthode 4
+et alimente une file bornée de résultats pendant que les écritures d'assets
+et du rapport restent sérialisées. Un refus 403 ou une réponse 429 arrête
+les nouveaux GET du lot. Le délai `Retry-After` reste partagé avec le
+téléchargement groupé des images manquantes.

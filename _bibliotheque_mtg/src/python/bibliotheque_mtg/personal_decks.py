@@ -584,7 +584,7 @@ def _composition_cards(deck):
 
 
 def summary_with_media(deck, catalog_db, proxy_lookup=None):
-    summary = {key: deck.get(key) for key in ("id", "name", "colors", "revision", "updated_at")}
+    summary = {key: deck.get(key) for key in ("id", "name", "colors", "format", "revision", "updated_at")}
     design = deck.get("box_design", DEFAULT_BOX_DESIGN)
     summary["box_design"] = DEFAULT_BOX_DESIGN if design == "eclipse" else design
     if "group_id" in deck:

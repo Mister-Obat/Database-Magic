@@ -2,11 +2,63 @@ import json
 import sqlite3
 import time
 import threading
+import urllib.error
 import urllib.request
 from io import BytesIO
 
 from bibliotheque_mtg import image_download, local_app
 from PIL import Image
+
+
+def test_batch_allows_image_preview_and_choice_but_defers_other_faces(monkeypatch, tmp_path):
+    db = tmp_path / "catalogue.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE source_records(provider_card_id, name, lang)")
+        conn.execute("INSERT INTO source_records VALUES ('en-1', 'Card', 'en')")
+    monkeypatch.setattr(local_app.LibraryHandler, "db", property(lambda self: db))
+    monkeypatch.setattr(local_app, "_BATCH_TASK", {"status": "running"})
+    monkeypatch.setattr(local_app, "_MAINTENANCE_TASK", None)
+    monkeypatch.setattr(local_app, "_STARTUP_IMAGE_RESTORE", threading.Event())
+    monkeypatch.setattr(local_app, "_IMAGE_TASKS", {})
+    monkeypatch.setattr(local_app, "_start_image_task", lambda *args, **kwargs: {"task_id": "preview"})
+    candidate = {"provider_card_id": "en-1", "face_index": 0}
+    monkeypatch.setattr(local_app, "_image_candidate", lambda *args, **kwargs: [candidate])
+    monkeypatch.setattr(local_app, "publish_preview_candidate",
+                        lambda candidate, **kwargs: {"face_index": candidate["face_index"]})
+    server = local_app.LocalServer(("127.0.0.1", 0), local_app.LibraryHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path, payload):
+        request = urllib.request.Request(base + path, data=json.dumps(payload).encode(),
+                                         headers={"Content-Type": "application/json"})
+        try:
+            response = urllib.request.urlopen(request, timeout=5)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            return response.status, json.load(response)
+
+    try:
+        image = {"provider_card_id": "en-1", "face_index": 0}
+        choice = {"candidate_id": "test", "choice": "new", "index": 0}
+        status, body = post("/api/v2/download", {**image, "face_index": 1})
+        assert (status, body["error"]) == (409, "download_busy")
+        assert post("/api/v2/image/preview", image) == (202, {"task_id": "preview"})
+        assert post("/api/v2/image/candidate/choose", choice) == (
+            200, {"status": "ready", "result": {"face_index": 0}})
+
+        monkeypatch.setattr(local_app, "_BATCH_TASK", None)
+        monkeypatch.setattr(local_app, "_MAINTENANCE_TASK", {"status": "running"})
+        assert post("/api/v2/download", {**image, "face_index": 1}) == (
+            409, {"error": "maintenance_in_progress"})
+        assert post("/api/v2/image/candidate/choose", choice) == (
+            409, {"error": "maintenance_in_progress"})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_japanese_visual_accepts_same_name_french_text_reference(monkeypatch, tmp_path):
@@ -140,6 +192,46 @@ def test_contentful_direct_lookup_uses_exact_set_name_and_number(monkeypatch):
     assert params["fields.foundInSet.fields.abbreviation"] == "mh3"
     assert params["fields.identifier"] == "psychic-frog"
     assert params["fields.collectorNumber"] == "199"
+
+
+def test_distinct_wizards_cards_overlap_while_shared_gallery_loads_once(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    page = "https://magic.wizards.com/fr/products/test-set/card-image-gallery"
+    url = "https://cdn.contentful.com/spaces/space/environments/master/entries"
+    index = tmp_path / "gallery_catalogue.json"
+    index.write_text(json.dumps({"articles": [{"url": page}]}), encoding="utf-8")
+    monkeypatch.setattr(image_download, "_WIZARDS_INDEX_PATH", index)
+    monkeypatch.setattr(image_download, "_GALLERY_CACHE", {})
+    monkeypatch.setattr(image_download, "_CONTENTFUL_DIRECT_CACHE", {})
+    monkeypatch.setattr(image_download, "_CONTENTFUL_CLIENT_CACHE", (time.monotonic(), "space", "token"))
+    queries = threading.Barrier(2)
+    calls = []
+
+    class Session:
+        def get(self, requested, *, params=None, **_kwargs):
+            calls.append(requested)
+            if requested == page:
+                return _Response(b"<html></html>")
+            assert requested == url
+            number = params["fields.collectorNumber"]
+            queries.wait(5)
+            return _Response(json.dumps({"items": [{
+                "sys": {"id": number, "contentType": {"sys": {"id": "magicCard"}}},
+                "fields": {"identifier": f"card-{number}", "name": f"Carte {number}",
+                           "collectorNumber": number, "face": f"https://media.wizards.com/fr_{number}.png"},
+            }]}).encode())
+
+    def lookup(number):
+        return image_download._gallery_for_printing(
+            {"name": "Test Set", "code": "tst", "collector_number": number},
+            f"Carte {number}", f"Card {number}", Session(), exact_only=True, cancel_event=None)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lookup, ("1", "2")))
+    assert calls.count(page) == 1 and calls.count(url) == 2
+    assert [result[0]["url"] for result in results] == [
+        "https://media.wizards.com/fr_1.png", "https://media.wizards.com/fr_2.png"]
 
 
 def test_normal_missing_image_download_can_use_exact_wizards_reference(tmp_path, monkeypatch):

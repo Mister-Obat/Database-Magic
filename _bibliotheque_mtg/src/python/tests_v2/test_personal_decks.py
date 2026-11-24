@@ -454,6 +454,8 @@ def test_http_origin_routes_and_stale_save(cards, tmp_path, monkeypatch):
         status, result = request("/api/v2/personal-decks/create", {"name": "HTTP", "colors": ["W"]})
         assert status == 200
         deck = result["deck"]
+        assert deck["format"] is None
+        assert all(section.get("source_section") != "commander" for section in deck["sections"])
         assert request("/api/v2/personal-decks/add", {"deck_id": deck["id"], "provider_card_id": "id1"})[0] == 200
         assert request("/api/v2/personal-decks/save", {"deck": deck})[0] == 409
         opened = request("/api/v2/personal-deck?id=" + deck["id"])[1]["deck"]
@@ -469,7 +471,8 @@ def test_http_origin_routes_and_stale_save(cards, tmp_path, monkeypatch):
                 assert texture.headers.get_content_type() == "image/webp"
                 assert texture.read(12)[8:] == b"WEBP"
         assert request("/api/v2/recent-activity")[1]["personal_decks"][0]["box_design"] == "obsidian"
-        assert request("/api/v2/personal-decks?summary=1")[1]["items"][0]["box_design"] == "obsidian"
+        summary = request("/api/v2/personal-decks?summary=1")[1]["items"][0]
+        assert summary["box_design"] == "obsidian" and summary["format"] is None
         assert len(request("/api/v2/personal-decks?q=HTTP&colors=W")[1]["items"]) == 1
         assert request("/api/v2/personal-decks/create", {"name": "bad", "colors": [1]})[0] == 400
         delete_url = "/api/v2/personal-decks/delete"

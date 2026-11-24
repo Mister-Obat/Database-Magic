@@ -848,7 +848,11 @@ async function getJSON(path, query = {}, options = {}) {
 async function postJSON(path, body, options = {}) {
   const response = await fetch(path, { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body), ...options });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data.detail || data.error || `HTTP ${response.status}`);
+    error.code = data.error;
+    throw error;
+  }
   return data;
 }
 function activateView(view) {
@@ -1295,9 +1299,14 @@ async function showBannerResults(page) {
   }
 }
 
+function hasBannerResults() {
+  return Boolean(bannerAnalysis?.detected || bannerReplacement?.replaced_total);
+}
+
 function openBannerDialog() {
-  if (!bannerAnalysis?.detected || bannerDialog.open) return;
+  if (!hasBannerResults() || bannerDialog.open) return;
   const hasPairs = Boolean(bannerReplacement?.replaced_total);
+  bannerMode.options[0].disabled = !bannerAnalysis?.detected;
   bannerMode.options[1].disabled = !hasPairs;
   bannerMode.value = hasPairs ? "replaced" : "detected";
   bannerDialog.showModal();
@@ -1306,15 +1315,11 @@ function openBannerDialog() {
 
 async function runBannerTask(action) {
   const detecting = action === "analyze";
-  if (detecting) {
-    bannerAnalysis = bannerReplacement = null;
-    showBannerCounts();
-  }
   const previousReplaced = bannerReplacement?.replaced_total || 0;
-  bannerDetect.disabled = bannerReplace.disabled = bannerOpen.disabled = true;
+  bannerDetect.disabled = bannerReplace.disabled = true;
   bannerProgress.removeAttribute("value");
   bannerProgress.hidden = false;
-  setText(bannerStatus, detecting ? "Analyse des images locales…" : "Recherche des images anglaises…");
+  setText(bannerStatus, detecting ? "Inventaire des images locales…" : "Recherche des images anglaises…");
   try {
     const payload = detecting ? {} : { analysis_id: bannerAnalysis.analysis_id };
     const started = await postJSON(`/api/v2/image/localized-banner/${action}`, payload);
@@ -1331,8 +1336,11 @@ async function runBannerTask(action) {
         bannerProgress.value = task.processed || 0;
         const progress = `${formatNumber(bannerProgress.value)} / ${formatNumber(task.total)} images`;
         setText(bannerStatus, task.status === "cancelling" ? `Annulation en cours · ${progress}` : progress);
-        showBannerCounts(detecting ? task.detected : bannerAnalysis.detected,
-          detecting ? 0 : task.processed, detecting ? 0 : previousReplaced + (task.replaced || 0));
+        if (!detecting) {
+          showBannerCounts(bannerAnalysis.detected, task.processed, previousReplaced + (task.replaced || 0));
+        }
+      } else if (task.status === "cancelling") {
+        setText(bannerStatus, "Annulation en cours…");
       }
     } while (["queued", "running", "cancelling"].includes(task.status));
 
@@ -1341,9 +1349,19 @@ async function runBannerTask(action) {
     let summary = "";
     if (detecting && task.status === "ready") {
       bannerAnalysis = report;
-      showBannerCounts(report.detected, 0, 0);
-      summary = `${formatNumber(report.scanned)} images analysées. ${formatNumber(report.replaceable)} ont une source anglaise.`;
+      showBannerCounts(report.detected, 0, bannerReplacement?.replaced_total || 0);
+      const analyzed = report.analyzed ?? report.scanned;
+      summary = analyzed === 0 ? "Aucune nouvelle image à analyser."
+        : `${formatNumber(analyzed)} ${analyzed === 1 ? "image analysée" : "images analysées"}.`;
+      summary += ` Bandeaux avec une source anglaise disponible : ${formatNumber(report.replaceable)}.`;
       if (report.unreadable) summary += ` Fichiers illisibles (${formatNumber(report.unreadable)}).`;
+      if (bannerDialog.open) {
+        bannerMode.options[0].disabled = !report.detected;
+        if (bannerMode.value === "detected") {
+          if (!report.detected && bannerReplacement?.replaced_total) bannerMode.value = "replaced";
+          void showBannerResults(1);
+        }
+      }
     } else if (!detecting && report) {
       bannerReplacement = report;
       const processed = report.replaced + report.failed + report.skipped;
@@ -1362,7 +1380,7 @@ async function runBannerTask(action) {
     bannerProgress.hidden = bannerCancel.hidden = true;
     bannerCancel.disabled = bannerDetect.disabled = false;
     bannerReplace.disabled = !bannerAnalysis?.replaceable;
-    bannerOpen.disabled = !bannerAnalysis?.detected;
+    bannerOpen.disabled = !hasBannerResults();
     if (detecting && !bannerAnalysis) void restoreBannerState();
     void refreshNotifications();
   }
@@ -1371,18 +1389,17 @@ async function runBannerTask(action) {
 async function restoreBannerState() {
   try {
     const { analysis, replacement } = await getJSON("/api/v2/image/localized-banner/state");
-    if (bannerDetect.disabled || bannerAnalysis || !analysis) return;
+    if (bannerAnalysis || !analysis) return;
     bannerAnalysis = analysis;
     bannerReplacement = replacement;
     const replaced = replacement?.replaced_total || 0;
-    const processed = replacement?.total == null ? replaced
+    const processed = replacement?.total == null ? 0
       : replacement.replaced + replacement.failed + replacement.skipped;
-    const finished = replaced >= analysis.replaceable ||
-      (replacement?.total != null && replacement.replaced + replacement.skipped === replacement.total);
+    const finished = replacement?.total != null && replacement.replaced + replacement.skipped === replacement.total;
     if (finished) bannerAnalysis.replaceable = 0;
     showBannerCounts(analysis.detected, processed, replaced);
-    bannerReplace.disabled = finished;
-    bannerOpen.disabled = !analysis.detected;
+    bannerReplace.disabled = bannerDetect.disabled || !analysis.replaceable;
+    bannerOpen.disabled = !hasBannerResults();
   } catch (error) {
     if (!bannerDetect.disabled && !bannerAnalysis) setText(bannerStatus, error.message);
   }
@@ -2491,7 +2508,7 @@ async function showCardUsages(card) {
     renderScope("exact");
   } catch (error) { if (dialog.open) content.replaceChildren(node("p", "error-state", error.message)); }
 }
-async function openCard(providerId, gallery = null, preferredFace = null, resumedPreview = null) {
+async function openCard(providerId, gallery = null, preferredFace = null, resumedPreview = null, companionDownloads = null) {
   const dialog = $("card-dialog"), target = $("card-detail");
   const focusedDirection = gallery ? document.activeElement?.dataset.cardGalleryDirection : null;
   state.cardController?.abort();
@@ -2682,23 +2699,18 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
         const loading = node("div", "image-search-loading");
         loading.append(node("div", "card-loading-spinner"));
         imageWrap.replaceChildren(loading);
-        let downloadedOtherFaces = false;
+        const searchFace = selectedFace;
         let previewTaskId = null;
+        let pendingCompanions;
         try {
           let previewTask;
-          if (!demoThisCard) {
-          if (resumedPreview) {
+          if (demoThisCard) {
+            previewTask = { result: imageDemoCandidate };
+          } else if (resumedPreview) {
             previewTask = resumedPreview;
             previewTaskId = resumedPreview.task_id;
           } else {
-          const otherMissingFaces = slots.filter(x => x.face_index !== selectedFace && x.status !== "ready");
-          if (otherMissingFaces.length) {
-            for (const face of otherMissingFaces)
-              await postJSON("/api/v2/download", { provider_card_id: card.provider_card_id, face_index: face.face_index });
-            downloadedOtherFaces = true;
-            refreshCurrentCollection();
-          }
-          const started = await postJSON("/api/v2/image/preview", { provider_card_id: card.provider_card_id, face_index: selectedFace });
+          const started = await postJSON("/api/v2/image/preview", { provider_card_id: card.provider_card_id, face_index: searchFace });
           previewTaskId = started.task_id;
           if (!previewTaskId) throw new Error("La recherche n’a pas retourné de tâche.");
           const cancelPreview = node("button", "secondary-button image-search-cancel", "Annuler");
@@ -2711,12 +2723,36 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           loading.append(cancelPreview);
           imageTaskHandlers.set(previewTaskId, { open: () => openImagePreviewTask(previewTaskId) });
           void refreshNotifications();
+          let pollDelay = 300;
           do {
-            await new Promise(resolve => setTimeout(resolve, 900));
+            await new Promise(resolve => setTimeout(resolve, pollDelay));
             previewTask = await getJSON("/api/v2/image/task", { task_id: previewTaskId });
+            pollDelay = Math.min(pollDelay + 150, 900);
           } while (["queued", "running", "cancelling"].includes(previewTask.status));
+          const companions = slots.filter(item => item.face_index !== searchFace && item.status !== "ready");
+          if (previewTask.status !== "cancelled" && companions.length) {
+            pendingCompanions = (async () => {
+              const readySlots = [];
+              try {
+                for (const slot of companions) {
+                  const report = await postJSON("/api/v2/download", { provider_card_id: card.provider_card_id, face_index: slot.face_index });
+                  const result = report.results?.find(item => item.face_index === slot.face_index);
+                  if (result?.status === "ready") {
+                    Object.assign(slot, result);
+                    readySlots.push(result);
+                    if (dialog.open && request === state.cardRequest && selectedFace === slot.face_index && !controls.classList.contains("image-search-pending")) await renderFace();
+                  }
+                }
+              } catch (error) {
+                if (error.code !== "download_busy" && dialog.open && request === state.cardRequest)
+                  controls.append(node("p", "error-state", error.message));
+              } finally {
+                if (readySlots.length) refreshCurrentCollection();
+              }
+              return readySlots;
+            })();
           }
-          } else previewTask = { result: imageDemoCandidate };
+          }
           if (previewTask.status === "cancelled") throw new Error("Recherche annulée.");
           if (previewTask.status === "error") throw new Error(previewTask.detail || "Recherche impossible.");
           const candidate = previewTask.result;
@@ -2727,7 +2763,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           const comparePanel = node("div", "comparison-columns comparison-current-panel");
           const currentImageStage = node("div", "comparison-column-stage");
           const proposedImageStage = node("div", "comparison-column-stage");
-          const currentSlot = slots.find(item => item.face_index === selectedFace);
+          const currentSlot = slots.find(item => item.face_index === searchFace);
           if (currentSlot?.status === "ready" && currentSlot.relative_path) {
             const image = node("img", "comparison-preview"); image.src = `/assets?${params({path: currentSlot.relative_path})}`; image.alt = "Image actuelle"; currentImageStage.append(image);
           } else currentImageStage.append(node("p", "muted", "Aucune image actuelle"));
@@ -2797,7 +2833,27 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           const translationPrompt = $("ai-translation-prompt");
           const translationCancel = $("ai-translation-cancel");
           const translationSend = $("ai-translation-send");
-          const choose = async choice => { if (demoThisCard) { choiceDialog.close(); return; } chooseOld.disabled = chooseNew.disabled = true; try { await postJSON("/api/v2/image/candidate/choose", { candidate_id: candidate.candidate_id, choice, index: selected ?? 0 }); choiceDialog.close(); if (previewTaskId) { imageTaskHandlers.delete(previewTaskId); choiceDialog.removeAttribute("data-preview-task-id"); void refreshNotifications(); } if (choice === "new" || downloadedOtherFaces) { refreshCurrentCollection(); await openCard(card.provider_card_id, context, selectedFace); } } catch (error) { choices.append(node("p", "error-state", error.message)); chooseOld.disabled = false; chooseNew.disabled = selected === null; } };
+          const choose = async choice => {
+            if (demoThisCard) { choiceDialog.close(); return; }
+            chooseOld.disabled = chooseNew.disabled = true;
+            try {
+              await postJSON("/api/v2/image/candidate/choose", { candidate_id: candidate.candidate_id, choice, index: selected ?? 0 });
+              choiceDialog.close();
+              if (previewTaskId) {
+                imageTaskHandlers.delete(previewTaskId);
+                choiceDialog.removeAttribute("data-preview-task-id");
+                void refreshNotifications();
+              }
+              if (choice === "new") {
+                refreshCurrentCollection();
+                await openCard(card.provider_card_id, context, searchFace, null, pendingCompanions);
+              }
+            } catch (error) {
+              choices.append(node("p", "error-state", error.message));
+              chooseOld.disabled = false;
+              chooseNew.disabled = selected === null;
+            }
+          };
           chooseOld.addEventListener("click", () => choose("old")); chooseNew.addEventListener("click", () => choose("new")); choices.append(chooseOld, chooseNew);
           const visualStage = node("div", "comparison-column-stage visual-original-stage");
           const textStage = node("div", "comparison-column-stage text-original-stage");
@@ -3065,8 +3121,7 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
           void refreshNotifications();
         } catch (error) {
           if (dialog.open && request === state.cardRequest) {
-            if (downloadedOtherFaces) { refreshCurrentCollection(); await openCard(card.provider_card_id, context, selectedFace); target.querySelector(".card-image-actions")?.append(node("p", "error-state", error.message)); }
-            else { imageArea.replaceChildren(imageWrap, controls); await renderFace(); controls.append(node("p", "error-state", error.message)); }
+            imageArea.replaceChildren(imageWrap, controls); await renderFace(); controls.append(node("p", "error-state", error.message));
           }
           if (previewTaskId) { imageTaskHandlers.delete(previewTaskId); void refreshNotifications(); }
         } finally { controls.classList.remove("image-search-pending"); loading.querySelector(".image-search-cancel")?.remove(); }
@@ -3181,6 +3236,16 @@ async function openCard(providerId, gallery = null, preferredFace = null, resume
     };
     await renderFace();
     if (request !== state.cardRequest || !dialog.open) return;
+    if (companionDownloads) void companionDownloads.then(async readySlots => {
+      if (request !== state.cardRequest || !dialog.open) return;
+      for (const result of readySlots) {
+        const slot = slots.find(item => item.face_index === result.face_index);
+        if (slot && slot.status !== "ready") {
+          Object.assign(slot, result);
+          if (selectedFace === result.face_index && !controls.classList.contains("image-search-pending")) await renderFace();
+        }
+      }
+    });
     imageArea.append(imageWrap, controls);
     const body = node("div", "card-viewer-body"); body.append(imageArea, details);
     shell.append(header, body); target.replaceChildren(shell); target.classList.remove("card-detail-loading");
@@ -4859,12 +4924,13 @@ const personalDeckFormats = new Map([
     ["historic", "Historique"], ["timeless", "Intemporel"], ["gladiator", "Gladiator"],
     ["brawl", "Brawl"], ["competitivebrawl", "Brawl compétitif"], ["standardbrawl", "Brawl Standard"],
 ]);
-function personalDeckFormatField(value = "commander", { allowUnset = false } = {}) {
-    const field = node("label", "personal-deck-format-field", "Type de deck");
+function personalDeckFormatField(value = null, filter = false) {
+    const field = node("label", filter ? "" : "personal-deck-format-field", filter ? "Format" : "Type de deck");
     const select = node("select");
-    if (allowUnset) select.append(new Option("Sans format", ""));
+    if (filter) select.append(new Option("Tous les formats", "all"));
+    select.append(new Option("Sans format", ""));
     for (const [key, name] of personalDeckFormats) select.append(new Option(name, key));
-    select.value = value ?? "";
+    select.value = value ?? (filter ? "all" : "");
     field.append(select);
     return { field, select };
 }
@@ -5103,7 +5169,8 @@ function renderPersonalList() {
     const orderLabel = node("label", "", "Ordre"), order = node("select");
     order.append(new Option("Décroissant", "desc"), new Option("Croissant", "asc"));
     orderLabel.append(order);
-    orderFields.append(sortLabel, orderLabel);
+    const { field: formatLabel, select: format } = personalDeckFormatField(null, true);
+    orderFields.append(sortLabel, orderLabel, formatLabel);
     refine.append(orderFields);
     filters.append(row, refine);
     const list = node("div", "personal-list-groups");
@@ -5122,6 +5189,7 @@ function renderPersonalList() {
         const query = normalize(name.value);
         const items = decks.filter(deck => {
             if (!normalize(deck.name).includes(query)) return false;
+            if (format.value !== "all" && (deck.format ?? "") !== format.value) return false;
             const current = deck.composition_colors ?? deck.colors ?? [];
             if (colors.includes("C")) return !current.length;
             return colors.every(color => current.includes(color))
@@ -5441,7 +5509,7 @@ function renderPersonalList() {
             list.append(personalButton("Réessayer", () => void load()));
         }
     }
-    for (const select of [mode, sort, order]) select.addEventListener("change", render);
+    for (const select of [mode, sort, order, format]) select.addEventListener("change", render);
     name.addEventListener("input", render);
     void load();
 }
@@ -5464,7 +5532,7 @@ function renderPersonalCreate() {
         back.disabled = true;
         errorBox.hidden = true;
         try {
-            await postJSON("/api/v2/personal-decks/create", { name: name.value.trim(), format: format.value });
+            await postJSON("/api/v2/personal-decks/create", { name: name.value.trim(), format: format.value || null });
             if (form.isConnected) renderPersonalList();
         }
         catch (error) {
@@ -5779,7 +5847,7 @@ function confirmPersonalCardSort(deck, sectionGrids, button) {
 }
 function updatePersonalHeading(deck = null, editButton = null) {
     const [eyebrow, heading] = deckTitleContent(
-        deck ? personalDeckFormats.get(deck.format) ?? "Deck personnel" : "Votre collection de compositions",
+        deck ? personalDeckFormats.get(deck.format) ?? "Sans format" : "Votre collection de compositions",
         deck?.name || "Deck perso",
         deck ? deck.composition_colors ?? deck.colors ?? [] : null,
         "personal-title",
@@ -5958,7 +6026,7 @@ function renderPersonalEditor() {
         design.setAttribute("aria-haspopup", "dialog");
         design.setAttribute("aria-labelledby", `${designLabel.id} ${design.id}`);
         designField.append(designLabel, design);
-        const { field: formatField, select: format } = personalDeckFormatField(editing.format, { allowUnset: true });
+        const { field: formatField, select: format } = personalDeckFormatField(editing.format);
         format.addEventListener("change", () => { editing.format = format.value || null; });
         fields.append(label, designField, formatField, buttons);
         fields.addEventListener("submit", event => {
@@ -6305,9 +6373,9 @@ async function choosePersonalDeck(card) {
         if (!deckName) { report("Saisissez un nom de deck.", true); name.focus(); return; }
         setBusy(true);
         try {
-            const { deck } = await postJSON("/api/v2/personal-decks/create", { name: deckName, format: format.value });
+            const { deck } = await postJSON("/api/v2/personal-decks/create", { name: deckName, format: format.value || null });
             name.value = "";
-            format.value = "commander";
+            format.value = "";
             nameLabel.hidden = formatField.hidden = true;
             create.textContent = "Créer un deck";
             create.setAttribute("aria-expanded", "false");

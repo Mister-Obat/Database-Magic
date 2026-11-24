@@ -78,7 +78,9 @@ body { background: #0e0d15; }
 .catalogue-view,
 .notification-panel,
 :where(#ai-batch-panel),
-body > .custom-select-menu {
+body > .custom-select-menu,
+.personal-add-picker .personal-deck-format-field,
+.personal-add-picker > .custom-select-menu {
   --ink: #f2effb;
   --muted: #bdb8cf;
   --panel: #1c1928;
@@ -107,7 +109,8 @@ body > .custom-select-menu {
   box-shadow: inset 0 1px #e0ceff2b, 0 9px 28px #06050e55;
 }
 .catalogue-view :is(.search-form, .maintenance-panel) :is(input, select, textarea, .custom-select-button),
-.catalogue-view :is(.deck-card-open, .list-import-unmatched, .search-header-button) {
+.catalogue-view :is(.deck-card-open, .list-import-unmatched, .search-header-button),
+.personal-deck-format-field :is(select, .custom-select-button) {
   background-color: #14121e;
   border-color: var(--line);
 }
@@ -117,7 +120,8 @@ body > .custom-select-menu {
 .catalogue-view :is(input, textarea)::placeholder { color: #938ba7; opacity: 1; }
 .catalogue-view .search-header-button:disabled .search-icon { color: inherit; }
 .catalogue-view .edition-suggestions,
-body > .custom-select-menu {
+body > .custom-select-menu,
+.personal-add-picker > .custom-select-menu {
   background: #211c30;
   border-color: var(--line);
 }
@@ -1778,7 +1782,7 @@ body.personal-deck-drag-active * {
   grid-template-columns:minmax(12rem,1fr) minmax(0,1.35fr);
 }
 #view-perso .catalogue-refine-fields {
-  grid-template-columns:repeat(2,minmax(0,14rem));
+  grid-template-columns:repeat(3,minmax(0,14rem));
 }
 .personal-list-entry {
   position:relative;
@@ -1837,14 +1841,14 @@ body.personal-deck-drag-active * {
   font-size:.875rem;
   margin-top:auto;
 }
-.personal-deck-field-actions{display:flex;gap:.55rem;flex-wrap:wrap;margin-left:auto}
+.personal-deck-field-actions{display:flex;gap:.55rem;flex-wrap:wrap}
 .personal-deck-format-field:not([hidden]) {
   color:var(--muted);
   font-size:.9rem;
 }
 #view-perso .personal-deck-fields .personal-deck-field-actions {
   flex-basis:100%;
-  justify-content:flex-end;
+  justify-content:center;
 }
 #view-perso .deck-card-tile {
   background:#1c1928;
@@ -1914,7 +1918,9 @@ body.personal-deck-drag-active * {
   color:#faf5ff;
 }
 @media(max-width:760px) {
-  #view-perso .personal-filter-row { grid-template-columns:minmax(0,1fr); }
+  #view-perso :is(.personal-filter-row,.catalogue-refine-fields) {
+    grid-template-columns:minmax(0,1fr);
+  }
 }
 
 #view-perso .personal-card-placeholder {
